@@ -501,6 +501,33 @@ To complete this check, start a browser with remote debugging, sign in at
 `https://opencsitool.com/myTools`, and run `opencsi doctor` followed by
 `opencsi usage`.
 
+### A dedicated-profile control (adds positive CDP evidence, not more)
+
+To test the README's claim that a *dedicated* profile recovers remote debugging
+— the exact case the user's default-profile Chrome 153 refuses — a fresh
+Chrome 153.0.8010.50 was started on a throwaway profile with
+`--remote-debugging-port`. It served:
+
+```
+GET http://127.0.0.1:9333/json/version
+  -> "Browser": "Chrome/153.0.8010.50"
+  -> webSocketDebuggerUrl present
+GET http://127.0.0.1:9333/json/list
+  -> a page target with a usable per-page webSocketDebuggerUrl
+```
+
+This confirms, live, the discovery path the provider uses and that the
+WebSocket upgrade this Chrome *offers* is reachable — the thing the default
+profile blocks. The provider's own in-process test (`test_cdp.py`, 50 tests
+against a fake DevTools server over real sockets) covers the cookie read and
+the `Network.getCookies` round-trip.
+
+**It does not, by itself, prove an end-to-end authenticated query**, because no
+openCsiTool session cookie exists to find. And the control browser was
+disposable: the experiment held it open only as long as needed, then it was
+closed. The authenticated live query therefore remains honestly **blocked by
+environment**, exactly as §7 states.
+
 ---
 
 ## 8. Security review

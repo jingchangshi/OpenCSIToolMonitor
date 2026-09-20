@@ -51,3 +51,5 @@ _demo*.py
 _demo_shim/
 _try.py
 _o*.txt
+_evidence_*.py
+_ev.txt
