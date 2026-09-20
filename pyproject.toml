@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencsi"
+version = "0.1.0"
+description = "Standalone read-only CLI client for openCsiTool \"My Tools\" (我的工具)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "opencsi contributors" }]
+keywords = ["opencsitool", "cli", "read-only", "cdp", "token-usage"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+]
+
+# Zero runtime dependencies: pure standard library.
+# This is deliberate -- the tool must run anywhere Python 3.10+ exists,
+# including air-gapped Windows machines with no package index access.
+dependencies = []
+
+[project.optional-dependencies]
+# Optional: only needed if you want to run the test suite with pytest.
+# The suite also runs on the standard library's unittest runner.
+test = ["pytest>=7"]
+
+[project.scripts]
+opencsi = "opencsi.cli.app:main"
+
+[project.urls]
+Documentation = "https://opencsitool.com/myTools"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["opencsi*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

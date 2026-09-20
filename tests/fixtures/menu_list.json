@@ -1,0 +1,259 @@
+[
+  {
+    "children": null,
+    "key": "home",
+    "name": "首页",
+    "open": true,
+    "tabs": null,
+    "type": "DEFAULT",
+    "url": null
+  },
+  {
+    "children": [
+      {
+        "children": null,
+        "key": "ai_tool_application",
+        "name": "工具申请",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "ai_tool_queue_status",
+        "name": "排队情况",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "ai_tool_my_tools",
+        "name": "我的工具",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "ai_tool_wish_wall",
+        "name": "AI工具采购心愿墙",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "zhongjing_data_pipeline",
+        "name": "数据流水线",
+        "open": true,
+        "tabs": null,
+        "type": "HYPERLINK",
+        "url": "https://opencsitool.com/zhongjing/data/console/dashboard"
+      }
+    ],
+    "key": "ai_tool",
+    "name": "AI工具",
+    "open": false,
+    "tabs": null,
+    "type": "DEFAULT",
+    "url": null
+  },
+  {
+    "children": [
+      {
+        "children": null,
+        "key": "skill_market_ecosystem",
+        "name": "生态广场",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "skill_market_generation",
+        "name": "Skill自生成",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "skill_market_evaluation",
+        "name": "Skill能力评测",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "skill_market_management",
+        "name": "我的Skill",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "skillinsight",
+        "name": "Skill-insight",
+        "open": true,
+        "tabs": null,
+        "type": "INLINE_LINK",
+        "url": "https://opencsitool.com/skill-insight"
+      }
+    ],
+    "key": "skill_market",
+    "name": "Skill市场",
+    "open": false,
+    "tabs": null,
+    "type": "DEFAULT",
+    "url": null
+  },
+  {
+    "children": [
+      {
+        "children": null,
+        "key": "project_management_overall_progress",
+        "name": "整体进展",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "requirement_management_list",
+        "name": "需求管理",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "iteration_evaluation_progress",
+        "name": "迭代进展",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "dev_dashboard_code_contribution",
+        "name": "代码贡献",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "dev_dashboard_build",
+        "name": "构建看板",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "dev_dashboard_code_check",
+        "name": "代码检查",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "dev_dashboard_test_quality",
+        "name": "测试质量",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "dev_dashboard_release",
+        "name": "发布管理",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "dev_dashboard_security_compliance",
+        "name": "安全合规",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      },
+      {
+        "children": null,
+        "key": "dev_dashboard_vod_management",
+        "name": "VOD管理",
+        "open": true,
+        "tabs": null,
+        "type": "DEFAULT",
+        "url": null
+      }
+    ],
+    "key": "dev_dashboard",
+    "name": "研发看板",
+    "open": false,
+    "tabs": null,
+    "type": "DEFAULT",
+    "url": null
+  },
+  {
+    "children": [
+      {
+        "children": null,
+        "key": "system_settings_project",
+        "name": "项目管理",
+        "open": true,
+        "tabs": [
+          {
+            "children": null,
+            "key": "project_config_basic_info",
+            "name": "基本信息",
+            "open": true,
+            "tabs": null,
+            "type": "DEFAULT",
+            "url": null
+          },
+          {
+            "children": null,
+            "key": "project_config_member_role",
+            "name": "成员角色",
+            "open": true,
+            "tabs": null,
+            "type": "DEFAULT",
+            "url": null
+          }
+        ],
+        "type": "DEFAULT",
+        "url": null
+      }
+    ],
+    "key": "system_settings",
+    "name": "系统设置",
+    "open": false,
+    "tabs": null,
+    "type": "DEFAULT",
+    "url": null
+  }
+]

@@ -1,0 +1,393 @@
+{
+  "code": 200,
+  "data": {
+    "userId": "0dd935e8d2234014a215aa922417094c",
+    "boundEmployeeId": "653124",
+    "requestList": [
+      {
+        "id": 5593,
+        "applicationNumber": "REQ202608170007",
+        "requestType": "API_BUNDLE",
+        "queuePosition": 0,
+        "estimatedWaitTime": "-",
+        "waitDays": 0,
+        "createTime": "2026-08-17 16:28:00",
+        "remark": "开发AscendNPU IR",
+        "status": 1,
+        "accountName": "AI编程助手-002",
+        "aiToolName": null,
+        "employeeId": "00653124",
+        "issueDate": "2026-08-17",
+        "tokenUsage": 1400103232,
+        "requestCount": 10816,
+        "lastUsedDate": "2026-09-19 00:00:00",
+        "prCount": 82,
+        "addedLinesCount": 10389,
+        "issueCount": 0,
+        "generatedCodeLines": 0,
+        "adoptedCodeLines": 0,
+        "virtualKey": "sk-bM4LUSmEXAMPLE00000000"
+      },
+      {
+        "id": 1954,
+        "applicationNumber": "REQ202604160010",
+        "requestType": "TRAE",
+        "queuePosition": 0,
+        "estimatedWaitTime": "-",
+        "waitDays": 6,
+        "createTime": "2026-04-16 12:33:22",
+        "remark": "开发AscendNPU IR及Triton",
+        "status": 1,
+        "accountName": "AI编程助手-001",
+        "aiToolName": null,
+        "employeeId": "00653124",
+        "issueDate": "2026-04-22",
+        "tokenUsage": 260924535,
+        "requestCount": 0,
+        "lastUsedDate": "2026-08-14 00:00:00",
+        "prCount": 82,
+        "addedLinesCount": 10389,
+        "issueCount": 0,
+        "generatedCodeLines": 3150,
+        "adoptedCodeLines": 120,
+        "virtualKey": null
+      },
+      {
+        "id": 1094,
+        "applicationNumber": "REQ202603090022",
+        "requestType": "API_BUNDLE",
+        "queuePosition": 0,
+        "estimatedWaitTime": "-",
+        "waitDays": 8,
+        "createTime": "2026-03-09 14:53:52",
+        "remark": "AscendNPU IR及Triton开发",
+        "status": 2,
+        "accountName": "AI编程助手-001",
+        "aiToolName": null,
+        "employeeId": "00653124",
+        "issueDate": "2026-03-17",
+        "tokenUsage": 1400103232,
+        "requestCount": 10816,
+        "lastUsedDate": "2026-09-19 00:00:00",
+        "prCount": 82,
+        "addedLinesCount": 10389,
+        "issueCount": 0,
+        "generatedCodeLines": 0,
+        "adoptedCodeLines": 0,
+        "virtualKey": null
+      }
+    ],
+    "tokenSummary": {
+      "totalTokens": 3061130999,
+      "totalRequestCount": 21632
+    },
+    "tokenTrend": [
+      {
+        "date": "2026-08-20",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 50817356,
+        "promptTokens": 50590638,
+        "completionTokens": 226718
+      },
+      {
+        "date": "2026-08-21",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 13139463,
+        "promptTokens": 13015742,
+        "completionTokens": 123721
+      },
+      {
+        "date": "2026-08-22",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 52852397,
+        "promptTokens": 52746053,
+        "completionTokens": 106344
+      },
+      {
+        "date": "2026-08-24",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 51552654,
+        "promptTokens": 51073752,
+        "completionTokens": 478902
+      },
+      {
+        "date": "2026-08-25",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 50978255,
+        "promptTokens": 50944768,
+        "completionTokens": 33487
+      },
+      {
+        "date": "2026-08-26",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 4177258,
+        "promptTokens": 4112934,
+        "completionTokens": 64324
+      },
+      {
+        "date": "2026-08-27",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 12417202,
+        "promptTokens": 12264306,
+        "completionTokens": 152896
+      },
+      {
+        "date": "2026-08-28",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 26871434,
+        "promptTokens": 26743007,
+        "completionTokens": 128427
+      },
+      {
+        "date": "2026-08-29",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 16249534,
+        "promptTokens": 15960857,
+        "completionTokens": 288677
+      },
+      {
+        "date": "2026-08-30",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 5711509,
+        "promptTokens": 5592441,
+        "completionTokens": 119068
+      },
+      {
+        "date": "2026-08-31",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 50084192,
+        "promptTokens": 49525673,
+        "completionTokens": 558519
+      },
+      {
+        "date": "2026-09-01",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 50331828,
+        "promptTokens": 49945752,
+        "completionTokens": 386076
+      },
+      {
+        "date": "2026-09-02",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 22096929,
+        "promptTokens": 21995747,
+        "completionTokens": 101182
+      },
+      {
+        "date": "2026-09-02",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 6484432,
+        "promptTokens": 6390066,
+        "completionTokens": 94366
+      },
+      {
+        "date": "2026-09-03",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 47986288,
+        "promptTokens": 47784000,
+        "completionTokens": 202288
+      },
+      {
+        "date": "2026-09-04",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 38870971,
+        "promptTokens": 38524121,
+        "completionTokens": 346850
+      },
+      {
+        "date": "2026-09-05",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 83702878,
+        "promptTokens": 83222096,
+        "completionTokens": 480782
+      },
+      {
+        "date": "2026-09-06",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 57283946,
+        "promptTokens": 56838397,
+        "completionTokens": 445549
+      },
+      {
+        "date": "2026-09-07",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 219023008,
+        "promptTokens": 218161361,
+        "completionTokens": 861647
+      },
+      {
+        "date": "2026-09-08",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 139567974,
+        "promptTokens": 138677473,
+        "completionTokens": 890501
+      },
+      {
+        "date": "2026-09-09",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 129801212,
+        "promptTokens": 128727228,
+        "completionTokens": 1073984
+      },
+      {
+        "date": "2026-09-10",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 2402528,
+        "promptTokens": 2369794,
+        "completionTokens": 32734
+      },
+      {
+        "date": "2026-09-11",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 92144349,
+        "promptTokens": 91681896,
+        "completionTokens": 462453
+      },
+      {
+        "date": "2026-09-12",
+        "requestType": "GLM_5_3",
+        "tokens": 394120,
+        "promptTokens": 394040,
+        "completionTokens": 80
+      },
+      {
+        "date": "2026-09-12",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 25078388,
+        "promptTokens": 24930649,
+        "completionTokens": 147739
+      },
+      {
+        "date": "2026-09-13",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 238,
+        "promptTokens": 57,
+        "completionTokens": 181
+      },
+      {
+        "date": "2026-09-14",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 19422093,
+        "promptTokens": 19325665,
+        "completionTokens": 96428
+      },
+      {
+        "date": "2026-09-14",
+        "requestType": "GLM_5_3",
+        "tokens": 19966,
+        "promptTokens": 18907,
+        "completionTokens": 1059
+      },
+      {
+        "date": "2026-09-14",
+        "requestType": "DEEPSEEK_V4_PRO",
+        "tokens": 59468,
+        "promptTokens": 56995,
+        "completionTokens": 2473
+      },
+      {
+        "date": "2026-09-15",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 4817798,
+        "promptTokens": 4783429,
+        "completionTokens": 34369
+      },
+      {
+        "date": "2026-09-15",
+        "requestType": "QWEN3_8_FLASH",
+        "tokens": 504546,
+        "promptTokens": 497634,
+        "completionTokens": 6912
+      },
+      {
+        "date": "2026-09-15",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 15649942,
+        "promptTokens": 15528801,
+        "completionTokens": 121141
+      },
+      {
+        "date": "2026-09-16",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 5517174,
+        "promptTokens": 5416155,
+        "completionTokens": 101019
+      },
+      {
+        "date": "2026-09-17",
+        "requestType": "QWEN3_8_FLASH",
+        "tokens": 6548592,
+        "promptTokens": 6403779,
+        "completionTokens": 144813
+      },
+      {
+        "date": "2026-09-17",
+        "requestType": "GLM_5_3",
+        "tokens": 16043,
+        "promptTokens": 15597,
+        "completionTokens": 446
+      },
+      {
+        "date": "2026-09-17",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 7103803,
+        "promptTokens": 6945998,
+        "completionTokens": 157805
+      },
+      {
+        "date": "2026-09-17",
+        "requestType": "DEEPSEEK_V4_PRO",
+        "tokens": 160697,
+        "promptTokens": 133360,
+        "completionTokens": 27337
+      },
+      {
+        "date": "2026-09-18",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 55640524,
+        "promptTokens": 55335756,
+        "completionTokens": 304768
+      },
+      {
+        "date": "2026-09-18",
+        "requestType": "DEEPSEEK_V4_FLASH_0731",
+        "tokens": 26592,
+        "promptTokens": 26297,
+        "completionTokens": 295
+      },
+      {
+        "date": "2026-09-18",
+        "requestType": "DEEPSEEK_V4_PRO",
+        "tokens": 14186,
+        "promptTokens": 13895,
+        "completionTokens": 291
+      },
+      {
+        "date": "2026-09-18",
+        "requestType": "GLM_5_3",
+        "tokens": 12864,
+        "promptTokens": 12660,
+        "completionTokens": 204
+      },
+      {
+        "date": "2026-09-19",
+        "requestType": "GLM_5_3_FLASH",
+        "tokens": 32439755,
+        "promptTokens": 32327889,
+        "completionTokens": 111866
+      }
+    ],
+    "syncStatus": {
+      "dataFreshTime": "2026-09-19T21:40:27+08:00",
+      "etlTime": "2026-09-20T05:39:58+08:00",
+      "replicationTime": "2026-09-19T21:40:30+08:00"
+    },
+    "tokenBudget": {
+      "exists": false,
+      "maxBudget": null,
+      "budgetDuration": null,
+      "spend": null
+    }
+  },
+  "message": "success"
+}

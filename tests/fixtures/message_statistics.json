@@ -1,0 +1,29 @@
+{
+  "sourceStatistics": [
+    {
+      "messageCount": 0,
+      "messageSource": "SYSTEM_ANNOUNCEMENT",
+      "messageSourceName": "系统公告",
+      "showInTopRight": 1,
+      "unreadCount": 0
+    },
+    {
+      "messageCount": 0,
+      "messageSource": "MENTION_ME",
+      "messageSourceName": "@我的",
+      "showInTopRight": 1,
+      "unreadCount": 0
+    },
+    {
+      "messageCount": 0,
+      "messageSource": "SKILL_MARKET",
+      "messageSourceName": "SKILL市场",
+      "showInTopRight": 0,
+      "unreadCount": 0
+    }
+  ],
+  "statusStatistics": {
+    "totalCount": 0,
+    "unreadCount": 0
+  }
+}

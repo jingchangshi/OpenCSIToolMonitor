@@ -1,0 +1,50 @@
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+
+# ── test / tooling caches ─────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── editor / OS ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── local credentials and outputs ─────────────────────────────────────────
+# Never commit a captured cookie, a full virtual key, or a CLI output dump.
+*.cookie
+*.token
+*.secret
+opencsi-*.json
+!tests/fixtures/*.json
+
+# ── investigation scratch (kept on disk, not part of the tool) ────────────
+# bh/ holds the Browser Use exploration scripts used during the API
+# investigation. They are deliberately not part of this repository: the whole
+# point of the delivered tool is that it needs no browser-automation runtime.
+bh/
+ref/
+js/
+capture/
+
+# ── scratch harnesses ─────────────────────────────────────────────────────
+# Throwaway probe scripts used to verify behaviour against the live site.
+_smoke_*.py
+_online.py
+_tls*.py
+_probe_*.py
+_op*.py
+_demo*.py

@@ -1,0 +1,38 @@
+{
+  "threePartyUserInfo": {
+    "id": 150,
+    "accountId": "680a24c143c294728be7bca3",
+    "accountLogin": "shijingchang",
+    "accountName": "shijingchang",
+    "accountPlatform": "gitcode",
+    "userId": "0dd935e8d2234014a215aa922417094c",
+    "createTime": "2026-03-04 16:43:15",
+    "updateTime": "2026-09-19 21:40:28",
+    "email": null,
+    "avatarUrl": null
+  },
+  "user": {
+    "id": "0dd935e8d2234014a215aa922417094c",
+    "userEmail": "shijingchang@huawei.com",
+    "userName": "shijingchang",
+    "employeeId": "653124",
+    "createTime": "2026-03-04 16:43:15",
+    "deleteFlag": 0,
+    "deleteDate": null,
+    "lastLoginTime": "2026-09-19 16:48:44",
+    "currentLoginTime": "2026-09-19 21:40:28",
+    "currentLoginIp": "124.70.231.55",
+    "lastLoginIp": "124.70.231.55",
+    "currentLoginPlatform": "gitcode",
+    "lastLoginPlatform": "gitcode",
+    "accountId": null,
+    "currentOrganizationId": "fba54d1682e841d196d823b4b548c4b9",
+    "currentRoleView": "Normal",
+    "currentOrganizationName": "体验项目",
+    "currentRoleViewName": "普通用户",
+    "avatarUrl": "https://cdn-static.gitcode.com/doc/avatar-4.png",
+    "isSystem": false,
+    "gitcodeDefaultEmailBound": false,
+    "roles": null
+  }
+}
