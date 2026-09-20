@@ -113,12 +113,25 @@ def redact_mapping(data: Any, *, _depth: int = 0) -> Any:
     Used before emitting ``--json`` output so that a future field addition
     cannot leak a credential through the serialiser.
 
-    Keys whose name contains a sensitive token are replaced by :data:`MASK`;
-    everything else is preserved so scripts keep working.
+    The rule is keyed on both the **name** and the **value type**, because name
+    matching alone is too blunt in both directions:
+
+    * A credential is always a **string**. So a credential-ish key holding a
+      number, list or object is describing data, not holding a secret:
+      ``total_tokens: 3061130999``, ``token_trend: [...]``,
+      ``token_budget: {...}``. Masking those made ``usage --json`` useless --
+      it hid the headline number the command exists to report.
+    * A credential-ish key holding a **string** is masked, and a container is
+      recursed into so a secret nested deeper is still caught by its own key or
+      by the value patterns in :func:`scrub_text`.
+
+    Anything whose name looks credential-ish but whose shape is unfamiliar is
+    therefore still handled: strings are masked, containers are walked.
     """
     if _depth > 12:
         return MASK
-    #: Key names that hold a secret *value*.
+    #: Key names that hold a secret *value*. Matched as substrings, so
+    #: ``access_token`` and ``refreshToken`` are covered too.
     sensitive = (
         "token",
         "cookie",
@@ -136,6 +149,11 @@ def redact_mapping(data: Any, *, _depth: int = 0) -> Any:
     #: became the string "<redacted>"), so these recurse instead. A real secret
     #: nested inside is still caught by its own key or by the value patterns.
     containers = ("credential", "credentials")
+
+    def credentialish(key: str) -> bool:
+        flat = key.replace("-", "").replace("_", "").lower()
+        return any(tok.replace("_", "") in flat for tok in sensitive)
+
     if isinstance(data, dict):
         out: dict[Any, Any] = {}
         for k, v in data.items():
@@ -146,8 +164,17 @@ def redact_mapping(data: Any, *, _depth: int = 0) -> Any:
                     out[k] = redact_mapping(v, _depth=_depth + 1)
                 else:
                     out[k] = MASK
-            elif any(tok.replace("_", "") in flat for tok in sensitive):
-                out[k] = MASK
+            elif credentialish(key):
+                if isinstance(v, (dict, list, tuple)):
+                    # Recurse: the container is structure, its leaves are
+                    # individually judged.
+                    out[k] = redact_mapping(v, _depth=_depth + 1)
+                elif isinstance(v, str):
+                    out[k] = MASK
+                else:
+                    # A number, bool or None under a credential-ish name is a
+                    # count or a flag, not a credential.
+                    out[k] = v
             else:
                 out[k] = redact_mapping(v, _depth=_depth + 1)
         return out

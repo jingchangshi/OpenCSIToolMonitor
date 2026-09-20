@@ -194,6 +194,61 @@ class MappingRedactionTest(unittest.TestCase):
         out = redact_mapping(deep)
         self.assertIsInstance(out, dict)
 
+    def test_data_under_a_credential_ish_name_survives(self) -> None:
+        """A credential is a string; a count is not.
+
+        Matching on the key name alone masked every field whose name merely
+        *contains* "token", which in this API means the headline numbers:
+        `total_tokens`, `token_trend`, `token_budget`, `tokens_by_request_type`.
+        `usage --json` therefore reported `<redacted>` for the one figure the
+        command exists to show. Name matching is now combined with value type.
+        """
+        data = {
+            "total_tokens": 3061130999,
+            "tokens_by_request_type": {"TRAE": 260924535},
+            "token_trend": [{"tokens": 5}],
+            "token_budget": {"max_budget": 100},
+            "token_count": 42,
+        }
+        out = redact_mapping(data)
+        self.assertEqual(out["total_tokens"], 3061130999)
+        self.assertEqual(out["tokens_by_request_type"], {"TRAE": 260924535})
+        self.assertEqual(out["token_trend"], [{"tokens": 5}])
+        self.assertEqual(out["token_budget"], {"max_budget": 100})
+        self.assertEqual(out["token_count"], 42)
+        self.assertNotIn(MASK, json.dumps(out))
+
+    def test_a_string_under_a_credential_ish_name_is_still_masked(self) -> None:
+        """Loosening by value type must not loosen by name."""
+        for key in (
+            "token",
+            "access_token",
+            "refreshToken",
+            "virtualKey",
+            "api_key",
+            "cookie",
+            "Set-Cookie",
+            "authorization",
+            "secret",
+            "password",
+        ):
+            with self.subTest(key=key):
+                out = redact_mapping({key: KEY_LIKE})
+                self.assertEqual(out[key], MASK, f"{key} must still be masked")
+
+    def test_a_secret_nested_in_a_token_ish_container_is_still_masked(self) -> None:
+        """Recursing into a container must not lose the leaves."""
+        out = redact_mapping(
+            {"token_summary": {"totalTokens": 5, "token": KEY_LIKE}}
+        )
+        self.assertEqual(out["token_summary"]["totalTokens"], 5)
+        self.assertEqual(out["token_summary"]["token"], MASK)
+
+    def test_none_and_bools_are_not_mistaken_for_secrets(self) -> None:
+        out = redact_mapping({"token_budget": None, "token_flag": True})
+        self.assertIsNone(out["token_budget"])
+        self.assertIs(out["token_flag"], True)
+
 
 class SecretObjectTest(unittest.TestCase):
     """The ``Secret`` wrapper never reveals itself accidentally."""

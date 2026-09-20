@@ -1,11 +1,11 @@
 ========================================================================
-end-to-end demo against http://127.0.0.1:64902 (fixtures replayed over a real socket)
+end-to-end demo against http://127.0.0.1:62768 (fixtures replayed over a real socket)
 ========================================================================
 
 $ opencsi status
 ------------------------------------------------------------------------
 == openCsiTool session ==
-API origin           : http://127.0.0.1:64902
+API origin           : http://127.0.0.1:62768
 Credential source    : manual
 Credential available : yes
 Cookie lifetime left : -
@@ -55,7 +55,7 @@ TRAE        TRAE           2.6亿   8.5%
 Data fresh time (server) : 2026-09-19T21:40:27+08:00
 ETL time                 : 2026-09-20T05:39:58+08:00
 Replication time         : 2026-09-19T21:40:30+08:00
-Fetched at (this run)    : 2026-09-20 01:25:17
+Fetched at (this run)    : 2026-09-20 01:29:30
 Trend window             : all dates (server default)
 [exit 0]
 
@@ -107,7 +107,7 @@ No call log records.
 $ opencsi doctor --skip-contract
 ------------------------------------------------------------------------
 == opencsi doctor (0.1.0) ==
-API origin : http://127.0.0.1:64902
+API origin : http://127.0.0.1:62768
 User-Agent : opencsi-cli/0.1.0
 
 [ok]   python: 3.14.6 on Windows 11
