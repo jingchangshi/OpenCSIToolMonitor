@@ -1,0 +1,123 @@
+========================================================================
+end-to-end demo against http://127.0.0.1:64902 (fixtures replayed over a real socket)
+========================================================================
+
+$ opencsi status
+------------------------------------------------------------------------
+== openCsiTool session ==
+API origin           : http://127.0.0.1:64902
+Credential source    : manual
+Credential available : yes
+Cookie lifetime left : -
+Session valid        : yes
+
+== Signed in as ==
+Display name : shijingchang
+Login        : shijingchang
+Employee ID  : 653124
+User ID      : 0dd935e8d2234014a215aa922417094c
+Organization : 体验项目
+Role view    : 普通用户
+Roles        : VISITOR
+[exit 0]
+
+$ opencsi tools
+------------------------------------------------------------------------
+  ID  Request No.      Type        Account         Status  Tokens  Key
+----  ---------------  ----------  --------------  ------  ------  --------------
+5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿  sk-bM4LUSm****
+1954  REQ202604160010  TRAE        AI编程助手-001  使用中   2.6亿  -
+1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿  -
+
+3 account(s): 2 使用中, 1 已失效
+[exit 0]
+
+$ opencsi usage
+------------------------------------------------------------------------
+== Personal data overview ==
+Total tokens         : 30.6亿
+Total tokens (exact) : 3,061,130,999
+Total requests       : 2.2万
+Pull requests        : 246
+Added lines          : 3.1万
+Generated code lines : 3150
+Adopted code lines   : 120
+Adoption rate        : 3.8% (120/3,150)
+Tool accounts        : 3 (2 使用中 / 1 已失效)
+
+== Tokens by tool ==
+Type        Display name  Tokens  Share
+----------  ------------  ------  -----
+API_BUNDLE  API_BUNDLE    28.0亿  91.5%
+TRAE        TRAE           2.6亿   8.5%
+
+== Data freshness ==
+Data fresh time (server) : 2026-09-19T21:40:27+08:00
+ETL time                 : 2026-09-20T05:39:58+08:00
+Replication time         : 2026-09-19T21:40:30+08:00
+Fetched at (this run)    : 2026-09-20 01:25:17
+Trend window             : all dates (server default)
+[exit 0]
+
+$ opencsi trend
+------------------------------------------------------------------------
+== Token trend by model ==
+Key                     Display name             Tokens  Share
+----------------------  ----------------------  -------  -----
+GLM_5_3_FLASH           GLM-5.3-Flash             9.7亿  69.6%
+DEEPSEEK_V4_FLASH_0731  DeepSeek-V4-Flash-0731    4.2亿  29.9%
+QWEN3_8_FLASH           Qwen3.8-Flash           705.3万   0.5%
+GLM_5_3                 GLM-5.3                  44.3万   0.0%
+DEEPSEEK_V4_PRO         DeepSeek-V4-Pro          23.4万   0.0%
+
+42 sample(s) across 30 date(s) and 5 model(s); series total 14.0亿 tokens.
+[exit 0]
+
+$ opencsi prices
+------------------------------------------------------------------------
+Request type            Display name            Bill   Mode     Blended  In  Out  Monthly
+----------------------  ----------------------  -----  -------  -------  --  ---  -------
+TRAE                    Trae                    FLAT   SPLIT          -   -    -  ¥200.00
+DEEPSEEK_V4_FLASH_0731  DeepSeek-V4-Flash-0731  TOKEN  BLENDED     0.28   0    0        -
+DEEPSEEK_V4_PRO         DeepSeek-V4-Pro         TOKEN  BLENDED     0.99   0    0        -
+DOUBAO_SEED_2_1_PRO     Doubao-Seed-2.1-Pro     TOKEN  BLENDED     1.85   0    0        -
+GLM_5_2                 GLM 5.2                 TOKEN  BLENDED     1.46   0    0        -
+GLM_5_3                 GLM-5.3                 TOKEN  BLENDED     1.95   0    0        -
+GLM_5_3_FLASH           GLM-5.3-Flash           TOKEN  BLENDED     0.22   0    0        -
+KIMI_K2_7_CODE          kimi-k2.7-code          TOKEN  BLENDED     1.94   0    0        -
+KIMI_K3                 kimi-k3                 TOKEN  BLENDED     4.51   0    0        -
+MINIMAX_M3              MiniMax-M3              TOKEN  BLENDED     1.47   0    0        -
+QWEN3_7_MAX             Qwen3.7 Max             TOKEN  BLENDED     2.64   0    0        -
+QWEN3_7_PLUS            Qwen3.7 Plus            TOKEN  BLENDED     0.59   0    0        -
+QWEN3_8_FLASH           Qwen3.8-Flash           TOKEN  BLENDED     0.19   0    0        -
+
+13 row(s) shown of 20 (13 enabled).
+[stderr] note: 'Blended/In/Out' are per 1,000,000 tokens; 'Monthly' is a flat subscription fee, not a token price.
+[exit 0]
+
+$ opencsi logs
+------------------------------------------------------------------------
+== LLM gateway call logs ==
+page 1  size 20  total 0  shown 0
+
+No call log records.
+[stderr] note: an empty log is normal when usage is billed through a bundled tool rather than the LLM gateway.
+[exit 0]
+
+$ opencsi doctor --skip-contract
+------------------------------------------------------------------------
+== opencsi doctor (0.1.0) ==
+API origin : http://127.0.0.1:64902
+User-Agent : opencsi-cli/0.1.0
+
+[ok]   python: 3.14.6 on Windows 11
+[warn] devtools endpoint: provider does not use CDP
+[ok]   credential: source=manual
+[ok]   session: shijingchang (employeeId=653124)
+
+All checks passed, 1 warning(s).
+[exit 0]
+
+========================================================================
+Every path the CLI requested had a fixture.
+7/7 commands exited 0.

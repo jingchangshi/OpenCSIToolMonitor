@@ -48,3 +48,4 @@ _tls*.py
 _probe_*.py
 _op*.py
 _demo*.py
+_demo_shim/
