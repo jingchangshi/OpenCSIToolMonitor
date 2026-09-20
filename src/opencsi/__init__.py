@@ -2,8 +2,8 @@
 
 Public API
 ----------
->>> from opencsi import OpenCsiToolClient, ManualCookieProvider
->>> with OpenCsiToolClient(ManualCookieProvider(cookie)) as client:
+>>> from opencsi import OpenCsiToolClient, CdpCookieProvider
+>>> with OpenCsiToolClient(CdpCookieProvider()) as client:
 ...     snapshot = client.get_my_tools()
 ...     print(snapshot.total_tokens)
 
@@ -14,7 +14,14 @@ authenticated openCsiTool session. It is not an official public API client.
 from __future__ import annotations
 
 from .aggregation import CostEstimate, CostLine, Summary, estimate_usage_cost, summarise
-from .auth import CredentialProvider, CredentialStatus, ManualCookieProvider
+from .auth import (
+    CdpCookieProvider,
+    CdpEndpoint,
+    CredentialProvider,
+    CredentialStatus,
+    ManualCookieProvider,
+    discover_cdp_endpoint,
+)
 from .client import OpenCsiToolClient
 from .errors import (
     BadAuthHeaderError,
@@ -50,7 +57,10 @@ __all__ = [
     # auth
     "CredentialProvider",
     "CredentialStatus",
+    "CdpCookieProvider",
+    "CdpEndpoint",
     "ManualCookieProvider",
+    "discover_cdp_endpoint",
     # models
     "Identity",
     "ModelPrice",
