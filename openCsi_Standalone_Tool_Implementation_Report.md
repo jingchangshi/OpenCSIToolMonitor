@@ -112,7 +112,7 @@ the boundary down because the split is not self-evident:
 | `HttpTransport` | Returns a `Response` for **any** HTTP status. Raises only for transport-level trouble (connection refused, unparseable body). Retries 502/503/504, never 4xx. |
 | `OpenCsiToolClient` | Maps a status onto a documented exception and enforces the business envelope. |
 
-### Module inventory (28 modules, 5,345 lines)
+### Module inventory (28 modules, 6,245 lines)
 
 ```
 src/opencsi/
@@ -610,7 +610,9 @@ Later commits update this report and the README to match the code; they change
 no behaviour. Listing a commit count here would make this section wrong every
 time it was corrected, so `git log` is the source of truth for that.
 
-28 source modules and 5,345 lines of library code, 3,883 lines of tests.
+28 source modules, 6,245 lines of library code, 4,826 lines of tests. Any of
+those numbers will drift as the code changes, so treat them as a snapshot of
+this commit. To re-derive them: `python -c "import pathlib; print(sum(len(p.read_text(encoding='utf-8').splitlines()) for p in pathlib.Path('src').rglob('*.py')))"`.
 
 ### Bugs found by exercising the tool, not by writing tests
 
