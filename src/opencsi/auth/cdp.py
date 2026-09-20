@@ -617,6 +617,17 @@ class CdpCookieProvider:
         """
         return self._last_hint
 
+    @property
+    def last_error_code(self) -> str | None:
+        """Machine-readable code for the most recent failure, if any.
+
+        Lets a caller map the failure to its documented exit status without
+        guessing from the symptom. A refused DevTools handshake and an empty
+        cookie jar both surface as "no credential", but they need different
+        fixes and different exit codes.
+        """
+        return self._last_error
+
     # -- diagnostics ------------------------------------------------------
     @property
     def endpoint(self) -> CdpEndpoint | None:

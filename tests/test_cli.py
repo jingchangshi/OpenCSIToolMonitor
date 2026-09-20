@@ -478,6 +478,68 @@ class FailureReportingTest(unittest.TestCase):
         # The credential summary must remain readable, not be masked away.
         self.assertIn("source", parsed["credential"])
 
+    def test_doctor_maps_the_credential_failure_to_its_real_code(self) -> None:
+        """The exit code must come from the cause, not the check's name.
+
+        ``doctor`` used to derive the status from which check failed, so any
+        credential problem exited 12 ("not signed in"). A refused DevTools
+        handshake therefore told the user to sign in -- advice that cannot work,
+        because the fix is to restart the browser with remote debugging.
+        """
+        from opencsi.auth.base import CredentialStatus
+        from opencsi.errors import CookieNotFoundError
+
+        class RefusedProvider:
+            """Endpoint answered but the WebSocket upgrade was refused."""
+
+            name = "cdp"
+            last_hint = "restart Chrome with --user-data-dir"
+            last_error_code = "CDP_UNAVAILABLE"
+
+            def status(self):
+                return CredentialStatus(
+                    available=False, source="cdp", detail="handshake refused"
+                )
+
+            def get_token(self):
+                raise CdpUnavailableError("handshake refused")
+
+            def invalidate(self):
+                pass
+
+            def refresh(self):
+                raise CdpUnavailableError("handshake refused")
+
+        class EmptyJarProvider(RefusedProvider):
+            """Endpoint fine, browser simply not signed in."""
+
+            last_hint = "sign in"
+            last_error_code = "OPENCSITOOL_NOT_LOGGED_IN"
+
+            def status(self):
+                return CredentialStatus(
+                    available=False, source="cdp", detail="no openCsiTool token"
+                )
+
+            def get_token(self):
+                raise CookieNotFoundError("no cookie")
+
+            def refresh(self):
+                raise CookieNotFoundError("no cookie")
+
+        from opencsi import OpenCsiToolClient
+
+        refused_code, _, _ = run_cli(
+            ["doctor", "--no-discover"], client=OpenCsiToolClient(RefusedProvider())
+        )
+        self.assertEqual(refused_code, EXIT_CDP_UNAVAILABLE)
+        self.assertNotEqual(refused_code, EXIT_NOT_LOGGED_IN)
+
+        empty_code, _, _ = run_cli(
+            ["doctor", "--no-discover"], client=OpenCsiToolClient(EmptyJarProvider())
+        )
+        self.assertEqual(empty_code, EXIT_NOT_LOGGED_IN)
+
     def test_doctor_without_a_credential_reports_the_real_cause(self) -> None:
         """``doctor`` must diagnose, not just fail.
 

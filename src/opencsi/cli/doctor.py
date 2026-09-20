@@ -17,7 +17,16 @@ import argparse
 import platform
 import sys
 
-from ..errors import OpenCsiError
+from ..errors import (
+    EXIT_CDP_UNAVAILABLE,
+    EXIT_NETWORK_ERROR,
+    EXIT_NO_BROWSER_TARGET,
+    EXIT_NOT_LOGGED_IN,
+    EXIT_PERMISSION_DENIED,
+    EXIT_SERVER_ERROR,
+    EXIT_SESSION_EXPIRED,
+    OpenCsiError,
+)
 from ..formatting import format_relative_seconds, render_kv, section, yes_no
 from ..version import USER_AGENT, __version__
 from .context import CliContext, add_common_options
@@ -27,6 +36,24 @@ WARN = "warn"
 FAIL = "fail"
 
 _MARK = {OK: "[ok]  ", WARN: "[warn]", FAIL: "[FAIL]"}
+
+#: Provider error codes mapped to their documented process exit status. Kept
+#: here rather than inferred from the check name, because one check can fail for
+#: several unrelated reasons that need different exit codes.
+_CODE_EXIT = {
+    "CDP_UNAVAILABLE": EXIT_CDP_UNAVAILABLE,
+    "NO_BROWSER_TARGET": EXIT_NO_BROWSER_TARGET,
+    "OPENCSITOOL_NOT_LOGGED_IN": EXIT_NOT_LOGGED_IN,
+    "SESSION_EXPIRED": EXIT_SESSION_EXPIRED,
+    "PERMISSION_DENIED": EXIT_PERMISSION_DENIED,
+    "NETWORK_ERROR": EXIT_NETWORK_ERROR,
+    "SERVER_ERROR": EXIT_SERVER_ERROR,
+}
+
+
+def _code_to_exit(code: str | None) -> int | None:
+    """Map a provider error code to its exit status, if it is one we know."""
+    return _CODE_EXIT.get(code or "")
 
 
 def _credential_hint(provider, endpoint_ok: bool) -> str:
@@ -74,11 +101,24 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 def run(ctx: CliContext) -> int:
     checks: list[dict[str, object]] = []
+    #: Exit codes carried by the checks, most specific first. Deriving the
+    #: process status from the *check name* was wrong: a refused DevTools
+    #: handshake was reported as 12 ("not signed in") when the user needed to
+    #: restart their browser, and 12 is the advice they would have followed.
+    codes: list[int] = []
 
-    def record(name: str, status: str, detail: str = "", hint: str | None = None) -> None:
+    def record(
+        name: str,
+        status: str,
+        detail: str = "",
+        hint: str | None = None,
+        exit_code: int | None = None,
+    ) -> None:
         entry: dict[str, object] = {"check": name, "status": status, "detail": detail}
         if hint:
             entry["hint"] = hint
+        if exit_code is not None and status != OK:
+            codes.append(exit_code)
         checks.append(entry)
 
     # ── 1. environment ────────────────────────────────────────────────────
@@ -111,7 +151,7 @@ def run(ctx: CliContext) -> int:
             if browser:
                 record("browser", OK, str(browser))
     except OpenCsiError as exc:
-        record("devtools endpoint", FAIL, str(exc), exc.hint)
+        record("devtools endpoint", FAIL, str(exc), exc.hint, exc.exit_code)
 
     # ── 3. credential ─────────────────────────────────────────────────────
     credential_ok = False
@@ -130,6 +170,7 @@ def run(ctx: CliContext) -> int:
             OK if credential_ok else FAIL,
             detail,
             None if credential_ok else _credential_hint(provider, endpoint_ok),
+            None if credential_ok else _code_to_exit(getattr(provider, "last_error_code", None)),
         )
         if status.expiring_soon:
             record(
@@ -139,7 +180,7 @@ def run(ctx: CliContext) -> int:
                 "the tool refreshes automatically on a 401, but re-login soon",
             )
     except OpenCsiError as exc:
-        record("credential", FAIL, str(exc), exc.hint)
+        record("credential", FAIL, str(exc), exc.hint, exc.exit_code)
 
     # ── 4. session ────────────────────────────────────────────────────────
     identity = None
@@ -161,7 +202,7 @@ def run(ctx: CliContext) -> int:
                 f"{identity.display_name} (employeeId={identity.employee_id})",
             )
         except OpenCsiError as exc:
-            record("session", FAIL, str(exc), exc.hint)
+            record("session", FAIL, str(exc), exc.hint, exc.exit_code)
 
     # ── 5. contract ───────────────────────────────────────────────────────
     if identity is not None and not ctx.args.skip_contract:
@@ -225,13 +266,9 @@ def run(ctx: CliContext) -> int:
     ctx.emit(payload, render)
 
     if failures:
-        # Exit with the most specific code available so scripts can branch.
-        for check in failures:
-            if check["check"] == "devtools endpoint":
-                return 10
-            if check["check"] == "credential":
-                return 12
-            if check["check"] == "session":
-                return 13
+        # Exit with the most specific code the checks actually reported, so a
+        # script can branch on the real cause rather than on the check's name.
+        if codes:
+            return codes[0]
         return 1
     return 0
