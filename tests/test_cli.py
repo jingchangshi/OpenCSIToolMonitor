@@ -919,6 +919,38 @@ class GlobalOptionTest(unittest.TestCase):
         code, _, _ = run_cli(["tools", "--no-cache"], client=client)
         self.assertEqual(code, EXIT_OK)
 
+    def test_refresh_is_accepted_and_zeroes_the_cache(self) -> None:
+        """The README documented --refresh before it existed; now it does."""
+        client, _, _ = make_client()
+        code, _, _ = run_cli(["tools", "--refresh"], client=client)
+        self.assertEqual(code, EXIT_OK)
+
+    def test_refresh_does_not_destroy_a_manual_credential(self) -> None:
+        """``invalidate()`` on a manual provider is permanent, so refresh must not call it.
+
+        Calling ``invalidate()`` here turned a refresh into a spurious
+        "session expired" and left the user with no credential at all -- the
+        provider has no source to re-read. ``refresh()`` is the right verb.
+        """
+        from helpers import FAKE_TOKEN
+
+        from opencsi.auth.manual import ManualCookieProvider
+        from opencsi.cli.context import CliContext, build_parser
+
+        args = build_parser().parse_args(["tools", "--refresh"])
+        provider = ManualCookieProvider(FAKE_TOKEN)
+        ctx = CliContext(args=args, stdout=io.StringIO(), stderr=io.StringIO())
+        ctx.make_client(provider=provider)
+        self.assertEqual(provider.get_token(), FAKE_TOKEN)
+
+    def test_refresh_zeroes_the_cache_ttl(self) -> None:
+        from opencsi.cli.context import CliContext, build_parser
+
+        args = build_parser().parse_args(["tools", "--refresh"])
+        ctx = CliContext(args=args, stdout=io.StringIO(), stderr=io.StringIO())
+        client = ctx.make_client(provider=StubCredentialProvider())
+        self.assertEqual(client.cache.ttl, 0.0)
+
     def test_timeout_is_accepted(self) -> None:
         client, _, _ = make_client()
         code, _, _ = run_cli(["tools", "--timeout", "5"], client=client)

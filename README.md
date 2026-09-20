@@ -312,32 +312,66 @@ opencsi status --no-proxy
 
 ### `opencsi status`
 
-显示会话和凭据状态，**不返回非零退出码来表示"未登录"以外的失败**，
-所以很适合放进脚本的第一步。
+默认显示会话状态和核心数据总览，适合作为脚本的第一步。
 
 ```bash
 opencsi status
+opencsi status --verbose        # 额外显示 userId / accountId / 组织 UUID
+opencsi status --no-summary     # 只检查会话，少发一次请求
 opencsi status --json
 ```
 
+```
+== openCsiTool ==
+Session : OK
+User     : shijingchang
+Employee : 653124
+Role     : 普通用户
+Data updated : 2026-09-19 21:40 UTC+8
+
+Tokens        : 3,061,130,999
+Requests      : 21,632
+PRs           : 246
+Added lines   : 31,167
+AI generated  : 3,150
+AI adopted    : 120
+Adoption rate : 3.8%
+
+Active tools  : 2
+Expired tools : 1
+```
+
+> 默认**不显示** `userId` / `accountId` / 组织 UUID —— 日常使用用不到，
+> 而且截图或共享终端时会泄露身份。需要时用 `--verbose`。
+>
+> `Data updated` 显示的是**服务端**给出的时间，并保留它自带的时区偏移，
+> 不做本地时区换算。
+
 ### `opencsi tools`
 
-列出所有已授权的 AI 工具账号。
+列出所有已授权的 AI 工具账号。**过滤全部在本地完成**——服务端没有搜索接口。
 
 ```bash
 opencsi tools
-opencsi tools --active-only      # 只看 使用中
+opencsi tools --active                # 只看 使用中（--active-only 亦可）
+opencsi tools --type API_BUNDLE       # 按 requestType 精确筛选
+opencsi tools --search Triton          # 在账号名/工具名/申请单号/类型中模糊搜索
+opencsi tools --show-key-mask         # 显示站点自身的掩码 sk-xxxxxxxx****
 ```
 
 ```
-  ID  Request No.      Type        Account         Status  Tokens  Key
-----  ---------------  ----------  --------------  ------  ------  --------------
-5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿  sk-bM4LUSm****
-1954  REQ202604160010  TRAE        AI编程助手-001  使用中   2.6亿  -
-1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿  -
+  ID  Request No.      Type        Account         Status  Tokens
+----  ---------------  ----------  --------------  ------  ------
+5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿
+1954  REQ202604160010  TRAE        AI编程助手-001  使用中   2.6亿
+1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿
 ```
 
-> `Key` 列**永远只显示掩码**（`sk-bM4LUSm****`），完整密钥不会出现在任何输出里。
+> **密钥默认不显示**。加上 `--show-key-mask` 后也只显示站点自身的掩码
+> （`sk-bM4LUSm****`）；**完整 `virtualKey` 永远不会出现在任何输出里**。
+>
+> `--type` 给了一个不存在的类型时是用法错误（退出码 2），并会列出实际存在的类型，
+> 而不是静默返回空结果。
 
 ### `opencsi usage`
 
@@ -363,13 +397,28 @@ opencsi usage --start-date 2026-08-20 --end-date 2026-09-19
 
 ### `opencsi trend`
 
-token 趋势。
+token 趋势，含 prompt / completion 拆分。
 
 ```bash
 opencsi trend                    # 按模型汇总
 opencsi trend --group-by date    # 按日期汇总
 opencsi trend --by-day           # 等价于 --group-by date
+opencsi trend --days 7           # 最近 7 天（含今天）
+opencsi trend --days 30
+opencsi trend --from 2026-08-20 --to 2026-09-19
 ```
+
+```
+== Token trend by model ==
+Key                     Display name             Tokens   Prompt  Completion  Share
+----------------------  ----------------------  -------  -------  ----------  -----
+GLM_5_3_FLASH           GLM-5.3-Flash             9.7亿    9.7亿     583.1万  69.6%
+DEEPSEEK_V4_FLASH_0731  DeepSeek-V4-Flash-0731    4.2亿    4.1亿     290.4万  29.9%
+```
+
+> `--days N` 表示**今天加上之前 N-1 天**（`--days 1` 就是今天）。
+> `--days` 不能与 `--start-date`/`--end-date` 同时使用——两者可能互相矛盾，
+> 与其猜测不如直接报错。
 
 ### `opencsi prices`
 
@@ -391,6 +440,7 @@ LLM 网关调用日志。注意：**如果你的用量走的是套餐而不是�
 opencsi logs
 opencsi logs --page 2 --page-size 50
 opencsi logs --raw      # 显示每条记录的全部字段
+opencsi logs --from 2026-08-01 --to 2026-09-01   # 等价于 --start-date/--end-date
 ```
 
 ### `opencsi doctor`
@@ -399,10 +449,11 @@ opencsi logs --raw      # 显示每条记录的全部字段
 
 ```bash
 opencsi doctor
-opencsi doctor --skip-contract
+opencsi doctor --skip-contract   # 跳过线上 API 检查，少发请求
 ```
 
-它会逐项检查并给出 `[ok]` / `[warn]` / `[FAIL]`：
+它会逐项检查并给出 `[ok]` / `[warn]` / `[FAIL]`。**每个 API 端点单独一行**，
+因为诊断的价值就在于定位到具体是哪一次调用坏了：
 
 ```
 == opencsi doctor (0.1.0) ==
@@ -413,9 +464,19 @@ User-Agent : opencsi-cli/0.1.0
 [ok]   devtools endpoint: http://127.0.0.1:9222
 [ok]   credential: source=cdp, expires in 58m12s
 [ok]   session: shijingchang (employeeId=653124)
-[ok]   api contract: 11 checks passed
+[ok]   getUserInfo: identity parsed
+[ok]   personalQueueStatus envelope: code/data present
+[ok]   personalQueueStatus.data.requestList: list present
+[ok]   personalQueueStatus.data.tokenSummary: object present
+[ok]   personalQueueStatus.data.tokenTrend: list present
+[ok]   personalQueueStatus.data.syncStatus: object present
+[ok]   requestList item fields: all required fields present
+[ok]   ai/config/cost: 20 rows
+[ok]   price rows have requestType: requestType present on every row
+[ok]   call-logs shape: list/total present
+[ok]   key-budget: parsed
 
-All 5 checks passed.
+All 15 checks passed.
 ```
 
 失败时会打印**真正的原因**，而不只是一句"未登录"。例如当浏览器拒绝握手时

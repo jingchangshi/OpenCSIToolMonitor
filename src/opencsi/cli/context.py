@@ -17,6 +17,7 @@ commands must not each re-implement:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ from ..version import USER_AGENT, __version__
 
 ENV_CDP_URL = "OPENCSI_CDP_URL"
 ENV_BASE_URL = "OPENCSI_BASE_URL"
+
+log = logging.getLogger("opencsi.cli")
 
 
 @dataclass
@@ -131,12 +134,28 @@ class CliContext:
         if timeout <= 0:
             raise UsageError("--timeout must be greater than zero")
 
-        cache_ttl = 0.0 if getattr(self.args, "no_cache", False) else float(
-            getattr(self.args, "cache_ttl", 300.0) or 0.0
-        )
+        # ``--refresh`` and ``--no-cache`` both defeat the *data* cache.
+        if getattr(self.args, "refresh", False) or getattr(self.args, "no_cache", False):
+            cache_ttl = 0.0
+        else:
+            cache_ttl = float(getattr(self.args, "cache_ttl", 300.0) or 0.0)
+
+        provider = provider if provider is not None else self.make_provider()
+
+        # ``--refresh`` additionally re-reads the credential -- but only when the
+        # provider can actually re-read one. ``invalidate()`` on a
+        # ManualCookieProvider is *permanent* (there is no source to go back to),
+        # so calling it here would destroy the only credential the user has and
+        # turn a refresh into a spurious "session expired". Refresh therefore
+        # uses ``refresh()``, whose contract is "re-read if you can".
+        if getattr(self.args, "refresh", False):
+            try:
+                provider.refresh()
+            except Exception:  # pragma: no cover - defensive
+                log.debug("credential refresh failed; the request will report it")
 
         return OpenCsiToolClient(
-            provider if provider is not None else self.make_provider(),
+            provider,
             base_url=base_url,
             timeout=timeout,
             cache_ttl=cache_ttl,
@@ -203,6 +222,14 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         "--no-cache",
         action="store_true",
         help="disable the in-process response cache",
+    )
+    conn.add_argument(
+        "--refresh",
+        action="store_true",
+        help=(
+            "force fresh data: bypass the cache and re-read the credential. "
+            "Only business data is ever cached, never the cookie"
+        ),
     )
     conn.add_argument(
         "--no-proxy",
