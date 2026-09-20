@@ -70,6 +70,31 @@ SLOW_TIMEOUT = 30.0  # call-logs; the page itself uses 30s
 #: Success code inside the ``{code, data, message}`` envelope.
 ENVELOPE_SUCCESS = 200
 
+#: Failures that mean "we never got to ask the service", as opposed to "the
+#: service answered, but said no". Only the first kind propagates out of
+#: `contract_check`; an HTTP-level failure is a legitimate check *result*
+#: (brief §50 lists HTTP status among the things this command verifies).
+_UNREACHABLE = (
+    "CDP_UNAVAILABLE",
+    "NO_BROWSER_TARGET",
+    "OPENCSITOOL_NOT_LOGGED_IN",
+    "SESSION_EXPIRED",
+    "NETWORK_ERROR",
+)
+
+
+def _reraise_if_unreachable(exc: OpenCsiError) -> None:
+    """Re-raise ``exc`` when it means the service was never reached.
+
+    ``contract_check`` records failed checks so a schema change is reported per
+    endpoint, and a 4xx/5xx response is such a result. But a missing browser or
+    an expired session is not a schema change, and reporting it as one sends the
+    user looking for the wrong problem. Those codes propagate instead, with
+    their own exit status.
+    """
+    if getattr(exc, "code", "") in _UNREACHABLE:
+        raise exc
+
 
 class OpenCsiToolClient:
     """Read-only client for openCsiTool "My Tools" data."""
@@ -317,16 +342,26 @@ class OpenCsiToolClient:
         Verifies HTTP status, envelope shape, required fields and types. It does
         **not** compare dynamic business values, so normal data drift never
         fails it (report §49-50). Unknown extra fields are ignored, not errors.
+
+        Raises :class:`OpenCsiError` when the service cannot be reached at all.
+        That distinction matters: a user with no browser must not be told the
+        API contract changed, which is what happened when a credential failure
+        was recorded as a failed check.
         """
         checks: list[dict[str, Any]] = []
 
         def record(name: str, ok: bool, detail: str = "") -> None:
             checks.append({"check": name, "ok": ok, "detail": detail})
 
+        # A failure to *obtain a credential* propagates (carrying exit 10/11/12/
+        # 13/30), because "no browser" is not a schema change. An HTTP-level
+        # failure is a legitimate check result: brief §50 lists HTTP status
+        # among the things this command verifies.
         try:
             identity = self.login_or_restore_session(refresh=True)
             record("getUserInfo", bool(identity.user_id), "identity parsed")
         except OpenCsiError as exc:
+            _reraise_if_unreachable(exc)
             record("getUserInfo", False, str(exc))
             return {"ok": False, "checks": checks}
 
@@ -379,6 +414,10 @@ class OpenCsiToolClient:
                 "all required fields present" if not missing else f"missing: {', '.join(missing)}",
             )
         except OpenCsiError as exc:
+            # A service we cannot reach is not contract drift. Propagate it so
+            # the caller reports "no browser" / "expired" rather than sending
+            # the user to look for a schema change that did not happen.
+            _reraise_if_unreachable(exc)
             record("personalQueueStatus", False, str(exc))
 
         try:
@@ -390,6 +429,7 @@ class OpenCsiToolClient:
                 "requestType present on every row",
             )
         except OpenCsiError as exc:
+            _reraise_if_unreachable(exc)
             record("ai/config/cost", False, str(exc))
 
         try:
@@ -400,12 +440,14 @@ class OpenCsiToolClient:
                 "list/total present",
             )
         except OpenCsiError as exc:
+            _reraise_if_unreachable(exc)
             record("call-logs", False, str(exc))
 
         try:
             self.get_key_budget()
             record("key-budget", True, "parsed")
         except OpenCsiError as exc:
+            _reraise_if_unreachable(exc)
             record("key-budget", False, str(exc))
 
         return {"ok": all(c["ok"] for c in checks), "checks": checks}

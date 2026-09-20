@@ -247,6 +247,37 @@ class ContractCheckTest(unittest.TestCase):
         report = client.contract_check()
         self.assertFalse(report["ok"])
 
+    def test_contract_check_propagates_a_credential_failure(self) -> None:
+        """No browser is not a schema change.
+
+        ``contract_check`` records failed checks so a drifted field is reported
+        per endpoint. But swallowing a credential failure made it report
+        "contract drift" to a user who simply had not started their browser with
+        remote debugging -- the wrong diagnosis, and the wrong exit code.
+        """
+        from opencsi.errors import CdpUnavailableError
+
+        provider = StubCredentialProvider(raises=CdpUnavailableError("no port"))
+        client, _, _ = make_client(provider=provider)
+        with self.assertRaises(CdpUnavailableError):
+            client.contract_check()
+
+    def test_contract_check_propagates_a_network_failure(self) -> None:
+        from opencsi.errors import NetworkError
+
+        provider = StubCredentialProvider(raises=NetworkError("dns"))
+        client, _, _ = make_client(provider=provider)
+        with self.assertRaises(NetworkError):
+            client.contract_check()
+
+    def test_contract_check_still_records_an_http_failure(self) -> None:
+        """An HTTP-level failure *is* a check result (brief §50)."""
+        client, transport, _ = make_client()
+        transport.overrides["getUserInfo"] = FakeResponse(403, {"message": "denied"})
+        report = client.contract_check()
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(not c["ok"] for c in report["checks"]))
+
     def test_contract_check_lists_every_endpoint_it_uses(self) -> None:
         client, _, _ = make_client()
         report = client.contract_check()
