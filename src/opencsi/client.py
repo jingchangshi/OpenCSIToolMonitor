@@ -481,7 +481,8 @@ class OpenCsiToolClient:
             if "Invalid Authorization" in body:
                 raise BadAuthHeaderError(
                     "the server rejected an Authorization header; openCsiTool "
-                    "authenticates by cookie only"
+                    "authenticates by cookie only",
+                    http_status=response.status,
                 )
 
             log.debug("401 from %s; refreshing credentials once", path)
@@ -491,12 +492,14 @@ class OpenCsiToolClient:
             if response.status == 401:
                 raise SessionExpiredError(
                     "openCsiTool rejected the session cookie (HTTP 401) after a "
-                    "credential refresh."
+                    "credential refresh.",
+                    http_status=response.status,
                 )
             if "Invalid Authorization" in (response.body or ""):
                 raise BadAuthHeaderError(
                     "the server rejected an Authorization header; openCsiTool "
-                    "authenticates by cookie only"
+                    "authenticates by cookie only",
+                    http_status=response.status,
                 )
 
         self._raise_for_status(response)
