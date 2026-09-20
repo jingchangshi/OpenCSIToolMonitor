@@ -428,6 +428,56 @@ class FailureReportingTest(unittest.TestCase):
         self.assertEqual(code, EXIT_NO_BROWSER_TARGET)
         self.assertNotIn("Traceback", err)
 
+    def test_status_propagates_the_real_failure_not_a_blanket_not_logged_in(self) -> None:
+        """``status`` must not report every failure as "not signed in".
+
+        It used to hardcode exit 12. A user with no reachable DevTools port was
+        therefore told to sign in, which cannot possibly help: the fix is to
+        start the browser with remote debugging. The exit code has to carry the
+        real cause.
+        """
+        from opencsi.errors import CdpUnavailableError, CookieNotFoundError
+
+        provider = StubCredentialProvider(
+            raises=CdpUnavailableError("port 9222 is not reachable")
+        )
+        client, _, _ = make_client(provider=provider)
+        code, _, err = run_cli(["status"], client=client)
+        self.assertEqual(code, EXIT_CDP_UNAVAILABLE)
+        self.assertNotEqual(code, EXIT_NOT_LOGGED_IN)
+        self.assertIn("9222", err)
+
+        # ...and a genuine "no cookie" case still reports as not-signed-in.
+        provider = StubCredentialProvider(
+            raises=CookieNotFoundError("the browser holds no openCsiTool token")
+        )
+        client, _, _ = make_client(provider=provider)
+        code, _, _ = run_cli(["status"], client=client)
+        self.assertEqual(code, EXIT_NOT_LOGGED_IN)
+
+    def test_status_does_not_print_the_same_cause_twice(self) -> None:
+        """The credential detail and the session error are one cause, not two."""
+        from opencsi.errors import CdpUnavailableError
+
+        provider = StubCredentialProvider(
+            raises=CdpUnavailableError("port 9222 is not reachable")
+        )
+        client, _, _ = make_client(provider=provider)
+        _, out, err = run_cli(["status"], client=client)
+        combined = out + err
+        self.assertEqual(combined.count("port 9222 is not reachable"), 1)
+
+    def test_status_json_carries_the_error_code(self) -> None:
+        from opencsi.errors import CdpUnavailableError
+
+        provider = StubCredentialProvider(raises=CdpUnavailableError("nope"))
+        client, _, _ = make_client(provider=provider)
+        _, out, _ = run_cli(["status", "--json"], client=client)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["error_code"], "CDP_UNAVAILABLE")
+        # The credential summary must remain readable, not be masked away.
+        self.assertIn("source", parsed["credential"])
+
     def test_doctor_without_a_credential_reports_the_real_cause(self) -> None:
         """``doctor`` must diagnose, not just fail.
 

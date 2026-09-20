@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from ..errors import OpenCsiError
+from ..errors import OpenCsiError, exit_code_for
 from ..formatting import format_datetime, format_relative_seconds, render_kv, section
 from .context import CliContext, add_common_options
 
@@ -34,14 +34,14 @@ def run(ctx: CliContext) -> int:
     # "browser present but not signed in", and the two need different fixes.
     cred = provider.status()
 
+    session_error: OpenCsiError | None = None
     try:
         identity = client.login_or_restore_session()
         session_ok = True
-        session_error: str | None = None
     except OpenCsiError as exc:
         identity = None
         session_ok = False
-        session_error = str(exc)
+        session_error = exc
 
     payload = {
         "ok": session_ok,
@@ -61,8 +61,9 @@ def run(ctx: CliContext) -> int:
         ),
         "base_url": client.base_url,
     }
-    if session_error:
-        payload["error"] = session_error
+    if session_error is not None:
+        payload["error"] = str(session_error)
+        payload["error_code"] = session_error.code
 
     def render() -> None:
         ctx.out(section("openCsiTool session"))
@@ -77,7 +78,10 @@ def run(ctx: CliContext) -> int:
                 ]
             )
         )
-        if cred.detail:
+        if cred.detail and not session_error:
+            # Only when it adds information: a failed session request already
+            # reports the same underlying cause, and printing both duplicated
+            # the line.
             ctx.err(f"note: {cred.detail}")
         if identity:
             ctx.blank()
@@ -100,7 +104,11 @@ def run(ctx: CliContext) -> int:
             ctx.err(f"error: {session_error}")
 
     ctx.emit(payload, render)
-    if not session_ok and ctx.json:
+    if session_ok:
+        return 0
+    if ctx.json:
         # JSON consumers must not have to parse prose to learn the outcome.
         return 1
-    return 0 if session_ok else 12
+    # Propagate the real cause. Hardcoding "not signed in" here told a user
+    # with no reachable DevTools port to go and sign in, which cannot help.
+    return exit_code_for(session_error)

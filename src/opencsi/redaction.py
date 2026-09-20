@@ -118,6 +118,7 @@ def redact_mapping(data: Any, *, _depth: int = 0) -> Any:
     """
     if _depth > 12:
         return MASK
+    #: Key names that hold a secret *value*.
     sensitive = (
         "token",
         "cookie",
@@ -127,16 +128,25 @@ def redact_mapping(data: Any, *, _depth: int = 0) -> Any:
         "secret",
         "password",
         "passwd",
-        "credential",
         "apikey",
         "api_key",
     )
+    #: Key names that *describe* credentials rather than hold one. Masking the
+    #: whole subtree here destroyed `status --json` (the credential summary
+    #: became the string "<redacted>"), so these recurse instead. A real secret
+    #: nested inside is still caught by its own key or by the value patterns.
+    containers = ("credential", "credentials")
     if isinstance(data, dict):
         out: dict[Any, Any] = {}
         for k, v in data.items():
             key = str(k)
             flat = key.replace("-", "").replace("_", "").lower()
-            if any(tok.replace("_", "") in flat for tok in sensitive):
+            if any(tok.replace("_", "") in flat for tok in containers):
+                if isinstance(v, (dict, list, tuple)):
+                    out[k] = redact_mapping(v, _depth=_depth + 1)
+                else:
+                    out[k] = MASK
+            elif any(tok.replace("_", "") in flat for tok in sensitive):
                 out[k] = MASK
             else:
                 out[k] = redact_mapping(v, _depth=_depth + 1)

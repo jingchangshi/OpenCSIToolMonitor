@@ -364,6 +364,62 @@ class EndToEndRedactionTest(unittest.TestCase):
         status = provider.status()
         self.assertNotIn(FAKE_TOKEN, json.dumps(status.as_dict(), default=str))
 
+    def test_credential_summary_survives_json_redaction(self) -> None:
+        """A credential *description* must not be redacted away.
+
+        Over-redaction is a real failure mode: masking the whole `credential`
+        subtree turned `status --json` into `"credential": "<redacted>"`, which
+        is safe but useless to a script. Security and utility both matter here.
+        """
+        from opencsi.auth.base import CredentialStatus
+        from opencsi.formatting import to_json
+
+        status = CredentialStatus(
+            available=False,
+            source="cdp",
+            cookie_count=0,
+            detail="endpoint unreachable",
+        )
+        rendered = to_json({"ok": False, "credential": status.as_dict()})
+        self.assertNotIn(MASK, rendered)
+        self.assertIn("cdp", rendered)
+        self.assertIn("endpoint unreachable", rendered)
+        self.assertIn("available", rendered)
+
+    def test_a_secret_nested_under_a_credential_key_is_still_masked(self) -> None:
+        """Relaxing the container key must not open a hole."""
+        from opencsi.formatting import to_json
+
+        rendered = to_json(
+            {
+                "credential": {"token": "SUPER_SECRET_COOKIE_123", "available": True},
+                "credentials": [{"virtualKey": "SUPER_SECRET_KEY_456", "name": "ok"}],
+            }
+        )
+        self.assertNotIn("SUPER_SECRET_COOKIE_123", rendered)
+        self.assertNotIn("SUPER_SECRET_KEY_456", rendered)
+        self.assertIn(MASK, rendered)
+        # The non-secret siblings still come through.
+        self.assertIn("available", rendered)
+        self.assertIn("ok", rendered)
+
+    def test_a_credential_key_holding_a_bare_string_is_masked(self) -> None:
+        from opencsi.formatting import to_json
+
+        rendered = to_json({"credential": "SUPER_SECRET_COOKIE_123"})
+        self.assertNotIn("SUPER_SECRET_COOKIE_123", rendered)
+        self.assertIn(MASK, rendered)
+
+    def test_deeply_nested_structures_stop_at_the_depth_limit(self) -> None:
+        """The depth guard returns MASK rather than recursing forever."""
+        from opencsi.redaction import redact_mapping
+
+        node: dict = {"leaf": "SUPER_SECRET_KEY_456"}
+        for _ in range(20):
+            node = {"nested": node}
+        rendered = json.dumps(redact_mapping(node))
+        self.assertNotIn("SUPER_SECRET_KEY_456", rendered)
+
 
 class FixtureHygieneTest(unittest.TestCase):
     """The repository itself must not contain a real credential.
