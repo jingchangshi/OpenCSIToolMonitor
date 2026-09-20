@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import traceback
 import unittest
 
@@ -495,12 +496,18 @@ class FixtureHygieneTest(unittest.TestCase):
         "sk-bM4LUSmTESTFIXTURE000000",
     )
 
-    #: The real cookie value and key were scrubbed during the investigation.
-    #: These are distinctive *fragments* of them (not the values themselves),
-    #: enough to catch a regression without storing a usable secret.
-    FORBIDDEN_FRAGMENTS = (
-        "04McBYpvYqkQmYQ",  # tail of the original virtual key
-        "3921522f-b3ff",  # head of the original session cookie
+    #: Structural shapes that a real credential would match. Deliberately
+    #: *patterns* rather than fragments of the real values: an earlier version of
+    #: this guard embedded partial real secrets in order to detect them, which
+    #: is itself a leak. These catch a regression without storing anything
+    #: sensitive.
+    #:
+    #: A session cookie is a long opaque run; a real virtual key is an ``sk-``
+    #: body far longer than the synthetic placeholders above.
+    FORBIDDEN_SHAPES = (
+        (re.compile(r"[A-Za-z0-9_\-]{40,}"), "a long opaque credential-like run"),
+        (re.compile(r"sk-(?!bM4LUSm(?:EXAMPLE00000000|TESTFIXTURE000000))[A-Za-z0-9]{12,}"),
+         "a virtual key that is not one of the synthetic placeholders"),
     )
 
     def _fixture_texts(self):
@@ -510,10 +517,18 @@ class FixtureHygieneTest(unittest.TestCase):
         for path in sorted(fixtures.glob("*.json")):
             yield path, path.read_text(encoding="utf-8")
 
-    def test_fixtures_contain_no_real_secret_fragment(self) -> None:
+    def test_fixtures_contain_no_credential_shaped_string(self) -> None:
+        """No fixture may carry a value shaped like a real credential.
+
+        Checked structurally so the guard itself stores no secret material.
+        """
         for path, text in self._fixture_texts():
-            for fragment in self.FORBIDDEN_FRAGMENTS:
-                self.assertNotIn(fragment, text, f"{path.name} leaks a real credential fragment")
+            for pattern, description in self.FORBIDDEN_SHAPES:
+                for match in pattern.finditer(text):
+                    self.fail(
+                        f"{path.name} contains {description}: {match.group(0)[:16]}... "
+                        f"(re-sanitize the fixture)"
+                    )
 
     def test_every_virtual_key_in_the_fixtures_is_synthetic(self) -> None:
         """No fixture may carry a virtual key we did not author."""
