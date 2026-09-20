@@ -18,7 +18,7 @@ OpenCsiToolClient queries it.  CLI exposes it.
 
 **Complete and independently runnable.** The deliverable is a zero-dependency,
 pure-standard-library Python package plus a `opencsi` command line, verified by
-387 offline tests and a 42-check replay of the original investigation baselines.
+389 offline tests and a 42-check replay of the original investigation baselines.
 
 | Claim | Status | Evidence |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ pure-standard-library Python package plus a `opencsi` command line, verified by
 | Zero third-party runtime dependencies | **Yes** | `dependencies = []` in `pyproject.toml`; the AST scan above confirms it structurally, not just declaratively. |
 | Read-only | **Yes** | `HttpTransport` exposes no `post`/`put`/`patch`/`delete`/`request` attribute at all; asserted by test. Every call is a GET. |
 | Credentials never leave the browser's control | **Yes** | `Authorization` is never constructed; asserted against the headers a real HTTP server actually received. |
-| Verifiable offline | **Yes** | 387 tests, no network, run under `unittest` and under `pytest`. Also clean under `-W error::ResourceWarning`. |
+| Verifiable offline | **Yes** | 389 tests, no network, run under `unittest` and under `pytest`. Also clean under `-W error::ResourceWarning`. |
 | Installable | **Yes** | `uv pip install -e .` succeeds; `opencsi --version` and `opencsi --help` were run from `C:\`, outside the repository, so nothing depends on the working directory or `PYTHONPATH`. Plain `pip install -e .` fails here only because this machine has no `setuptools` and no package index — see §10. |
 | Verifiable end to end | **Yes** | `demo_e2e.py` runs the real CLI over real sockets against replayed fixtures: 10/10 commands exit 0. |
 | Live-site authenticated query | **Blocked by environment** | See §7. The session had expired; I did not sign in on the user's behalf. The unauthenticated HTTP path *was* verified live, and the CDP provider was validated against real Chrome. |
@@ -391,11 +391,11 @@ credential cannot spin.
 
 ## 6. Tests
 
-**387 tests, all passing, fully offline**, run with `unittest`:
+**389 tests, all passing, fully offline**, run with `unittest`:
 
 ```
 $ cd tests && python -m unittest discover -s . -p "test_*.py" -t .
-Ran 387 tests in 11.1s
+Ran 389 tests in 11.1s
 OK
 ```
 
@@ -488,7 +488,7 @@ What stands in its place:
 
 1. The API contract was verified live during the investigation phase — out of
    browser, with a cookie, **12/12 endpoints returned 200**.
-2. Those exact responses are committed as sanitized fixtures and replayed by 387
+2. Those exact responses are committed as sanitized fixtures and replayed by 389
    offline tests.
 3. `demo_e2e.py` runs the real CLI over real sockets against those fixtures:
    **10/10 commands exit 0**, and every path requested had a fixture. The demo
@@ -714,6 +714,31 @@ loosening:
   `sk-xxxxxxxx****` form is account-identifying, so it is opt-in.
 - `status` hides `userId` / `accountId` / organization UUID unless `--verbose`.
 
+**11. The exit-code bug came back in a third and fourth place.** Bugs 3, 4 and 6
+are all the same mistake — deriving an exit code from a label instead of the
+cause. Fixing the three commands where it was noticed did not remove the
+mistake from the design; it only hid it where nobody looked. Two more commands
+caught errors locally because they print partial output on failure, and both had
+kept a hardcoded code:
+
+- `status --json` returned a fixed `1` on a failed session, while the text path
+  had already been corrected to call `exit_code_for()`. The *same* broken session
+  therefore exited `1` with `--json` and `10` without it — which defeats the
+  entire reason a script passes `--json`: it still could not branch on the
+  outcome without parsing prose.
+- `login` returned a fixed `12` (not-logged-in) whenever no session appeared,
+  including when no DevTools endpoint was ever reachable — telling the user to
+  sign in inside a browser that is not running.
+
+`app.py` was already correct: it maps a raised `OpenCsiError` to
+`exc.exit_code` identically in both modes. The lesson generalises past this
+codebase — when a fix applies to a *pattern*, search for every instance of the
+pattern; fixing the symptom you happened to observe leaves the rest.
+
+Both new tests were confirmed to fail against the reintroduced bugs (`12 != 10`)
+before the fixes were restored, so they guard the cause rather than documenting
+whatever the code currently does.
+
 ---
 
 ## 10. Remaining limitations
@@ -772,8 +797,8 @@ usage: opencsi [-h] [--version] [--json] [-v] [--cdp URL] ...
 `uv pip install pytest` also works, so the suite runs under both runners:
 
 ```
-$ python -m unittest discover -s . -p "test_*.py" -t .   # 387 tests, OK
-$ pytest                                                  # 387 passed
+$ python -m unittest discover -s . -p "test_*.py" -t .   # 389 tests, OK
+$ pytest                                                  # 389 passed
 ```
 
 `pytest` needs no environment setup: `pyproject.toml` sets
@@ -901,7 +926,7 @@ lives behind that one method and can be replaced without touching the client.
 ### Verifying the installation
 
 ```bash
-cd tests && python -m unittest discover -s . -p "test_*.py" -t .   # 387 tests
+cd tests && python -m unittest discover -s . -p "test_*.py" -t .   # 389 tests
 cd .. && python verify_client.py                                   # 42/42
 python demo_e2e.py                                                 # 10/10 commands
 ```
