@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from typing import Sequence
 
-from ..errors import OpenCsiError, exit_code_for
+from ..errors import EXIT_INTERRUPTED, OpenCsiError, exit_code_for
 from ..redaction import install_logging_redaction
 from .context import CliContext, build_parser
 
@@ -76,7 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(handler(ctx))
     except KeyboardInterrupt:
         ctx.err("interrupted.")
-        return 130
+        return EXIT_INTERRUPTED
     except OpenCsiError as exc:
         if ctx.json:
             ctx.emit_json({"ok": False, "error": exc.as_dict()})

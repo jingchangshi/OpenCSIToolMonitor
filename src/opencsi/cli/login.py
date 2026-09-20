@@ -23,7 +23,13 @@ import time
 import webbrowser
 
 from ..auth import CdpCookieProvider, ManualCookieProvider
-from ..errors import OpenCsiError, UsageError, exit_code_for
+from ..errors import (
+    EXIT_INTERRUPTED,
+    EXIT_USAGE,
+    OpenCsiError,
+    UsageError,
+    exit_code_for,
+)
 from ..formatting import format_relative_seconds, render_kv, section
 from ..redaction import register_secret
 from .context import CliContext, add_common_options
@@ -129,14 +135,25 @@ def _manual(ctx: CliContext) -> int:
 
     try:
         value = getpass.getpass("openCsiTool 'token' cookie value (input hidden): ")
-    except (EOFError, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        # Interrupted, not mistyped. This used to return 2 -- the usage code --
+        # which made Ctrl+C here exit differently from Ctrl+C anywhere else in
+        # the CLI (app.py returns EXIT_INTERRUPTED), and told the user their
+        # arguments were wrong when they had just pressed a key. Same class of
+        # mistake as the fixed exit codes above: derive the code from what
+        # actually happened.
+        ctx.err("interrupted.")
+        return EXIT_INTERRUPTED
+    except EOFError:
+        # Nothing supplied at all: a closed stdin is a call-shape problem, so
+        # the usage code is the honest one here.
         ctx.err("error: no cookie value supplied.")
-        return 2
+        return EXIT_USAGE
 
     value = value.strip()
     if not value:
         ctx.err("error: empty cookie value.")
-        return 2
+        return EXIT_USAGE
 
     # Register before anything else can touch it, so it is redacted even if a
     # later error path stringifies it.

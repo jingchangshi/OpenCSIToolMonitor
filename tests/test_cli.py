@@ -794,6 +794,53 @@ class FailureReportingTest(unittest.TestCase):
         self.assertEqual(code, EXIT_CDP_UNAVAILABLE, err)
         self.assertNotEqual(code, EXIT_NOT_LOGGED_IN)
 
+    def test_login_manual_ctrl_c_is_an_interrupt_not_a_usage_error(self) -> None:
+        """Ctrl+C at the hidden prompt must match every other interrupt (§30).
+
+        ``login --manual`` caught ``KeyboardInterrupt`` alongside ``EOFError`` and
+        returned the usage code, so pressing Ctrl+C reported "invalid arguments"
+        and exited 2 -- while Ctrl+C anywhere else in the CLI exits 130. The same
+        user action must not mean two different things depending on which command
+        caught it.
+        """
+        import getpass
+
+        import opencsi.cli.login as login_module
+
+        from opencsi.errors import EXIT_INTERRUPTED, EXIT_USAGE
+
+        original = login_module.getpass.getpass
+
+        def interrupted(_prompt: str) -> str:
+            raise KeyboardInterrupt
+
+        login_module.getpass.getpass = interrupted
+        try:
+            code, _, err = run_cli(["login", "--manual"])
+        finally:
+            login_module.getpass.getpass = original
+        self.assertEqual(code, EXIT_INTERRUPTED, err)
+        self.assertNotEqual(code, EXIT_USAGE, "an interrupt is not a usage error")
+
+    def test_login_manual_eof_is_a_usage_error(self) -> None:
+        """A closed stdin really is a call-shape problem, so 2 stays correct."""
+        import opencsi.cli.login as login_module
+
+        from opencsi.errors import EXIT_INTERRUPTED
+
+        original = login_module.getpass.getpass
+
+        def nothing(_prompt: str) -> str:
+            raise EOFError
+
+        login_module.getpass.getpass = nothing
+        try:
+            code, _, err = run_cli(["login", "--manual"])
+        finally:
+            login_module.getpass.getpass = original
+        self.assertEqual(code, EXIT_USAGE, err)
+        self.assertNotEqual(code, EXIT_INTERRUPTED)
+
     def test_doctor_maps_the_credential_failure_to_its_real_code(self) -> None:
         """The exit code must come from the cause, not the check's name.
 

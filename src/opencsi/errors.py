@@ -38,6 +38,10 @@ EXIT_PERMISSION_DENIED = 20
 EXIT_NETWORK_ERROR = 30
 EXIT_SERVER_ERROR = 31
 EXIT_BUSINESS_ERROR = 32
+#: Ctrl-C. Documented in the README alongside the codes above, and now named so
+#: every site that reports an interrupt says the same thing rather than
+#: repeating a literal and drifting apart.
+EXIT_INTERRUPTED = 130
 
 
 class OpenCsiError(Exception):
@@ -209,5 +213,5 @@ def exit_code_for(exc: BaseException) -> int:
     if isinstance(exc, OpenCsiError):
         return exc.exit_code
     if isinstance(exc, KeyboardInterrupt):
-        return 130
+        return EXIT_INTERRUPTED
     return 1
