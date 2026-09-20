@@ -112,7 +112,7 @@ the boundary down because the split is not self-evident:
 | `HttpTransport` | Returns a `Response` for **any** HTTP status. Raises only for transport-level trouble (connection refused, unparseable body). Retries 502/503/504, never 4xx. |
 | `OpenCsiToolClient` | Maps a status onto a documented exception and enforces the business envelope. |
 
-### Module inventory (28 modules, 4,990 lines)
+### Module inventory (28 modules, 5,345 lines)
 
 ```
 src/opencsi/
@@ -582,8 +582,8 @@ screenshots. It is gitignored.
 
 ## 9. Git commits
 
-Sixteen commits, working tree clean. The history is ordered so that each commit's
-tree imports and passes its own tests — commits 2 and 3 required writing
+Eighteen commits, working tree clean. The history is ordered so that each
+commit's tree imports and passes its own tests — commits 2 and 3 required writing
 CDP-free variants of two `__init__.py` files so the intermediate trees were
 coherent.
 
@@ -604,9 +604,12 @@ d2b4695  test: detect fixture credentials by shape, not by stored fragment
 0146827  docs: add the standalone tool implementation report
 aa1a5e1  feat: close the gaps between the CLI and the objective's command spec
 4a9183e  feat: implement --refresh, which the README already documented
+00d526a  docs: bring the report and demo output in line with the delivered CLI
+a2cb508  docs: record the dedicated-profile CDP control, and gitignore its scratch
 ```
 
-61 tracked files, 4,990 lines of source, 3,600 lines of tests.
+28 source modules and 5,345 lines of library code, 3,883 lines of tests across
+62 tracked files.
 
 ### Bugs found by exercising the tool, not by writing tests
 
