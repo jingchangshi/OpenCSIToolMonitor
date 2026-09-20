@@ -212,6 +212,89 @@ class CommandOutputTest(unittest.TestCase):
         parsed = json.loads(out)
         self.assertTrue(parsed)
 
+    def test_status_shows_the_headline_numbers(self) -> None:
+        """The default view answers "what does my account say?" (objective §21)."""
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["status"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        for expected in (
+            "3,061,130,999",
+            "21,632",
+            "246",
+            "31,167",
+            "3,150",
+            "120",
+            "3.8%",
+        ):
+            self.assertIn(expected, out, f"status must show {expected}")
+
+    def test_status_hides_internal_identifiers_by_default(self) -> None:
+        """userId/accountId/org UUID are noise in normal use (objective §21)."""
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["status"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertNotIn("0dd935e8d2234014a215aa922417094c", out)  # userId
+        self.assertNotIn("680a24c143c294728be7bca3", out)  # accountId
+        self.assertNotIn("fba54d1682e841d196d823b4b548c4b9", out)  # organizationId
+
+    def test_status_verbose_reveals_the_identifiers(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["status", "--verbose"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("0dd935e8d2234014a215aa922417094c", out)
+        self.assertIn("fba54d1682e841d196d823b4b548c4b9", out)
+
+    def test_status_json_hides_identifiers_unless_verbose(self) -> None:
+        client, _, _ = self._client()
+        _, out, _ = run_cli(["status", "--json"], client=client)
+        quiet = json.loads(out)
+        self.assertNotIn("user_id", quiet["identity"])
+        self.assertNotIn("organization_id", quiet["identity"])
+
+        _, out_v, _ = run_cli(["status", "--json", "--verbose"], client=client)
+        loud = json.loads(out_v)
+        self.assertIn("user_id", loud["identity"])
+        self.assertIn("organization_id", loud["identity"])
+
+    def test_status_json_summary_carries_the_verified_totals(self) -> None:
+        client, _, _ = self._client()
+        _, out, _ = run_cli(["status", "--json"], client=client)
+        parsed = json.loads(out)
+        summary = parsed["summary"]
+        self.assertEqual(summary["total_tokens"], 3061130999)
+        self.assertEqual(summary["request_count"], 21632)
+        self.assertEqual(summary["pr_count"], 246)
+        self.assertEqual(summary["active_tools"], 2)
+        self.assertEqual(summary["expired_tools"], 1)
+
+    def test_status_no_summary_skips_the_second_request(self) -> None:
+        """A script that only needs "am I signed in?" should pay for one call."""
+        client, transport, _ = self._client()
+        code, out, _ = run_cli(["status", "--no-summary"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertNotIn("3,061,130,999", out)
+        self.assertFalse(
+            any("personalQueueStatus" in p for p in transport.paths()),
+            f"--no-summary must not fetch the queue status: {transport.paths()}",
+        )
+
+    def test_status_survives_a_failing_summary(self) -> None:
+        """A working session must not be reported as broken by a summary error."""
+        from helpers import FakeResponse
+
+        client, transport, _ = self._client()
+        transport.overrides["personalQueueStatus"] = FakeResponse(500, {"message": "down"})
+        code, out, _ = run_cli(["status"], client=client)
+        self.assertEqual(code, EXIT_OK, out)
+        self.assertIn("653124", out)
+
+    def test_status_data_updated_preserves_the_server_offset(self) -> None:
+        """Report the server's wall time, not a guessed local conversion."""
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["status"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("UTC+8", out)
+
     def test_tools_lists_the_three_grants(self) -> None:
         client, _, _ = self._client()
         code, out, _ = run_cli(["tools"], client=client)
@@ -219,11 +302,92 @@ class CommandOutputTest(unittest.TestCase):
         for expected in ("REQ202608170007", "API_BUNDLE", "TRAE"):
             self.assertIn(expected, out)
 
-    def test_tools_masks_the_virtual_key(self) -> None:
+    def test_tools_hides_the_key_by_default(self) -> None:
+        """The masked key is opt-in (objective §23).
+
+        The site shows `sk-xxxxxxxx****`, but even a masked key is
+        account-identifying, so it is off unless asked for.
+        """
         client, _, _ = self._client()
         code, out, _ = run_cli(["tools"], client=client)
-        self.assertIn("sk-bM4LUSm****", out)
+        self.assertEqual(code, EXIT_OK)
+        self.assertNotIn("sk-bM4LUSm****", out)
         self.assertNotIn("EXAMPLE00000000", out)
+
+    def test_tools_show_key_mask_reveals_only_the_site_mask(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["tools", "--show-key-mask"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("sk-bM4LUSm****", out)
+        # The full key must never appear, even with the opt-in flag.
+        self.assertNotIn("EXAMPLE00000000", out)
+
+    def test_tools_json_hides_the_key_by_default(self) -> None:
+        """A script must not receive a key it did not ask for."""
+        import json as _json
+
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["tools", "--json"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        parsed = _json.loads(out)
+        for row in parsed["tools"]:
+            self.assertNotIn("virtual_key_masked", row)
+            self.assertIn("has_virtual_key", row)
+        self.assertNotIn("EXAMPLE00000000", out)
+
+    def test_tools_json_show_key_mask_includes_the_mask(self) -> None:
+        import json as _json
+
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["tools", "--json", "--show-key-mask"], client=client)
+        parsed = _json.loads(out)
+        self.assertIn("virtual_key_masked", parsed["tools"][0])
+        self.assertNotIn("EXAMPLE00000000", out)
+
+    def test_tools_type_filter_is_exact_and_case_insensitive(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["tools", "--type", "api_bundle"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("REQ202608170007", out)
+        self.assertIn("REQ202603090022", out)
+        self.assertNotIn("REQ202604160010", out)  # TRAE
+
+    def test_tools_type_filter_rejects_an_unknown_type(self) -> None:
+        """An unknown type is a usage error, and says what does exist."""
+        client, _, _ = self._client()
+        code, out, err = run_cli(["tools", "--type", "NOPE"], client=client)
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertIn("API_BUNDLE", err + out)
+
+    def test_tools_search_matches_account_name(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["tools", "--search", "002"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("REQ202608170007", out)
+        self.assertNotIn("REQ202604160010", out)
+
+    def test_tools_search_matches_request_type(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["tools", "--search", "trae"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("REQ202604160010", out)
+        self.assertNotIn("REQ202608170007", out)
+
+    def test_tools_search_with_no_match_is_graceful(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["tools", "--search", "zzzznope"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("No tool accounts matched", out)
+
+    def test_tools_filters_compose(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(
+            ["tools", "--active", "--type", "API_BUNDLE"], client=client
+        )
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("REQ202608170007", out)
+        self.assertNotIn("REQ202603090022", out)  # expired
+        self.assertNotIn("REQ202604160010", out)  # TRAE
 
     def test_tools_active_only_filters(self) -> None:
         client, _, _ = self._client()
@@ -256,10 +420,116 @@ class CommandOutputTest(unittest.TestCase):
         self.assertEqual(code, EXIT_OK)
         self.assertIn("2026-", out)
 
+    def test_trend_shows_the_prompt_completion_split(self) -> None:
+        """Objective §25 requires date/model/tokens/prompt/completion."""
+        client, _, _ = self._client()
+        code, out, _ = run_cli(["trend"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("Prompt", out)
+        self.assertIn("Completion", out)
+
+    def test_trend_json_carries_the_split(self) -> None:
+        client, _, _ = self._client()
+        _, out, _ = run_cli(["trend", "--json"], client=client)
+        series = json.loads(out)["series"]
+        self.assertTrue(series)
+        for row in series:
+            self.assertIn("prompt_tokens", row)
+            self.assertIn("completion_tokens", row)
+            self.assertIn("tokens", row)
+
+    def test_trend_split_sums_to_the_reported_tokens(self) -> None:
+        """The split must be self-consistent, or the numbers are misleading."""
+        client, _, _ = self._client()
+        _, out, _ = run_cli(["trend", "--json"], client=client)
+        for row in json.loads(out)["series"]:
+            self.assertEqual(
+                row["prompt_tokens"] + row["completion_tokens"],
+                row["tokens"],
+                f"{row['key']}: prompt+completion must equal tokens",
+            )
+
     def test_trend_by_day_is_accepted(self) -> None:
         client, _, _ = self._client()
         code, out, _ = run_cli(["trend", "--by-day"], client=client)
         self.assertEqual(code, EXIT_OK)
+
+    def test_trend_days_computes_an_inclusive_window(self) -> None:
+        """``--days 7`` is today plus the six days before it.
+
+        Off-by-one here is the classic bug, and it is invisible in the output
+        (a window one day short still renders), so the window is asserted
+        directly on the resolved dates.
+        """
+        import argparse
+        from datetime import date
+
+        from opencsi.cli.trend import resolve_window
+
+        args = argparse.Namespace(
+            start_date=None, end_date=None, from_date=None, to_date=None, days=7
+        )
+        start, end = resolve_window(args, today=date(2026, 9, 19))
+        self.assertEqual(end, "2026-09-19")
+        self.assertEqual(start, "2026-09-13")
+
+    def test_trend_days_one_is_today_only(self) -> None:
+        import argparse
+        from datetime import date
+
+        from opencsi.cli.trend import resolve_window
+
+        args = argparse.Namespace(
+            start_date=None, end_date=None, from_date=None, to_date=None, days=1
+        )
+        start, end = resolve_window(args, today=date(2026, 9, 19))
+        self.assertEqual((start, end), ("2026-09-19", "2026-09-19"))
+
+    def test_trend_from_and_to_alias_the_date_options(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(
+            ["trend", "--from", "2026-08-20", "--to", "2026-09-19"], client=client
+        )
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("DEEPSEEK_V4_FLASH_0731", out)
+
+    def test_trend_days_conflicting_with_a_date_is_a_usage_error(self) -> None:
+        """Guessing which window the user meant would be worse than refusing."""
+        client, _, _ = self._client()
+        code, _, err = run_cli(
+            ["trend", "--days", "7", "--from", "2026-01-01"], client=client
+        )
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertIn("--days cannot be combined", err)
+
+    def test_trend_days_rejects_a_non_positive_count(self) -> None:
+        client, _, _ = self._client()
+        code, _, err = run_cli(["trend", "--days", "0"], client=client)
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertIn("--days", err)
+
+    def test_trend_days_plus_explicit_range_is_rejected(self) -> None:
+        client, _, _ = self._client()
+        code, _, err = run_cli(
+            ["trend", "--days", "7", "--start-date", "2026-01-01", "--end-date", "2026-02-01"],
+            client=client,
+        )
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertIn("--days cannot be combined", err)
+
+    def test_logs_from_and_to_alias_the_date_options(self) -> None:
+        client, _, _ = self._client()
+        code, out, _ = run_cli(
+            ["logs", "--from", "2026-08-01", "--to", "2026-09-01"], client=client
+        )
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("No call log records", out)
+
+    def test_logs_from_without_to_is_a_usage_error(self) -> None:
+        client, _, _ = self._client()
+        code, _, err = run_cli(["logs", "--from", "2026-08-01"], client=client)
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertIn("--end-date", err)
 
     def test_prices_shows_only_enabled_by_default(self) -> None:
         client, _, _ = self._client()
@@ -555,6 +825,34 @@ class FailureReportingTest(unittest.TestCase):
         code, out, _ = run_cli(["doctor", "--no-discover"], client=make_client(provider=provider)[0])
         self.assertNotEqual(code, EXIT_OK)
         self.assertIn("credential", out.lower())
+
+    def test_doctor_names_each_api_endpoint_separately(self) -> None:
+        """One collapsed "contract" line hides which call is broken (§28).
+
+        The value of a diagnosis is localisation: "the contract drifted" sends
+        the user nowhere, while "ai/config/cost: 0 rows" points at the endpoint.
+        """
+        client, _, _ = make_client()
+        code, out, _ = run_cli(["doctor"], client=client)
+        self.assertEqual(code, EXIT_OK, out)
+        for expected in ("getUserInfo", "personalQueueStatus", "ai/config/cost"):
+            self.assertIn(expected, out, f"doctor must name {expected}")
+
+    def test_doctor_json_lists_every_check(self) -> None:
+        client, _, _ = make_client()
+        code, out, _ = run_cli(["doctor", "--json"], client=client)
+        self.assertEqual(code, EXIT_OK)
+        parsed = json.loads(out)
+        names = {c["check"] for c in parsed["checks"]}
+        self.assertIn("python", names)
+        self.assertIn("credential", names)
+        self.assertIn("session", names)
+        self.assertTrue(parsed["ok"])
+
+    def test_doctor_skip_contract_omits_the_endpoint_rows(self) -> None:
+        client, _, _ = make_client()
+        _, out, _ = run_cli(["doctor", "--skip-contract"], client=client)
+        self.assertNotIn("getUserInfo", out)
 
     def test_doctor_hints_go_to_stdout_and_stay_attached(self) -> None:
         """A doctor hint is the deliverable, so it must survive redirection.

@@ -136,6 +136,38 @@ def format_datetime(value: datetime | str | None, *, fmt: str = "%Y-%m-%d %H:%M:
     return str(value)
 
 
+def format_server_time(value: str | None, *, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """Render a server timestamp, preserving the offset it came with.
+
+    The service sends ISO-8601 with an offset (``2026-09-19T21:40:27+08:00``).
+    Converting that to the *viewer's* local time would be a guess about which
+    clock the user cares about, and hardcoding UTC+8 would be wrong the moment
+    the server moves. So the offset is parsed and then shown as-is: the wall
+    time exactly as the server stated it, with the offset appended when it is
+    not the one the reader would assume.
+
+    A value that is not ISO-8601 (the plain ``YYYY-MM-DD HH:mm:ss`` form the API
+    also uses) is returned unchanged rather than reinterpreted.
+    """
+    if value is None or value == "":
+        return PLACEHOLDER
+    text = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    stamp = parsed.strftime(fmt)
+    offset = parsed.utcoffset()
+    if offset is None:
+        return stamp
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+    if minutes:
+        return f"{stamp} UTC{sign}{hours}:{minutes:02d}"
+    return f"{stamp} UTC{sign}{hours}"
+
+
 def format_relative_seconds(seconds: float | None) -> str:
     """``412.3 -> 6m52s``; used for cookie lifetime readouts."""
     if seconds is None:

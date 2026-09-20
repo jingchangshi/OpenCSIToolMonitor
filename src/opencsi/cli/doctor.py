@@ -204,25 +204,26 @@ def run(ctx: CliContext) -> int:
         except OpenCsiError as exc:
             record("session", FAIL, str(exc), exc.hint, exc.exit_code)
 
-    # ── 5. contract ───────────────────────────────────────────────────────
+    # ── 5. per-endpoint API checks ────────────────────────────────────────
+    # The objective (§28) asks for named rows -- getUserInfo,
+    # personalQueueStatus, model prices -- rather than one collapsed "contract"
+    # line, because the whole value of a diagnosis is knowing *which* call is
+    # broken. `contract_check` already produces exactly that granularity, so its
+    # sub-checks are surfaced individually instead of being joined into a string.
     if identity is not None and not ctx.args.skip_contract:
         try:
             result = client.contract_check()
-            failed = [c for c in result["checks"] if not c["ok"]]
-            record(
-                "api contract",
-                OK if result["ok"] else FAIL,
-                (
-                    f"{len(result['checks'])} checks passed"
-                    if result["ok"]
-                    else "; ".join(f"{c['check']}: {c['detail']}" for c in failed)
-                ),
-                None
-                if result["ok"]
-                else "the upstream API changed shape; re-run the investigation",
-            )
+            for sub in result["checks"]:
+                record(
+                    sub["check"],
+                    OK if sub["ok"] else FAIL,
+                    sub.get("detail") or "",
+                    None
+                    if sub["ok"]
+                    else "the upstream API changed shape; re-run the investigation",
+                )
         except OpenCsiError as exc:
-            record("api contract", FAIL, str(exc), exc.hint)
+            record("api contract", FAIL, str(exc), exc.hint, exc.exit_code)
 
     failures = [c for c in checks if c["status"] == FAIL]
     warnings = [c for c in checks if c["status"] == WARN]

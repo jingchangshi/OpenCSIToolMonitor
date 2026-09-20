@@ -49,3 +49,5 @@ _probe_*.py
 _op*.py
 _demo*.py
 _demo_shim/
+_try.py
+_o*.txt

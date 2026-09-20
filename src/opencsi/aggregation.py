@@ -248,6 +248,50 @@ def aggregate_trend(
     return out
 
 
+@dataclass(frozen=True)
+class TrendBucket:
+    """Prompt/completion split for one trend group.
+
+    ``tokens`` is the server's own total; ``prompt + completion`` is the split
+    the server reports alongside it. The two are kept separate rather than
+    derived, because they can legitimately disagree (a cached or reasoning
+    request may not bill the way the split suggests), and silently recomputing
+    the total would hide that.
+    """
+
+    key: str = ""
+    tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def split_total(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+def aggregate_trend_detail(
+    points: Sequence[TokenTrendPoint],
+    *,
+    by_model: bool = True,
+) -> tuple[TrendBucket, ...]:
+    """Group the trend series with its prompt/completion split (objective §25)."""
+    buckets: dict[str, TrendBucket] = {}
+    order: list[str] = []
+    for point in points:
+        key = point.request_type if by_model else point.date
+        current = buckets.get(key)
+        if current is None:
+            order.append(key)
+            current = TrendBucket(key=key)
+        buckets[key] = TrendBucket(
+            key=key,
+            tokens=current.tokens + point.tokens,
+            prompt_tokens=current.prompt_tokens + point.prompt_tokens,
+            completion_tokens=current.completion_tokens + point.completion_tokens,
+        )
+    return tuple(buckets[k] for k in order)
+
+
 def group_grants_by_type(grants: Iterable[ToolGrant]) -> dict[str, list[ToolGrant]]:
     """Group tool grants by ``requestType``, preserving encounter order."""
     out: dict[str, list[ToolGrant]] = {}

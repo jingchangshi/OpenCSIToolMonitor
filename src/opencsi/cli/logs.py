@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..errors import UsageError
 from ..formatting import Table, format_int, format_relative_seconds, or_dash, section
 from .context import CliContext, add_common_options, add_date_options, validated_dates
 
@@ -40,6 +41,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     add_common_options(parser)
     add_date_options(parser)
+    parser.add_argument(
+        "--from",
+        dest="from_date",
+        metavar="YYYY-MM-DD",
+        help="alias for --start-date",
+    )
+    parser.add_argument(
+        "--to",
+        dest="to_date",
+        metavar="YYYY-MM-DD",
+        help="alias for --end-date",
+    )
     parser.add_argument("--page", type=int, default=1, help="page number (default: 1)")
     parser.add_argument(
         "--page-size",
@@ -55,8 +68,24 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.set_defaults(handler=run)
 
 
+def resolve_window(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """Accept ``--from``/``--to`` as aliases for ``--start-date``/``--end-date``.
+
+    Same names as ``trend`` so the two commands are not memorised separately.
+    """
+    if getattr(args, "from_date", None):
+        if getattr(args, "start_date", None):
+            raise UsageError("--from and --start-date are the same option; give one")
+        args.start_date = args.from_date
+    if getattr(args, "to_date", None):
+        if getattr(args, "end_date", None):
+            raise UsageError("--to and --end-date are the same option; give one")
+        args.end_date = args.to_date
+    return validated_dates(args)
+
+
 def run(ctx: CliContext) -> int:
-    start, end = validated_dates(ctx.args)
+    start, end = resolve_window(ctx.args)
     client = ctx.make_client()
     result = client.get_call_logs(
         page=ctx.args.page,

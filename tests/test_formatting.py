@@ -30,6 +30,7 @@ from opencsi.formatting import (
     format_price,
     format_ratio,
     format_relative_seconds,
+    format_server_time,
     or_dash,
     pad,
     render_kv,
@@ -191,6 +192,26 @@ class ScalarFormattingTest(unittest.TestCase):
 
         value = datetime(2026, 8, 17, 16, 28, 0)
         self.assertEqual(format_datetime(value), "2026-08-17 16:28:00")
+
+    def test_format_server_time_keeps_the_offset_it_was_given(self) -> None:
+        """The server's wall time is reported, not a guessed conversion.
+
+        The service sends ISO-8601 with an offset. Converting to the viewer's
+        local time would assume which clock the user cares about, and hardcoding
+        UTC+8 would be wrong the moment the server moves (objective §58).
+        """
+        self.assertEqual(format_server_time("2026-09-19T21:40:27+08:00"), "2026-09-19 21:40 UTC+8")
+        self.assertEqual(format_server_time("2026-09-19T13:40:27+00:00"), "2026-09-19 13:40 UTC+0")
+        self.assertEqual(format_server_time("2026-09-19T21:40:27Z"), "2026-09-19 21:40 UTC+0")
+        # A half-hour offset must not be truncated to whole hours.
+        self.assertEqual(format_server_time("2026-09-19T21:40:27+05:30"), "2026-09-19 21:40 UTC+5:30")
+
+    def test_format_server_time_does_not_reinterpret_a_plain_timestamp(self) -> None:
+        """A naive timestamp carries no offset, so none is invented."""
+        self.assertEqual(format_server_time("2026-08-17 16:28:00"), "2026-08-17 16:28")
+        self.assertEqual(format_server_time("not a date"), "not a date")
+        self.assertEqual(format_server_time(None), PLACEHOLDER)
+        self.assertEqual(format_server_time(""), PLACEHOLDER)
 
     def test_format_relative_seconds(self) -> None:
         self.assertEqual(format_relative_seconds(0), "0s")
