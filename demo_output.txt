@@ -1,35 +1,81 @@
 ========================================================================
-end-to-end demo against http://127.0.0.1:62768 (fixtures replayed over a real socket)
+end-to-end demo against http://127.0.0.1:60097 (fixtures replayed over a real socket)
 ========================================================================
 
 $ opencsi status
 ------------------------------------------------------------------------
-== openCsiTool session ==
-API origin           : http://127.0.0.1:62768
+== openCsiTool ==
+Session : OK
+User     : shijingchang
+Employee : 653124
+Role     : 普通用户
+Data updated : 2026-09-19 21:40 UTC+8
+
+Tokens        : 3,061,130,999
+Requests      : 21,632
+PRs           : 246
+Added lines   : 31,167
+AI generated  : 3,150
+AI adopted    : 120
+Adoption rate : 3.8%
+
+Active tools  : 2
+Expired tools : 1
+[exit 0]
+
+$ opencsi status --verbose
+------------------------------------------------------------------------
+== openCsiTool ==
+Session : OK
+User     : shijingchang
+Employee : 653124
+Role     : 普通用户
+Data updated : 2026-09-19 21:40 UTC+8
+
+Tokens        : 3,061,130,999
+Requests      : 21,632
+PRs           : 246
+Added lines   : 31,167
+AI generated  : 3,150
+AI adopted    : 120
+Adoption rate : 3.8%
+
+Active tools  : 2
+Expired tools : 1
+
+== Diagnostics (--verbose) ==
+API origin           : http://127.0.0.1:60097
 Credential source    : manual
 Credential available : yes
 Cookie lifetime left : -
-Session valid        : yes
-
-== Signed in as ==
-Display name : shijingchang
-Login        : shijingchang
-Employee ID  : 653124
-User ID      : 0dd935e8d2234014a215aa922417094c
-Organization : 体验项目
-Role view    : 普通用户
-Roles        : VISITOR
+User ID              : 0dd935e8d2234014a215aa922417094c
+Account ID           : 680a24c143c294728be7bca3
+Login                : shijingchang
+Organization         : 体验项目
+Organization ID      : fba54d1682e841d196d823b4b548c4b9
+Roles                : VISITOR
 [exit 0]
 
 $ opencsi tools
 ------------------------------------------------------------------------
-  ID  Request No.      Type        Account         Status  Tokens  Key
-----  ---------------  ----------  --------------  ------  ------  --------------
-5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿  sk-bM4LUSm****
-1954  REQ202604160010  TRAE        AI编程助手-001  使用中   2.6亿  -
-1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿  -
+  ID  Request No.      Type        Account         Status  Tokens
+----  ---------------  ----------  --------------  ------  ------
+5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿
+1954  REQ202604160010  TRAE        AI编程助手-001  使用中   2.6亿
+1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿
 
 3 account(s): 2 使用中, 1 已失效
+[stderr] note: virtual keys are hidden. Re-run with --show-key-mask to see the site's own masked form (the full key is never shown).
+[exit 0]
+
+$ opencsi tools --show-key-mask --type API_BUNDLE
+------------------------------------------------------------------------
+  ID  Request No.      Type        Account         Status  Tokens  Key (masked)
+----  ---------------  ----------  --------------  ------  ------  --------------
+5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿  sk-bM4LUSm****
+1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿  -
+
+2 account(s): 1 使用中, 1 已失效
 [exit 0]
 
 $ opencsi usage
@@ -55,20 +101,34 @@ TRAE        TRAE           2.6亿   8.5%
 Data fresh time (server) : 2026-09-19T21:40:27+08:00
 ETL time                 : 2026-09-20T05:39:58+08:00
 Replication time         : 2026-09-19T21:40:30+08:00
-Fetched at (this run)    : 2026-09-20 01:29:30
+Fetched at (this run)    : 2026-09-20 02:45:50
 Trend window             : all dates (server default)
 [exit 0]
 
 $ opencsi trend
 ------------------------------------------------------------------------
 == Token trend by model ==
-Key                     Display name             Tokens  Share
-----------------------  ----------------------  -------  -----
-GLM_5_3_FLASH           GLM-5.3-Flash             9.7亿  69.6%
-DEEPSEEK_V4_FLASH_0731  DeepSeek-V4-Flash-0731    4.2亿  29.9%
-QWEN3_8_FLASH           Qwen3.8-Flash           705.3万   0.5%
-GLM_5_3                 GLM-5.3                  44.3万   0.0%
-DEEPSEEK_V4_PRO         DeepSeek-V4-Pro          23.4万   0.0%
+Key                     Display name             Tokens   Prompt  Completion  Share
+----------------------  ----------------------  -------  -------  ----------  -----
+GLM_5_3_FLASH           GLM-5.3-Flash             9.7亿    9.7亿     583.1万  69.6%
+DEEPSEEK_V4_FLASH_0731  DeepSeek-V4-Flash-0731    4.2亿    4.1亿     290.4万  29.9%
+QWEN3_8_FLASH           Qwen3.8-Flash           705.3万  690.1万      15.2万   0.5%
+GLM_5_3                 GLM-5.3                  44.3万   44.1万        1789   0.0%
+DEEPSEEK_V4_PRO         DeepSeek-V4-Pro          23.4万   20.4万       3.0万   0.0%
+
+42 sample(s) across 30 date(s) and 5 model(s); series total 14.0亿 tokens.
+[exit 0]
+
+$ opencsi trend --days 7
+------------------------------------------------------------------------
+== Token trend by model ==
+Key                     Display name             Tokens   Prompt  Completion  Share
+----------------------  ----------------------  -------  -------  ----------  -----
+GLM_5_3_FLASH           GLM-5.3-Flash             9.7亿    9.7亿     583.1万  69.6%
+DEEPSEEK_V4_FLASH_0731  DeepSeek-V4-Flash-0731    4.2亿    4.1亿     290.4万  29.9%
+QWEN3_8_FLASH           Qwen3.8-Flash           705.3万  690.1万      15.2万   0.5%
+GLM_5_3                 GLM-5.3                  44.3万   44.1万        1789   0.0%
+DEEPSEEK_V4_PRO         DeepSeek-V4-Pro          23.4万   20.4万       3.0万   0.0%
 
 42 sample(s) across 30 date(s) and 5 model(s); series total 14.0亿 tokens.
 [exit 0]
@@ -107,7 +167,7 @@ No call log records.
 $ opencsi doctor --skip-contract
 ------------------------------------------------------------------------
 == opencsi doctor (0.1.0) ==
-API origin : http://127.0.0.1:62768
+API origin : http://127.0.0.1:60097
 User-Agent : opencsi-cli/0.1.0
 
 [ok]   python: 3.14.6 on Windows 11
@@ -120,4 +180,4 @@ All checks passed, 1 warning(s).
 
 ========================================================================
 Every path the CLI requested had a fixture.
-7/7 commands exited 0.
+10/10 commands exited 0.

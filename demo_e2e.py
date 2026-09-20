@@ -94,9 +94,12 @@ def main() -> int:
 
     commands = [
         ["status"],
+        ["status", "--verbose"],
         ["tools"],
+        ["tools", "--show-key-mask", "--type", "API_BUNDLE"],
         ["usage"],
         ["trend"],
+        ["trend", "--days", "7"],
         ["prices"],
         ["logs"],
         ["doctor", "--skip-contract"],

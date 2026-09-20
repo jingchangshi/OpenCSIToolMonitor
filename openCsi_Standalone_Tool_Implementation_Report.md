@@ -18,7 +18,7 @@ OpenCsiToolClient queries it.  CLI exposes it.
 
 **Complete and independently runnable.** The deliverable is a zero-dependency,
 pure-standard-library Python package plus a `opencsi` command line, verified by
-351 offline tests and a 42-check replay of the original investigation baselines.
+387 offline tests and a 42-check replay of the original investigation baselines.
 
 | Claim | Status | Evidence |
 | --- | --- | --- |
@@ -28,8 +28,9 @@ pure-standard-library Python package plus a `opencsi` command line, verified by
 | Zero third-party runtime dependencies | **Yes** | `dependencies = []` in `pyproject.toml`; the AST scan above confirms it structurally, not just declaratively. |
 | Read-only | **Yes** | `HttpTransport` exposes no `post`/`put`/`patch`/`delete`/`request` attribute at all; asserted by test. Every call is a GET. |
 | Credentials never leave the browser's control | **Yes** | `Authorization` is never constructed; asserted against the headers a real HTTP server actually received. |
-| Verifiable offline | **Yes** | 351 tests, no network, run under `unittest`. Also clean under `-W error::ResourceWarning`. |
-| Verifiable end to end | **Yes** | `demo_e2e.py` runs the real CLI over real sockets against replayed fixtures: 7/7 commands exit 0. |
+| Verifiable offline | **Yes** | 387 tests, no network, run under `unittest` and under `pytest`. Also clean under `-W error::ResourceWarning`. |
+| Installable | **Yes** | `uv pip install -e .` succeeds; `opencsi --version` and `opencsi --help` were run from `C:\`, outside the repository, so nothing depends on the working directory or `PYTHONPATH`. Plain `pip install -e .` fails here only because this machine has no `setuptools` and no package index — see §10. |
+| Verifiable end to end | **Yes** | `demo_e2e.py` runs the real CLI over real sockets against replayed fixtures: 10/10 commands exit 0. |
 | Live-site authenticated query | **Blocked by environment** | See §7. The session had expired; I did not sign in on the user's behalf. The unauthenticated HTTP path *was* verified live, and the CDP provider was validated against real Chrome. |
 
 The one thing this report does **not** claim is a successful authenticated fetch
@@ -139,18 +140,19 @@ src/opencsi/
 
 | Command | What it does | Requests |
 | --- | --- | --- |
-| `status` | Confirms a usable session and prints who is signed in | 1 (`getUserInfo`) |
-| `tools` | Lists granted AI tool accounts with tokens and masked keys | 1 (queue status) |
+| `status` | Session, identity, and the headline numbers; `--verbose` adds internal IDs, `--no-summary` skips the second request | 1–2 |
+| `tools` | Lists granted AI tool accounts with tokens; `--type`, `--search`, `--active`, `--show-key-mask` | 1 (queue status) |
 | `usage` | Personal overview: tokens, requests, PRs, lines, adoption rate, per-tool split, data freshness | 1 (queue status) |
-| `trend` | Token trend by model, plus date-window filtering | 1 (queue status) |
+| `trend` | Token trend by model or date, with prompt/completion split; `--days`, `--from`, `--to` | 1 (queue status) |
 | `prices` | Model/tool price list, enabled rows only by default | 1 (`ai/config/cost`) |
-| `logs` | Recent LLM gateway call logs | 1 (`call-logs`) |
-| `doctor` | Ordered diagnostic: python → DevTools endpoint → credential → session → contract | 0–3 |
+| `logs` | Recent LLM gateway call logs; `--from`/`--to` | 1 (`call-logs`) |
+| `doctor` | Ordered diagnostic; each API endpoint on its own row | 0–11 |
 | `login` | Opens the login page and verifies the resulting session | 1–2 |
 | `contract-check` | Verifies the live API still matches the investigated contract | 5 |
 
 Global options: `--json`, `-v`, `--cdp`, `--no-discover`, `--ports`,
-`--base-url`, `--timeout`, `--cache-ttl`, `--no-cache`, `--no-proxy`.
+`--base-url`, `--timeout`, `--cache-ttl`, `--no-cache`, `--refresh`,
+`--no-proxy`.
 
 ### Behaviours worth calling out
 
@@ -165,10 +167,21 @@ Global options: `--json`, `-v`, `--cdp`, `--no-discover`, `--ports`,
 - **Distinct exit codes** so scripts can branch on the cause (§5).
 - **Structural redaction** applied to every output path, including exceptions
   and tracebacks — not just the happy path.
-- **In-process TTL cache** so one `usage` invocation does not re-fetch.
+- **Secrets are opt-in, and even then only the mask.** `tools` hides the virtual
+  key entirely unless `--show-key-mask`, which reveals only the site's own
+  `sk-xxxxxxxx****` form. `status` hides `userId` / `accountId` / organization
+  UUID unless `--verbose`.
+- **Server wall time is reported as stated.** `format_server_time` parses the
+  ISO-8601 offset the API sends and keeps it (`2026-09-19T21:40:27+08:00` →
+  `2026-09-19 21:40 UTC+8`) instead of converting to a guessed local zone.
+- **In-process TTL cache** so one `usage` invocation does not re-fetch;
+  `--no-cache` and `--refresh` both defeat it, and `--refresh` additionally
+  re-reads the credential where the provider can.
 - **Date filtering is honestly scoped.** `startDate`/`endDate` affect **only**
   `tokenTrend`; the summary totals are server-side and ignore them. The tool
-  says so rather than implying otherwise.
+  says so rather than implying otherwise. `--days N` means today plus the N-1
+  days before it, and combining it with an explicit range is a usage error
+  rather than a silent preference.
 
 ---
 
@@ -178,7 +191,7 @@ Global options: `--json`, `-v`, `--cdp`, `--no-discover`, `--ports`,
 $ opencsi --help
 usage: opencsi [-h] [--version] [--json] [-v] [--cdp URL] [--no-discover]
                [--ports P[,P...]] [--base-url URL] [--timeout SECONDS]
-               [--cache-ttl SECONDS] [--no-cache] [--no-proxy]
+               [--cache-ttl SECONDS] [--no-cache] [--refresh] [--no-proxy]
                COMMAND ...
 
 Read-only command line client for openCsiTool "My Tools". Uses the session
@@ -201,15 +214,64 @@ Real output, produced by `demo_e2e.py` against replayed fixtures over a real
 socket (`demo_output.txt`):
 
 ```
+$ opencsi status
+== openCsiTool ==
+Session : OK
+User     : shijingchang
+Employee : 653124
+Role     : 普通用户
+Data updated : 2026-09-19 21:40 UTC+8
+
+Tokens        : 3,061,130,999
+Requests      : 21,632
+PRs           : 246
+Added lines   : 31,167
+AI generated  : 3,150
+AI adopted    : 120
+Adoption rate : 3.8%
+
+Active tools  : 2
+Expired tools : 1
+[exit 0]
+```
+
+No `userId`, `accountId`, or organization UUID appears — those move under
+`--verbose`, together with the credential diagnostics. The point is that the
+default output is something a user can paste into a bug report or a screenshot
+without exposing identifiers they did not mean to share.
+
+```
 $ opencsi tools
-  ID  Request No.      Type        Account         Status  Tokens  Key
-----  ---------------  ----------  --------------  ------  ------  --------------
-5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿  sk-bM4LUSm****
-1954  REQ202604160010  TRAE        AI编程助手-001  使用中   2.6亿  -
-1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿  -
+  ID  Request No.      Type        Account         Status  Tokens
+----  ---------------  ----------  --------------  ------  ------
+5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿
+1954  REQ202604160010  TRAE        AI编程助手-001  使用中   2.6亿
+1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿
 
 3 account(s): 2 使用中, 1 已失效
+[stderr] note: virtual keys are hidden. Re-run with --show-key-mask to see the
+         site's own masked form (the full key is never shown).
 ```
+
+Note the missing `Key` column: virtual keys are hidden unless
+`--show-key-mask` is passed, and even then only the site's own mask is shown.
+
+```
+$ opencsi trend
+== Token trend by model ==
+Key                     Display name             Tokens   Prompt  Completion  Share
+----------------------  ----------------------  -------  -------  ----------  -----
+GLM_5_3_FLASH           GLM-5.3-Flash             9.7亿    9.7亿     583.1万  69.6%
+DEEPSEEK_V4_FLASH_0731  DeepSeek-V4-Flash-0731    4.2亿    4.1亿     290.4万  29.9%
+QWEN3_8_FLASH           Qwen3.8-Flash           705.3万  690.1万      15.2万   0.5%
+
+42 sample(s) across 30 date(s) and 5 model(s); series total 14.0亿 tokens.
+```
+
+(`trend --days 7` is also exercised in the demo. It renders identically there
+because the fixture server replays one static response and ignores query
+strings; the window itself is asserted directly on the resolved dates in
+`test_cli`, where the off-by-one would otherwise be invisible.)
 
 ```
 $ opencsi usage
@@ -329,11 +391,11 @@ credential cannot spin.
 
 ## 6. Tests
 
-**351 tests, all passing, fully offline**, run with `unittest`:
+**387 tests, all passing, fully offline**, run with `unittest`:
 
 ```
 $ cd tests && python -m unittest discover -s . -p "test_*.py" -t .
-Ran 351 tests in 11.3s
+Ran 387 tests in 11.1s
 OK
 ```
 
@@ -344,8 +406,8 @@ OK
 | `test_auth.py` | 17 | Provider protocol, status objects, manual provider |
 | `test_cdp.py` | 50 | CDP provider against an in-process fake DevTools server |
 | `test_client.py` | 30 | Envelope handling, caching, error mapping, contract check |
-| `test_formatting.py` | 59 | CJK width, 亿/万 rule, tables, sections |
-| `test_cli.py` | 59 | Argument parsing, exit codes, JSON, stdout/stderr discipline |
+| `test_formatting.py` | 61 | CJK width, 亿/万 rule, tables, sections |
+| `test_cli.py` | 93 | Argument parsing, exit codes, JSON, stdout/stderr discipline |
 | `test_proxy.py` | 20 | Proxy resolution, `--no-proxy`, credential stripping |
 | `test_transport_integration.py` | 18 | **Real HTTP over a real socket** |
 
@@ -426,10 +488,14 @@ What stands in its place:
 
 1. The API contract was verified live during the investigation phase — out of
    browser, with a cookie, **12/12 endpoints returned 200**.
-2. Those exact responses are committed as sanitized fixtures and replayed by 351
+2. Those exact responses are committed as sanitized fixtures and replayed by 387
    offline tests.
 3. `demo_e2e.py` runs the real CLI over real sockets against those fixtures:
-   **7/7 commands exit 0**, and every path requested had a fixture.
+   **10/10 commands exit 0**, and every path requested had a fixture. The demo
+   exercises `status`, `status --verbose`, `tools`, `tools --show-key-mask
+   --type API_BUNDLE`, `usage`, `trend`, `trend --days 7`, `prices`, `logs` and
+   `doctor --skip-contract`; its captured output is committed as
+   `demo_output.txt`.
 
 To complete this check, start a browser with remote debugging, sign in at
 `https://opencsitool.com/myTools`, and run `opencsi doctor` followed by
@@ -489,7 +555,7 @@ screenshots. It is gitignored.
 
 ## 9. Git commits
 
-Thirteen commits, working tree clean. The history is ordered so that each commit's
+Sixteen commits, working tree clean. The history is ordered so that each commit's
 tree imports and passes its own tests — commits 2 and 3 required writing
 CDP-free variants of two `__init__.py` files so the intermediate trees were
 coherent.
@@ -508,6 +574,9 @@ d9e90aa  fix: derive doctor's exit code from the cause, not the check name
 eaa4565  test: add an end-to-end demo that runs the real CLI over a real socket
 dc9b853  fix: stop masking the numbers under a token-ish key
 d2b4695  test: detect fixture credentials by shape, not by stored fragment
+0146827  docs: add the standalone tool implementation report
+aa1a5e1  feat: close the gaps between the CLI and the objective's command spec
+4a9183e  feat: implement --refresh, which the README already documented
 ```
 
 61 tracked files, 4,990 lines of source, 3,600 lines of tests.
@@ -578,6 +647,42 @@ is worse than one that says nothing, because the user acts on it. The fix in
 each case was to derive the output from what was actually there rather than
 from a label.
 
+### Found by auditing the CLI against the written specification
+
+A later pass compared every command against the required flag list rather than
+trusting that "it works". Four flags were missing and one was a fiction.
+
+**9. `--refresh` was documented but did not exist.** The README listed it in the
+global options table; argparse rejected it. A documented flag that errors out is
+worse than an undocumented one, because the user assumes they mistyped it.
+
+Implementing it exposed a second, subtler bug. My first version called
+`provider.invalidate()`, on the reasoning that a refresh should drop anything
+cached. That is right for `CdpCookieProvider`, whose `invalidate()` drops a
+cache — but `ManualCookieProvider.invalidate()` is **permanent**, because there
+is no source to re-read. So `--refresh` destroyed the user's only credential and
+then reported "session expired": wrong, and unactionable. `refresh()` is the
+verb whose contract is "re-read if you can", and it is a no-op for the manual
+provider. The regression test asserts the token survives and was confirmed to
+fail (`None != 'TESTCOOKIE...'`) against the `invalidate()` version.
+
+This is objective §55 exactly: the two providers need different `invalidate()`
+semantics, and a caller that assumes one shape breaks the other.
+
+**10. The CLI did not match the specified command surface.** `tools` lacked
+`--type`, `--search` and `--show-key-mask`; `trend` lacked `--days`, `--from`
+and `--to`; `logs` lacked `--from`/`--to`; `status` showed credential internals
+by default and none of the headline numbers; `doctor` collapsed eleven
+per-endpoint checks into one unactionable "api contract" line. All are now
+implemented, with the reasoning recorded in commit `aa1a5e1`.
+
+Two deliberate behaviour changes came out of this, both tightening rather than
+loosening:
+
+- `tools` now **hides virtual keys by default**. Even the site's masked
+  `sk-xxxxxxxx****` form is account-identifying, so it is opt-in.
+- `status` hides `userId` / `accountId` / organization UUID unless `--verbose`.
+
 ---
 
 ## 10. Remaining limitations
@@ -611,11 +716,37 @@ from a label.
 - **No GUI.** No PySide, WinUI, tray icon, or web dashboard. Deferred to Phase 2.
 - **No agent adapters.** No MCP server, no LLM tool definitions, no ChatGPT or
   Claude integration.
-- **No packaging.** The package is installable in principle
-  (`pyproject.toml`, `requires-python = ">=3.10"`, `[project.scripts]`), but this
-  environment has no `setuptools`/`wheel` and no network for `pip`, so
-  `pip install -e .` was not performed. `PYTHONPATH=src` works today, and
-  `uv 0.12.13` is available for a real build.
+
+### Packaging — now verified
+
+`pip install -e .` **fails in this environment**, because there is no
+`setuptools`/`wheel` and no package index to fetch them from:
+
+```
+BackendUnavailable: Cannot import 'setuptools.build_meta'
+```
+
+`uv pip install -e .` **succeeds**, and the installed entry point was verified
+running from outside the repository, so it does not depend on the current
+directory or on `PYTHONPATH`:
+
+```
+$ cd C:\ && opencsi --version
+opencsi 0.1.0
+
+$ opencsi --help
+usage: opencsi [-h] [--version] [--json] [-v] [--cdp URL] ...
+```
+
+`uv pip install pytest` also works, so the suite runs under both runners:
+
+```
+$ python -m unittest discover -s . -p "test_*.py" -t .   # 387 tests, OK
+$ pytest                                                  # 387 passed
+```
+
+`pytest` needs no environment setup: `pyproject.toml` sets
+`pythonpath = ["src"]`, so a bare `pytest` from the repository root works.
 
 ---
 
@@ -623,7 +754,22 @@ from a label.
 
 ### Requirements
 
-Python **3.10+**, standard library only. No `pip install` needed.
+Python **3.10+**, standard library only. No runtime dependencies to install.
+
+### Install
+
+```bash
+uv pip install -e .      # or: pip install -e .  (needs setuptools/wheel)
+opencsi --help
+```
+
+Or run it with no install at all, straight from the checkout:
+
+```bash
+cd OpenCSIToolMonitor
+export PYTHONPATH=src            # Windows: $env:PYTHONPATH="src"
+python -m opencsi status
+```
 
 ### Getting a session
 
@@ -657,38 +803,44 @@ Sign in **once** in that window, then leave it open.
 ### Running
 
 ```bash
-cd OpenCSIToolMonitor
-export PYTHONPATH=src            # Windows: $env:PYTHONPATH="src"
-
-python -m opencsi doctor         # start here: diagnose the whole chain
-python -m opencsi status         # who am I signed in as?
-python -m opencsi usage          # the headline numbers
-python -m opencsi tools          # granted accounts
-python -m opencsi trend          # tokens by model
-python -m opencsi prices         # price list
-python -m opencsi logs           # gateway call logs
+opencsi doctor         # start here: diagnose the whole chain
+opencsi status         # session, identity and the headline numbers
+opencsi usage          # the full data overview
+opencsi tools          # granted accounts
+opencsi trend          # tokens by model, with prompt/completion split
+opencsi prices         # price list
+opencsi logs           # gateway call logs
 ```
+
+Without installing, the same commands work as `opencsi <command>`
+from the checkout with `PYTHONPATH=src`.
 
 ### Common options
 
 ```bash
-python -m opencsi usage --json                    # machine-readable
-python -m opencsi trend --start-date 2026-08-20 --end-date 2026-09-19
-python -m opencsi status --cdp http://127.0.0.1:9223
-python -m opencsi status --no-proxy               # if a local proxy breaks TLS
-python -m opencsi status -v                       # log request paths
+opencsi usage --json                              # machine-readable
+opencsi usage --refresh                           # bypass the data cache
+opencsi status --verbose                          # reveal userId / org UUID
+opencsi status --no-summary                       # session check only, one request
+opencsi tools --type API_BUNDLE --show-key-mask
+opencsi tools --search 助手                        # client-side filter
+opencsi trend --days 7                            # today plus the six before it
+opencsi trend --from 2026-08-20 --to 2026-09-19
+opencsi status --cdp http://127.0.0.1:9223
+opencsi status --no-proxy                         # if a local proxy breaks TLS
+opencsi status -v                                 # log request paths
 ```
 
 ### Using it from a script
 
 ```bash
-python -m opencsi usage --json | jq '.summary.total_tokens'
+opencsi usage --json | jq '.summary.total_tokens'
 ```
 
 Branch on the exit code to tell causes apart:
 
 ```bash
-python -m opencsi status
+opencsi status
 case $? in
   0)  echo "signed in" ;;
   10) echo "start the browser with --remote-debugging-port=9222" ;;
@@ -718,9 +870,9 @@ lives behind that one method and can be replaced without touching the client.
 ### Verifying the installation
 
 ```bash
-cd tests && python -m unittest discover -s . -p "test_*.py" -t .   # 351 tests
+cd tests && python -m unittest discover -s . -p "test_*.py" -t .   # 387 tests
 cd .. && python verify_client.py                                   # 42/42
-python demo_e2e.py                                                 # 7/7 commands
+python demo_e2e.py                                                 # 10/10 commands
 ```
 
 All three run fully offline.
@@ -732,9 +884,9 @@ All three run fully offline.
 If the authenticated path needs to be confirmed, with a browser signed in:
 
 ```bash
-python -m opencsi doctor      # expect all checks to pass
-python -m opencsi usage       # compare against 30.6亿 / 2.2万 / 3.8%
-python -m opencsi contract-check   # expect all checks to pass
+opencsi doctor      # expect all checks to pass
+opencsi usage       # compare against 30.6亿 / 2.2万 / 3.8%
+opencsi contract-check   # expect all checks to pass
 ```
 
 If `contract-check` reports failures while the site works normally, the upstream
