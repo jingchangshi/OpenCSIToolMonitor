@@ -1,0 +1,665 @@
+# opencsi — openCsiTool 只读命令行客户端
+
+一个**独立**的 openCsiTool "My Tools"（我的工具）只读查询工具。
+
+它不需要 DSH、不需要 AI Agent、不需要浏览器自动化框架，只依赖 **Python 标准库**。
+认证方式是从**你自己已经登录的浏览器**里读取那个 HttpOnly 的会话 Cookie，
+然后直接以普通 HTTP 请求访问站点自己的内部 Web API。
+
+> **This project uses an internal web API observed from the user's own
+> authenticated openCsiTool session. It is not an official openCsiTool public
+> API client.**
+>
+> 本项目使用的是**从用户本人已认证会话中观测到的内部 Web API**，
+> 它**不是** openCsiTool 官方公开 API 客户端。官方站点未提供公开 API 文档，
+> 详见 [`docs/api-investigation.md`](docs/api-investigation.md)。
+
+---
+
+## 目录
+
+- [它是什么，不是什么](#它是什么不是什么)
+- [环境要求](#环境要求)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [浏览器准备（重要）](#浏览器准备重要)
+- [命令一览](#命令一览)
+- [命令详解](#命令详解)
+- [退出码](#退出码)
+- [安全性](#安全性)
+- [常见问题](#常见问题)
+- [开发](#开发)
+
+---
+
+## 它是什么，不是什么
+
+**是什么**
+
+- 一个只读 CLI：`status` / `tools` / `usage` / `trend` / `prices` / `logs` / `doctor`
+- 一个可被其他程序 import 的库：`from opencsi import OpenCsiToolClient`
+- 纯标准库实现，`dependencies = []`，可在 Windows / Linux / macOS 上直接运行
+
+**不是什么**
+
+- ❌ 不是 GUI（图形界面属于后续阶段）
+- ❌ 不是官方 API 客户端（见上方声明）
+- ❌ 不会写任何数据 —— 客户端**只实现了 GET**，连 `post()` 方法都不存在
+- ❌ 不访问任何管理端接口
+- ❌ 不需要 Playwright / Selenium / Browser Use / LLM
+
+### 架构原则
+
+```
+DSH 开发它。DSH 不运行它。
+浏览器 认证它。浏览器 不查询它。
+OpenCsiToolClient 查询它。CLI 暴露它。
+```
+
+核心 API 客户端**只认识 `CredentialProvider` 接口**，
+完全不知道 Chrome、Edge、WebSocket、CDP 或 target 的存在。
+浏览器只负责"提供 Cookie"，之后所有查询都是普通的 HTTPS 请求。
+
+```
+                    ┌──────────────────────┐
+                    │   opencsi (CLI)      │  ← 用户入口
+                    └──────────┬───────────┘
+                               │
+                    ┌──────────▼───────────┐
+                    │  OpenCsiToolClient   │  ← 纯 HTTP，只读
+                    └──────────┬───────────┘
+                               │  只认识这一个接口
+                    ┌──────────▼───────────┐
+                    │  CredentialProvider  │  ← 协议
+                    └────┬────────────┬────┘
+                         │            │
+        ┌────────────────▼──┐   ┌─────▼──────────────┐
+        │ CdpCookieProvider │   │ ManualCookieProvider│
+        │ (读浏览器 Cookie) │   │ (手工输入/测试)     │
+        └───────────────────┘   └────────────────────┘
+```
+
+---
+
+## 环境要求
+
+| 项目 | 要求 |
+| --- | --- |
+| Python | **3.10 或更高**（开发与验证使用 3.14.6） |
+| 第三方依赖 | **无**（`dependencies = []`） |
+| 操作系统 | Windows、Linux、macOS |
+| 浏览器 | 一个已登录 openCsiTool 的 Chromium 系浏览器（Chrome / Edge / Brave） |
+
+不需要 `pip install` 任何包。不需要 Node.js。不需要 Docker。
+
+---
+
+## 安装
+
+### 方式一：直接运行（零安装，推荐先试这个）
+
+```bash
+git clone <this-repo>
+cd OpenCSIToolMonitor
+
+# Windows (PowerShell)
+$env:PYTHONPATH = "$PWD\src"
+python -m opencsi --help
+
+# Linux / macOS
+PYTHONPATH=src python -m opencsi --help
+```
+
+### 方式二：可编辑安装（获得 `opencsi` 命令）
+
+```bash
+pip install -e .
+opencsi --help
+```
+
+如果你的环境里 `pip install -e .` 因为缺少 `setuptools` 而失败，可以用 `uv`：
+
+```bash
+uv pip install -e . --no-build-isolation
+```
+
+### 方式三：验证安装
+
+```bash
+opencsi --version     # opencsi 0.1.0
+opencsi doctor        # 检查整条链路
+```
+
+---
+
+## 快速开始
+
+```bash
+# 1. 先看当前会话状态（最快确认认证是否可用）
+opencsi status
+
+# 2. 看核心数据：token、请求数、PR、代码行
+opencsi usage
+
+# 3. 列出所有已授权的工具账号
+opencsi tools
+```
+
+典型输出：
+
+```
+== openCsiTool session ==
+API origin           : https://opencsitool.com
+Credential source    : cdp
+Credential available : yes
+Cookie lifetime left : 58m12s
+Session valid        : yes
+
+== Signed in as ==
+Display name : shijingchang
+Login        : shijingchang
+Employee ID  : 653124
+Organization : 体验项目
+Role view    : 普通用户
+Roles        : VISITOR
+```
+
+```
+== Personal data overview ==
+Total tokens         : 30.6亿
+Total tokens (exact) : 3,061,130,999
+Total requests       : 2.2万
+Pull requests        : 246
+Added lines          : 3.1万
+Adoption rate        : 3.8% (120/3,150)
+Tool accounts        : 3 (2 使用中 / 1 已失效)
+```
+
+---
+
+## 浏览器准备（重要）
+
+这个工具**不启动浏览器、不操作页面**，它只是去读一个已经在运行的浏览器里的 Cookie。
+所以你需要让浏览器把 DevTools 端口打开。
+
+### 为什么不能直接用平时的浏览器？
+
+**Chrome 147 及以上版本**改变了安全策略：如果你是通过 `chrome://inspect`
+在**默认用户配置（default profile）**上打开远程调试的，那么：
+
+- `/json/version`、`/json/list` 等接口会返回 **404**
+- 浏览器级别的 WebSocket 握手会被**直接拒绝**
+
+结果是端口开着，但读不到任何东西。这是浏览器的安全设计，不是本工具的缺陷。
+
+### 正确做法：用一个专用配置目录
+
+**Windows (PowerShell)**
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+  --remote-debugging-port=9222 `
+  --user-data-dir="$env:LOCALAPPDATA\opencsi-cdp-profile" `
+  https://opencsitool.com/myTools
+```
+
+**macOS**
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.opencsi-cdp-profile" \
+  https://opencsitool.com/myTools
+```
+
+**Linux**
+
+```bash
+google-chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.opencsi-cdp-profile" \
+  https://opencsitool.com/myTools
+```
+
+> **注意**：这个专用配置目录是一个**全新的浏览器配置**，里面**还没有登录状态**。
+> 请在弹出的窗口里**登录一次 openCsiTool**。
+> 之后 Cookie 会保存在这个目录里，后续使用就不用再登录了。
+
+Edge 和 Brave 同理，把可执行文件换成对应的即可（`msedge.exe` / `brave.exe`）。
+
+### 验证浏览器准备好了
+
+```bash
+opencsi doctor
+```
+
+看到这些就说明成功了：
+
+```
+[ok]   devtools endpoint: http://127.0.0.1:9222
+[ok]   credential: source=cdp, expires in 58m12s
+[ok]   session: shijingchang (employeeId=653124)
+```
+
+### 如果不想开调试端口
+
+也可以手工把 Cookie 喂进来（仅用于临时排查）：
+
+```bash
+opencsi login --manual
+```
+
+它会用 `getpass()` 从**标准输入**读取 Cookie 值。
+出于安全考虑，**这个值永远不会通过命令行参数传入**（见 [安全性](#安全性)）。
+
+---
+
+## 命令一览
+
+| 命令 | 作用 | 需要网络 |
+| --- | --- | --- |
+| `opencsi status` | 会话与凭据状态 | 是 |
+| `opencsi tools` | 已授权的工具账号列表 | 是 |
+| `opencsi usage` | 个人数据总览（token / 请求 / PR / 代码行） | 是 |
+| `opencsi trend` | token 趋势序列 | 是 |
+| `opencsi prices` | 模型与工具价目表 | 是 |
+| `opencsi logs` | LLM 网关调用日志 | 是 |
+| `opencsi doctor` | 诊断整条链路 | 部分 |
+| `opencsi login` | 打开登录页并确认会话 | 是 |
+| `opencsi contract-check` | 校验线上 API 是否仍符合已验证契约 | 是 |
+
+所有命令都支持 `--json`、`-v/--verbose`、`--cdp URL`、`--timeout SECONDS` 等通用选项。
+
+### 通用选项
+
+| 选项 | 作用 |
+| --- | --- |
+| `--json` | 以 JSON 输出（适合脚本 / Agent 调用），始终 UTF-8 |
+| `-v`, `--verbose` | 打印请求路径、状态码、耗时（不含任何头部值） |
+| `--cdp URL` | 指定 DevTools 端点，例如 `http://127.0.0.1:9222` |
+| `--timeout SECONDS` | 单次请求超时，默认 15 |
+| `--cache-ttl SECONDS` | 进程内业务数据缓存时长，默认 300 |
+| `--no-cache` | 本次运行不使用缓存 |
+| `--refresh` | 强制重新拉取，跳过缓存 |
+| `--no-proxy` | **完全忽略系统代理**。见下方说明 |
+
+#### `--no-proxy` 什么时候用
+
+`urllib` 除了读 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量，在 **Windows 上还会读注册表**
+（`HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`）。
+`curl` 不读注册表，所以会出现这种让人困惑的情况：
+
+```text
+curl   https://opencsitool.com/...   ->  401  （正常）
+python (urllib)                      ->  SSLEOFError
+```
+
+如果你的机器上装了 Clash / V2Ray 之类的本地代理，而它无法正确转发
+`opencsitool.com`，就会看到 `SSLEOFError`。这时：
+
+```bash
+opencsi status --no-proxy
+```
+
+本工具在报错时会**指出走了哪个代理**，并在提示里给出这个选项。
+代理 URL 中的 `user:password@` 会被剥离，不会出现在日志或输出里。
+
+> 如果你**确实需要**代理才能上网，请不要用 `--no-proxy`。
+
+---
+
+## 命令详解
+
+### `opencsi status`
+
+显示会话和凭据状态，**不返回非零退出码来表示"未登录"以外的失败**，
+所以很适合放进脚本的第一步。
+
+```bash
+opencsi status
+opencsi status --json
+```
+
+### `opencsi tools`
+
+列出所有已授权的 AI 工具账号。
+
+```bash
+opencsi tools
+opencsi tools --active-only      # 只看 使用中
+```
+
+```
+  ID  Request No.      Type        Account         Status  Tokens  Key
+----  ---------------  ----------  --------------  ------  ------  --------------
+5593  REQ202608170007  API_BUNDLE  AI编程助手-002  使用中  14.0亿  sk-bM4LUSm****
+1954  REQ202604160010  TRAE        AI编程助手-001  使用中   2.6亿  -
+1094  REQ202603090022  API_BUNDLE  AI编程助手-001  已失效  14.0亿  -
+```
+
+> `Key` 列**永远只显示掩码**（`sk-bM4LUSm****`），完整密钥不会出现在任何输出里。
+
+### `opencsi usage`
+
+最重要的命令，对应网页上的"个人数据总览"卡片。
+
+```bash
+opencsi usage
+opencsi usage --cost                     # 附加费用估算
+opencsi usage --start-date 2026-08-20 --end-date 2026-09-19
+```
+
+> **关于日期**：`--start-date` / `--end-date` **只影响趋势序列 `tokenTrend`**，
+> 工具账号列表 `requestList` 始终返回全部（这是服务端行为）。
+> 两个日期必须**同时提供**。
+
+费用估算说明：
+
+- `TOKEN` 计费 → `tokens / 1,000,000 × 单价`
+- `FLAT` 计费 → 只算月费，**不**按 token 计费
+- 价目表里没有的条目（例如 `API_BUNDLE` 这种"套餐"）→ 显示 `UNKNOWN`，**不会**假装是 0
+
+> 估算值仅供参考，**以服务端账单为准**。
+
+### `opencsi trend`
+
+token 趋势。
+
+```bash
+opencsi trend                    # 按模型汇总
+opencsi trend --group-by date    # 按日期汇总
+opencsi trend --by-day           # 等价于 --group-by date
+```
+
+### `opencsi prices`
+
+```bash
+opencsi prices              # 只显示已启用的
+opencsi prices --all        # 显示全部 20 行
+opencsi prices --bill-type TOKEN
+```
+
+> `Blended` / `In` / `Out` 是**每 100 万 token** 的价格；
+> `Monthly` 是**包月费**，不是 token 单价 —— 两者不会混在一起。
+
+### `opencsi logs`
+
+LLM 网关调用日志。注意：**如果你的用量走的是套餐而不是网关，这个日志本来就是空的**，
+这不是故障。
+
+```bash
+opencsi logs
+opencsi logs --page 2 --page-size 50
+opencsi logs --raw      # 显示每条记录的全部字段
+```
+
+### `opencsi doctor`
+
+诊断整条链路，是遇到问题时**第一个应该运行的命令**。
+
+```bash
+opencsi doctor
+opencsi doctor --skip-contract
+```
+
+它会逐项检查并给出 `[ok]` / `[warn]` / `[FAIL]`：
+
+```
+== opencsi doctor (0.1.0) ==
+API origin : https://opencsitool.com
+User-Agent : opencsi-cli/0.1.0
+
+[ok]   python: 3.14.6 on Windows 11
+[ok]   devtools endpoint: http://127.0.0.1:9222
+[ok]   credential: source=cdp, expires in 58m12s
+[ok]   session: shijingchang (employeeId=653124)
+[ok]   api contract: 11 checks passed
+
+All 5 checks passed.
+```
+
+失败时会打印**真正的原因**，而不只是一句"未登录"。例如当浏览器拒绝握手时
+（注意提示紧跟在失败项之后，即使重定向到文件也保持这个顺序）：
+
+```
+[ok]   python: 3.14.6 on Windows 11
+[ok]   devtools endpoint: http://127.0.0.1:9222
+[FAIL] credential: source=cdp, the DevTools endpoint at http://127.0.0.1:9222
+       answered, but its WebSocket could not be used (browser socket: WebSocketError)
+       -> Port 9222 is open but the DevTools WebSocket handshake was refused.
+          Chrome 147+ blocks remote debugging on the default profile when it was
+          enabled from chrome://inspect. Close that browser and start a
+          dedicated-profile instance instead: chrome.exe
+          --remote-debugging-port=9222
+          "--user-data-dir=%LOCALAPPDATA%\opencsi-cdp-profile"
+          https://opencsitool.com/myTools  -- then sign in once in that window.
+          See README 'Browser preparation'.
+[warn] session: not attempted: no credential available
+       -> resolve the credential check above first
+
+1 check(s) failed, 1 warning(s).
+```
+
+> `doctor` 的提示输出到 **stdout**（而不是 stderr），因为提示本身就是这个命令的产物 ——
+> 这样 `opencsi doctor > report.txt` 才不会丢掉修复方法。
+
+### `opencsi login`
+
+打开登录页面，并轮询确认会话是否建立。
+
+```bash
+opencsi login                # 打开浏览器，等待登录
+opencsi login --no-browser   # 不自动打开浏览器
+opencsi login --wait 120     # 最多等待 120 秒
+opencsi login --manual       # 从 stdin 读 Cookie（getpass）
+```
+
+### `opencsi contract-check`
+
+校验线上 API 是否仍然符合本工具依赖的契约。当站点升级导致字段变化时，
+这个命令能立刻告诉你**具体哪一项**对不上了。
+
+```bash
+opencsi contract-check
+```
+
+---
+
+## 退出码
+
+脚本可以依赖这些稳定的退出码：
+
+| 码 | 含义 |
+| --- | --- |
+| `0` | 成功 |
+| `1` | 未分类错误 |
+| `2` | 参数或配置错误 |
+| `10` | DevTools 端点不可用 |
+| `11` | 找不到浏览器目标页面 |
+| `12` | 未登录 / 找不到凭据 |
+| `13` | 会话已过期（401） |
+| `20` | 权限不足（403） |
+| `30` | 网络错误 |
+| `31` | 服务端错误（5xx） |
+| `32` | 业务错误（HTTP 200 但 `code != 200`） |
+| `130` | 被用户中断（Ctrl-C） |
+
+示例：
+
+```bash
+opencsi usage --json || echo "exit=$?"
+```
+
+`--json` 模式下，失败会输出**单个** JSON 文档：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "error": "SESSION_EXPIRED",
+    "message": "openCsiTool rejected the session cookie (HTTP 401)",
+    "http_status": 401
+  }
+}
+```
+
+---
+
+## 安全性
+
+这个工具接触的是你的**真实会话凭据**，所以安全约束是硬性的：
+
+### 绝不发送 `Authorization` 头
+
+站点只认 Cookie。本工具的 `HttpTransport` **没有任何代码路径会设置
+`Authorization` 头** —— 这一条有单元测试直接断言实际构造出的请求头。
+
+（实测：任何 Bearer 头都会让服务端返回 `401 Invalid Authorization`，
+而缺少 Cookie 时返回的是 `401 empty Authorization` —— 两者含义不同，
+本工具会区分报告。）
+
+### Cookie 不会泄漏到任何地方
+
+- 不会出现在 `repr()`、`str()`、日志、异常消息、traceback、JSON 输出里
+- `CredentialStatus` 这个结构体**根本没有能装 token 的字段**
+- 日志过滤器 `RedactingFilter` 会在写入前清洗所有记录
+- 密钥掩码规则与站点一致：`sk-bM4LUSm****`
+
+### 命令行不接受密钥
+
+```bash
+opencsi login --token SECRET    # ❌ 会被拒绝
+opencsi login --manual          # ✅ 用 getpass() 从 stdin 读
+```
+
+原因很简单：**argv 对同机器上的所有用户可见**（`ps`），而且会进 shell 历史。
+所以没有任何命令接受 `--token` 之类的参数。
+
+### 只读
+
+- `HttpTransport` **只实现了 `get_json()`**，不存在 `post` / `put` / `patch` / `delete`
+- 不访问任何管理端接口
+- 没有守护进程、没有后台轮询
+
+### 重试策略
+
+遇到 `401` 时，**只重新读取一次凭据**然后重试一次；再失败就报错退出。
+不会无限重试。
+
+---
+
+## 常见问题
+
+### `opencsi doctor` 说 "WebSocket could not be used"
+
+最常见的原因就是**用默认配置目录开了调试端口**。
+请按 [浏览器准备](#浏览器准备重要) 用一个专用 `--user-data-dir` 重启浏览器。
+
+### 报错 "no openCsiTool 'token' cookie"
+
+浏览器连上了，但里面没有登录状态。请在**那个**浏览器窗口里登录一次
+openCsiTool（注意：专用配置目录是全新的，需要重新登录）。
+
+### 报错 `SSLEOFError` / `UNEXPECTED_EOF_WHILE_READING`
+
+**不是服务端故障**，通常是本地代理。
+
+`urllib` 在 Windows 上会读注册表里的系统代理，而 `curl` 不读 —— 所以
+`curl` 能通、Python 不通。用 `--no-proxy` 绕过：
+
+```bash
+opencsi status --no-proxy
+```
+
+确认一下 Python 眼里有哪些代理：
+
+```bash
+python -c "import urllib.request; print(urllib.request.getproxies())"
+```
+
+详见 [docs/troubleshooting.md](docs/troubleshooting.md)。
+
+### `opencsi logs` 是空的
+
+正常现象。走套餐计费的账号，网关日志本来就是空的。
+
+### 会话过期了怎么办
+
+Cookie 有效期约 **0.97 小时**。过期后重新登录即可。
+本工具会在 Cookie 快过期时主动重新读取一次。
+
+### Windows 控制台显示乱码
+
+本工具输出的是 UTF-8 中文。如果看到乱码，先设置：
+
+```powershell
+$env:PYTHONIOENCODING = "utf-8"
+chcp 65001
+```
+
+CLI 本身已经做了防护：如果某个字符在当前控制台编码里无法表示
+（例如服务端备注里的 emoji），它会降级成 `?` 而**不会崩溃**。
+
+### `pip install -e .` 失败
+
+你的环境可能缺少 `setuptools`。用 `PYTHONPATH` 方式直接运行，
+或者用 `uv pip install -e . --no-build-isolation`。
+
+更多排查见 [`docs/troubleshooting.md`](docs/troubleshooting.md)。
+
+---
+
+## 开发
+
+### 运行测试
+
+测试**完全离线**，不需要网络也不需要浏览器（CDP 用进程内的假 DevTools 服务器模拟）：
+
+```bash
+# 用 unittest（不需要任何第三方包）
+cd tests
+python -m unittest discover -s . -p "test_*.py" -t .
+
+# 或者用 pytest（如果装了）
+pytest
+```
+
+### 测试覆盖
+
+| 文件 | 内容 |
+| --- | --- |
+| `test_mapping_regression.py` | 调查报告里 42 项已验证事实的回归 |
+| `test_redaction.py` | 密钥脱敏（对抗性：repr / 日志 / 异常 / JSON） |
+| `test_auth.py` | 凭据提供者协议 |
+| `test_cdp.py` | CDP 读取，含 Chrome 147+ 失败模式 |
+| `test_client.py` | 错误分类、401 单次重试、缓存 |
+| `test_formatting.py` | CJK 宽度对齐、亿/万 数字规则 |
+| `test_cli.py` | CLI 参数、退出码、输出契约 |
+
+### 文档
+
+- [`docs/architecture.md`](docs/architecture.md) —— 分层设计
+- [`docs/authentication.md`](docs/authentication.md) —— 认证流程细节
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) —— 排查手册
+- [`docs/api-investigation.md`](docs/api-investigation.md) —— API 调查报告（原始事实）
+
+### 作为库使用
+
+```python
+from opencsi import CdpCookieProvider, OpenCsiToolClient
+
+with OpenCsiToolClient(CdpCookieProvider()) as client:
+    client.login_or_restore_session()
+    snapshot = client.get_my_tools()
+    print(snapshot.total_tokens, snapshot.total_request_count)
+```
+
+---
+
+## 许可与免责声明
+
+本项目通过**逆向观测内部 Web API** 实现，**不是** openCsiTool 官方产品，
+也未获得其背书。接口可能随时变化而不再另行通知 —— 届时请运行
+`opencsi contract-check` 定位差异。
+
+请仅在你**本人已获授权**的账号上使用本工具，并遵守所在组织的规定。
