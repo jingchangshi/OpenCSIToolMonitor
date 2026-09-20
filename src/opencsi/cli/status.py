@@ -200,9 +200,9 @@ def run(ctx: CliContext) -> int:
     ctx.emit(payload, render)
     if session_ok:
         return 0
-    if ctx.json:
-        # JSON consumers must not have to parse prose to learn the outcome.
-        return 1
-    # Propagate the real cause. Hardcoding "not signed in" here told a user
-    # with no reachable DevTools port to go and sign in, which cannot help.
+    # Propagate the real cause in *both* modes. Hardcoding an exit code told a
+    # user with no reachable DevTools port to go and sign in, which cannot help;
+    # and making the JSON path disagree with the text path meant the same
+    # condition exited 1 with ``--json`` and 10 without it, so a script could
+    # not branch on it either way (objective §30).
     return exit_code_for(session_error)

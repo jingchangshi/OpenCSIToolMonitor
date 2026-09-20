@@ -748,6 +748,52 @@ class FailureReportingTest(unittest.TestCase):
         # The credential summary must remain readable, not be masked away.
         self.assertIn("source", parsed["credential"])
 
+    def test_status_json_exits_with_the_real_cause(self) -> None:
+        """The JSON path must not disagree with the text path (§30).
+
+        It used to ``return 1`` unconditionally on failure, so the same broken
+        session exited 1 with ``--json`` and 10 without it -- which defeats the
+        whole reason a script passes ``--json``.
+        """
+        from opencsi.errors import CdpUnavailableError
+
+        provider = StubCredentialProvider(raises=CdpUnavailableError("no browser"))
+        client, _, _ = make_client(provider=provider)
+        code, out, _ = run_cli(["status", "--json"], client=client)
+        self.assertEqual(code, EXIT_CDP_UNAVAILABLE, out)
+
+        # And the two modes now agree on the same failure.
+        text_code, _, _ = run_cli(["status"], client=client)
+        self.assertEqual(text_code, code)
+
+    def test_login_reports_an_unreachable_browser_as_cdp_unavailable(self) -> None:
+        """A browser that is not running must not be reported as "not signed in".
+
+        ``login`` used to return a fixed 12, the not-logged-in code, whenever no
+        session appeared -- including when the DevTools endpoint was never
+        reachable, which tells the user to sign in inside a browser that is not
+        open. The cause has to survive to the exit code.
+        """
+        import opencsi.auth.cdp as cdp_module
+        import opencsi.cli.login as login_module
+
+        from opencsi.errors import CdpUnavailableError
+
+        class UnreachableCdp(cdp_module.CdpCookieProvider):
+            def refresh(self):  # noqa: D102
+                raise CdpUnavailableError(
+                    "no DevTools endpoint", hint="start Chrome with --remote-debugging-port"
+                )
+
+        original = login_module.CdpCookieProvider
+        login_module.CdpCookieProvider = UnreachableCdp
+        try:
+            code, _, err = run_cli(["login", "--no-browser", "--wait", "0"])
+        finally:
+            login_module.CdpCookieProvider = original
+        self.assertEqual(code, EXIT_CDP_UNAVAILABLE, err)
+        self.assertNotEqual(code, EXIT_NOT_LOGGED_IN)
+
     def test_doctor_maps_the_credential_failure_to_its_real_code(self) -> None:
         """The exit code must come from the cause, not the check's name.
 

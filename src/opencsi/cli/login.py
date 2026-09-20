@@ -23,7 +23,7 @@ import time
 import webbrowser
 
 from ..auth import CdpCookieProvider, ManualCookieProvider
-from ..errors import OpenCsiError, UsageError
+from ..errors import OpenCsiError, UsageError, exit_code_for
 from ..formatting import format_relative_seconds, render_kv, section
 from ..redaction import register_secret
 from .context import CliContext, add_common_options
@@ -91,6 +91,7 @@ def _browser(ctx: CliContext) -> int:
     deadline = time.time() + max(0.0, ctx.args.wait)
     attempts = 0
     last_error: str | None = None
+    last_exc: OpenCsiError | None = None
 
     while True:
         attempts += 1
@@ -99,6 +100,7 @@ def _browser(ctx: CliContext) -> int:
             identity = client.login_or_restore_session(refresh=True)
         except OpenCsiError as exc:
             last_error = str(exc)
+            last_exc = exc
             identity = None
 
         if identity is not None:
@@ -113,7 +115,11 @@ def _browser(ctx: CliContext) -> int:
         ctx.err(f"       {last_error}")
     ctx.err(f"       open {LOGIN_URL} in a browser with remote debugging enabled,")
     ctx.err("       sign in, keep the tab open, then run 'opencsi doctor'.")
-    return 12
+    # Exit with the cause, not a fixed 12. Reporting "not logged in" when no
+    # DevTools endpoint was ever reachable sends the user to sign in inside a
+    # browser that is not running -- the same mistake `status` and `doctor`
+    # originally made (objective §30).
+    return exit_code_for(last_exc)
 
 
 # ── manual mode ───────────────────────────────────────────────────────────
