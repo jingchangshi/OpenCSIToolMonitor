@@ -407,7 +407,7 @@ OK
 | `test_cdp.py` | 50 | CDP provider against an in-process fake DevTools server |
 | `test_client.py` | 30 | Envelope handling, caching, error mapping, contract check |
 | `test_formatting.py` | 61 | CJK width, 亿/万 rule, tables, sections |
-| `test_cli.py` | 93 | Argument parsing, exit codes, JSON, stdout/stderr discipline |
+| `test_cli.py` | 97 | Argument parsing, exit codes, JSON, stdout/stderr discipline |
 | `test_proxy.py` | 20 | Proxy resolution, `--no-proxy`, credential stripping |
 | `test_transport_integration.py` | 18 | **Real HTTP over a real socket** |
 
