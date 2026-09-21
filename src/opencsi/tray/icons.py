@@ -2,9 +2,16 @@
 
 The icon is generated rather than shipped as a PNG. Two reasons: a binary asset
 in a source repository is unreviewable, and the icon has to *change* with state
-(green when fine, amber while refreshing, red when the session is gone). Drawing
-it means the state is encoded in code that a test can check, instead of in four
-image files nobody can diff.
+(green when fine, blue while working, amber when the user must act, red when the
+server is broken). Drawing it means the state is encoded in code that a test can
+check, instead of in four image files nobody can diff.
+
+The palette is deliberately coarser than the state machine: REFRESHING and
+RENEWING share blue because both mean "working, wait"; LOGIN_REQUIRED and
+AUTH_ERROR share amber because both mean "you must act". The icon answers "do I
+need to do something?", and the tooltip and menu answer "what exactly?" --
+encoding all eight states as eight colours would make them harder to tell apart,
+not easier.
 
 Pillow is optional. When it is absent the tray falls back to a solid
 programmatically-built icon, so a missing extra degrades the *appearance* and

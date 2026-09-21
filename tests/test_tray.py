@@ -485,6 +485,85 @@ class IconTest(unittest.TestCase):
         server = colours_for("SERVER_ERROR")
         self.assertEqual(len({ok, login, server}), 3)
 
+    def test_the_colour_answers_do_i_need_to_act(self) -> None:
+        """The palette is coarser than the state machine, and deliberately so.
+
+        A user glancing at the notification area is asking one question: does this
+        need me? So green means fine, blue means working, amber means the user
+        must act, red means the server is broken, grey means we cannot tell.
+        Encoding all eight states as eight colours would make them *harder* to
+        tell apart, not easier.
+        """
+        from opencsi.tray.icons import colours_for
+
+        green = colours_for("OK")
+        blue = colours_for("REFRESHING")
+        amber = colours_for("LOGIN_REQUIRED")
+        red = colours_for("SERVER_ERROR")
+        grey = colours_for("OFFLINE")
+
+        # Working states share a colour: both mean "wait".
+        self.assertEqual(blue, colours_for("RENEWING"))
+        # Action states share a colour: both mean "you must do something".
+        self.assertEqual(amber, colours_for("AUTH_ERROR"))
+        # And the five meanings are mutually distinct.
+        self.assertEqual(len({green, blue, amber, red, grey}), 5)
+
+    def test_the_healthy_colour_is_only_used_for_healthy_states(self) -> None:
+        """Asserting "fine" about anything else is the failure mode to prevent."""
+        from opencsi.tray.icons import colours_for
+
+        healthy = colours_for("OK")
+        for state in MonitorState:
+            if state is MonitorState.OK:
+                continue
+            with self.subTest(state=state.value):
+                self.assertNotEqual(
+                    colours_for(state.value),
+                    healthy,
+                    f"{state.value} is drawn as healthy",
+                )
+
+    def test_not_ok_states_have_a_shape_signal_too(self) -> None:
+        """Colour alone excludes colour-blind users, so the shape changes.
+
+        A notch is cut out of the top-right for anything that is not OK, which
+        survives greyscale and a monochrome theme.
+        """
+        from opencsi.tray.icons import make_icon, pillow_available
+
+        if not pillow_available():
+            self.skipTest("Pillow is not installed")
+
+        ok = make_icon("OK").convert("RGBA")
+        bad = make_icon("SERVER_ERROR").convert("RGBA")
+
+        # Count pixels that differ in alpha, rather than probing one guessed
+        # coordinate: the rounded-rectangle inset already makes the extreme
+        # corner transparent, so a naive (63, 1) probe passes for both states.
+        differing = sum(
+            1
+            for y in range(64)
+            for x in range(64)
+            if ok.getpixel((x, y))[3] != bad.getpixel((x, y))[3]
+        )
+        self.assertGreater(
+            differing,
+            50,
+            "a non-OK state differs from OK only in colour, so the signal is "
+            "lost in greyscale and for colour-blind users",
+        )
+        # And the difference is that the non-OK icon lost pixels (the notch),
+        # not that it gained them.
+        self.assertTrue(
+            all(
+                bad.getpixel((x, y))[3] <= ok.getpixel((x, y))[3]
+                for y in range(64)
+                for x in range(64)
+            ),
+            "the notch should cut pixels away, not add them",
+        )
+
     def test_the_fallback_icon_exists_without_drawing_machinery(self) -> None:
         from opencsi.tray.icons import make_fallback_icon, pillow_available
 
