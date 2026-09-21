@@ -659,6 +659,18 @@ python tools/build_exe.py
 | `dist\opencsi.exe` | 命令行版（有控制台） |
 | `dist\opencsi-tray.exe` | 托盘版（无控制台，**不会闪黑窗**） |
 
+托盘版接受与子命令相同的参数，`tray` 一词可以省略：
+
+```powershell
+dist\opencsi-tray.exe                      # 显示图标（无控制台窗口）
+dist\opencsi-tray.exe --once               # 取一次快照，打印后退出
+dist\opencsi-tray.exe --check              # 自检能否启动
+dist\opencsi-tray.exe --startup-status     # 查看开机自启项
+```
+
+> 早期版本会**忽略**这些参数并直接常驻托盘，所以 `--once` 什么都不打印、
+> 进程也永不退出。现在参数会被转发给 CLI 的 `tray` 子命令。
+
 **为什么是两个而不是一个**：它们需求不同，而 PyInstaller 的 `--windowed`
 是按二进制设置的。命令行版的全部意义就是输出文本；托盘版则绝不能在每次开机时
 弹出一个控制台窗口。一个 EXE 无法同时满足这两点。

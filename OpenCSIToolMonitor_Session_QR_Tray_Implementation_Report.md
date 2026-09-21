@@ -29,10 +29,10 @@ The tray is a view.           It never shells out to the CLI.
 | GitCode pure-CLI / QR login feasibility research | **Done** | `docs/gitcode-qr-protocol.md` — verdict `QR_FLOW_REPRODUCIBLE` |
 | Implement CLI QR login | **Done, verified live** | `opencsi login --qr` created a real challenge, saved the image, and reported an honest `TIMEOUT` (exit 13) when not scanned |
 | Windows 11 tray v1 | **Done, verified live** | `opencsi tray --once` printed a real snapshot; `--check` reported `tray: ok`, 6 menu items |
-| Tests | **Done** | **651 tests** (650 passed, 1 skipped) green under `pytest` **and** `unittest` |
+| Tests | **Done** | **656 tests** (655 passed, 1 skipped) green under `pytest` **and** `unittest` |
 | Windows real-machine verification | **Done** | Live CLI, QR, tray, frozen binaries, entry points |
 | Documentation | **Done** | 5 docs + README + this report |
-| Normative commits | **Done** | 23 commits, `cf34c1b` → `5ab3ad3` |
+| Normative commits | **Done** | 25 commits, `cf34c1b` → `542fe4f` |
 
 One honest non-claim: **the QR flow's final step is not machine-verifiable.** It
 requires a human to scan a WeChat mini-program code with a phone. The code
@@ -44,7 +44,7 @@ as a distinguishable exit code rather than pretending to succeed.
 ## 2. Final HEAD
 
 ```
-5ab3ad3  docs: refresh the architecture test count to 651
+542fe4f  fix(packaging): make the frozen tray honour its own arguments
 ```
 
 Baseline for this phase was `cf34c1b~1` (`4739898`). Working tree is clean; no
@@ -261,7 +261,7 @@ was fabricated; that flow was not found to exist and is not used.
 
 `src/opencsi/auth/gitcode_qr.py` (577 lines) — `GitCodeQrAuthenticator`,
 `QrChallenge`, `QrLoginResult`, `QrStatus`, `QrLoginStatus`, `QrProtocolError`
-(exit 31).
+(exit 33).
 
 * `MAX_QR_REFRESHES = 1` — an expired code is re-created **once**, never in a loop.
 * `DEFAULT_POLL_INTERVAL = 1.5 s`, `DEFAULT_MAX_WAIT = 180 s`.
@@ -322,7 +322,7 @@ a test.
 
 **Layering.** Everything that can be tested without a Windows message loop is
 pushed into `monitor/` and `tray/presenter.py`, which are pure. `app.py` only
-hands already-computed values to pystray. That is why 651 tests run offline while
+hands already-computed values to pystray. That is why 656 tests run offline while
 the tray itself is verified on a real machine.
 
 **States** (`MonitorState`): `STARTING`, `OK`, `REFRESHING`, `RENEWING`,
@@ -382,14 +382,14 @@ clean: **no Run entry, 0 tray processes** between runs.
 
 ## 9. Tests
 
-**651 tests: 650 passed, 1 skipped, 49 subtests passed.**
+**656 tests: 655 passed, 1 skipped, 49 subtests passed.**
 
 ```
 $ pytest
-650 passed, 1 skipped, 49 subtests passed in 39.92s
+655 passed, 1 skipped, 49 subtests passed in 36.91s
 
 $ python -m unittest discover -s tests -q
-Ran 651 tests in 38.153s
+Ran 656 tests in 38.734s
 OK (skipped=1)
 ```
 
@@ -406,7 +406,7 @@ New coverage this phase:
 | `tests/test_tray.py` | `ChineseUnitTest`, `NotificationTest`, `SignInActionTest`, icon colour/shape semantics |
 | `tests/test_packaging.py` | `DeclaredScriptTest` — parses `[project.scripts]` and resolves every target (see §10) |
 | `tests/test_client.py` | AST-based read-only guard: the business client can only reach a `GET` |
-| `tests/test_cli.py` | Output streams are reconfigured to UTF-8; an unrepresentable character does not crash |
+| `tests/test_cli.py` | Output streams are reconfigured to UTF-8; an unrepresentable character does not crash; **every `EXIT_*` constant is unique** |
 
 ---
 
@@ -436,10 +436,9 @@ behind a behavioural test that happens to pass.
 renewal/QR paths. `scene_id` and the QR payload are redacted in `repr`. Verbose
 logging prints request **paths** only — never query strings, never cookies.
 
-### Five real defects found and fixed this round
+### Seven real defects found and fixed this round
 
-1. **The icon stranded on "Renewing".** `_maybe_renew` returned on success
-   without leaving `RENEWING`, so the tray showed a renewing state for up to 5
+1. **The icon stranded on "Renewing".** `_maybe_renew` returned on success   without leaving `RENEWING`, so the tray showed a renewing state for up to 5
    minutes after the renewal had already succeeded. Caught by a live probe
    showing `state: RENEWING` on an already-renewed session.
 2. **The class docstring promised a public `tick()` that did not exist** (only
@@ -465,6 +464,45 @@ declaration, not the artifact.** The encoding test checked that output was
 *non-crashing* rather than *correct*; there was no test at all that the entry
 point resolved. Both are now tested against the thing that actually runs.
 
+6. **`QrProtocolError` shared exit code 31 with `ServerError`.** A script
+   branching on 31 could not tell an openCsiTool 5xx from a malformed body
+   returned by GitCode — two failures with different causes and different fixes.
+   This is the *exact* conflation the project had already rejected once, when
+   code 32 was added rather than folding a business-level failure into the
+   network or server bucket. QR protocol errors now get code 33.
+
+   The reason it survived review is the interesting part: `ExitCodeTest` *did*
+   assert "documented codes are distinct", but it listed **six constants by
+   hand**, so every constant added after it was written was unchecked by
+   construction. The test now enumerates the module for `EXIT_*` integers, so a
+   new constant is validated when it is added rather than when someone remembers
+   to extend the list. Verified by reintroducing `exit_code = 31`: the new test
+   fails with `AssertionError: 31 == 31`. The two bare literals `30`/`31` in the
+   QR status map were also replaced with named constants.
+
+Defects 4, 5 and 6 are all the same underlying mistake in different clothes: a
+test that enumerates a *sample* of a set, or checks a declaration rather than the
+artifact, passes forever while the set grows past it. Three separate instances of
+one pattern is a pattern, not a coincidence.
+
+7. **The frozen tray ignored its own arguments.** `opencsi-tray.exe --once`
+   printed nothing and then stayed resident forever: the entry script discarded
+   `sys.argv` and always started the blocking GUI, so "print one snapshot and
+   exit" silently became "run a tray until you kill me". Found by running the
+   *rebuilt binary* rather than the source tree.
+
+   This is the sharpest instance of the pattern above. Every existing test drove
+   `opencsi tray --once` through the **console** binary, which goes through
+   argparse and was correct; nothing exercised the **windowed** binary's own
+   entry script. The bug lived precisely in the gap between the two, and no
+   amount of testing the source tree could have found it — only executing the
+   artefact could.
+
+   The first version of the regression test *hung the suite* rather than failing,
+   because it stubbed only the CLI and the regression then called the real GUI
+   entry point. The tests now stub the tray entry too, so a regression fails in
+   milliseconds. A test that reproduces the hang is not a test.
+
 ### Packaging traps handled
 
 * Optional dependencies are imported **lazily inside functions**, so `opencsi
@@ -480,9 +518,8 @@ point resolved. Both are now tested against the thing that actually runs.
 
 ## 11. Commits
 
-23 commits, oldest first. All authored as
+25 commits, oldest first. All authored as
 `opencsi contributors <contributors@opencsi.invalid>`.
-
 | SHA | Subject |
 | --- | --- |
 | `cf34c1b` | refactor: separate credential reload from session renewal |
@@ -508,6 +545,8 @@ point resolved. Both are now tested against the thing that actually runs.
 | `ded9f93` | test(client): assert the read-only promise structurally, not just behaviourally |
 | `73b10f0` | test(tray): lock the icon's colour and shape semantics |
 | `5ab3ad3` | docs: refresh the architecture test count to 651 |
+| `39967ad` | fix(errors): stop the QR protocol error borrowing the server-error code |
+| `542fe4f` | fix(packaging): make the frozen tray honour its own arguments |
 
 ---
 
@@ -561,8 +600,18 @@ opencsi tray --remove-startup
 opencsi tray --startup-status
 ```
 
-Or run the standalone binary, which needs no Python at all:
-`dist\opencsi-tray.exe`.
+Or run the standalone binary, which needs no Python at all. It takes the same
+flags as the sub-command, with `tray` implied:
+
+```powershell
+dist\opencsi-tray.exe                      # show the icon (no console window)
+dist\opencsi-tray.exe --once               # one snapshot, print, exit
+dist\opencsi-tray.exe --check              # verify it can start
+dist\opencsi-tray.exe --startup-status     # report the start-at-sign-in entry
+```
+
+A bare launch registers the frozen EXE's own path with `--install-startup`, so
+the machine does not need Python on `PATH` to keep the tray running.
 
 ### If something is wrong
 
@@ -584,9 +633,18 @@ need to sign in again.
 | Code | Meaning |
 | --- | --- |
 | 0 | success |
-| 2 | invalid arguments / tray unavailable |
-| 10 | authentication failed |
-| 12 | not logged in |
-| 13 | login did not complete in time |
-| 31 | GitCode QR protocol error |
+| 1 | unclassified error |
+| 2 | invalid arguments / client misconfiguration / tray unavailable |
+| 10 | CDP endpoint unavailable |
+| 11 | no usable browser target |
+| 12 | not logged in (no `token` cookie) |
+| 13 | session expired, or a renewal/QR wait that needs a human |
+| 20 | permission denied (403) |
+| 30 | network error |
+| 31 | server error (HTTP 5xx) |
+| 32 | business error (HTTP 200, `code != 200`) |
+| 33 | GitCode QR protocol error |
 | 130 | interrupted (Ctrl+C) |
+
+The full table lives in `src/opencsi/errors.py` and is test-locked for
+uniqueness, so no two failure modes can share a code.
