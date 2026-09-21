@@ -191,7 +191,7 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
         )
         return 0
 
-    app = TrayApp(service)
+    app = TrayApp(service, on_login=lambda: _sign_in(service))
     try:
         if allow_multiple:
             app._single.acquire = lambda: True  # noqa: SLF001 - debug escape hatch
@@ -202,6 +202,40 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
     except KeyboardInterrupt:
         service.stop()
         return 0
+
+
+def _sign_in(service) -> None:
+    """Open the login page, then look for the session it establishes.
+
+    Runs on its own thread (``TrayApp`` starts one), because opening a browser
+    and waiting for a login is a tens-of-seconds operation that must not block
+    the tray's message loop.
+
+    The refresh afterwards is what makes this more than "open a web page": the
+    user signs in, and the tray notices without them having to click anything
+    else. It polls for a bounded window rather than once, because the user has to
+    actually complete the sign-in -- a single immediate check would almost always
+    fire before they had typed anything.
+    """
+    import time
+    import webbrowser
+
+    from .login import LOGIN_URL
+
+    try:
+        webbrowser.open(LOGIN_URL)
+    except Exception:  # noqa: BLE001 - the user can open it themselves
+        pass
+
+    # Bounded: five minutes, then give up and let the normal poll cycle handle
+    # it. The tray must not spin forever on a sign-in the user abandoned.
+    deadline = time.monotonic() + 300.0
+    while time.monotonic() < deadline:
+        time.sleep(10.0)
+        snapshot = service.refresh_now(block=True)
+        # A snapshot with data means the session is live again.
+        if snapshot.has_data:
+            return
 
 
 def _startup(ctx: CliContext, args) -> int:

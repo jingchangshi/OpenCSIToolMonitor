@@ -9,6 +9,8 @@ that its single-instance guard behaves.
 from __future__ import annotations
 
 import os
+import threading
+import time
 import unittest
 
 import helpers
@@ -640,6 +642,63 @@ class TrayAppLogicTest(unittest.TestCase):
     def test_repr_is_secret_free(self) -> None:
         app, _service = self._app()
         self.assertIn("TrayApp", repr(app))
+
+    def test_sign_in_without_a_callback_still_does_something(self) -> None:
+        """A menu item that only writes a log line is a dead menu item.
+
+        "Sign in..." is offered precisely when the session is gone, so it is the
+        one action a stuck user is most likely to click. It used to do nothing at
+        all unless the host wired ``on_login`` -- and the CLI never did. Clicking
+        it now opens the login page, which is the useful fallback.
+        """
+        opened = []
+        app, _service = self._app()
+        app._on_open = lambda: opened.append(True)
+        app._on_login = None
+
+        app._dispatch("login")
+        self.assertEqual(
+            opened,
+            [True],
+            "clicking Sign in did nothing: no callback and no browser opened",
+        )
+
+    def test_sign_in_uses_the_callback_when_one_is_wired(self) -> None:
+        """With a callback, the browser is not opened behind the host's back."""
+        calls = []
+        opened = []
+        app, _service = self._app()
+        app._on_login = lambda: calls.append(True)
+        app._on_open = lambda: opened.append(True)
+
+        app._dispatch("login")
+        # The callback runs on its own thread, so give it a moment.
+        for _ in range(50):
+            if calls:
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(calls, [True], "the wired login callback never ran")
+        self.assertEqual(opened, [], "the fallback opened a browser anyway")
+
+    def test_the_login_callback_runs_off_the_message_thread(self) -> None:
+        """An inline login would freeze the icon for tens of seconds."""
+        app, _service = self._app()
+        seen: list[int] = []
+        app._on_login = lambda: seen.append(threading.get_ident())
+
+        app._dispatch("login")
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.01)
+
+        self.assertTrue(seen, "the login callback never ran")
+        self.assertNotEqual(
+            seen[0],
+            threading.get_ident(),
+            "the login ran on the calling thread, which would block the tray",
+        )
 
 
 def _make_my_tools():

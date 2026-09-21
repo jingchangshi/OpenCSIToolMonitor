@@ -172,14 +172,22 @@ class TrayApp:
     def _trigger_login(self) -> None:
         """Start an interactive login without blocking the message loop.
 
-        The login is a browser round trip measured in tens of seconds; running
-        it inline would leave the icon frozen and Windows may draw it as "not
-        responding".
+        A callback, when the host wired one, runs on its own thread: the login is
+        a browser round trip measured in tens of seconds, and running it inline
+        would leave the icon frozen and Windows may draw it as "not responding".
+
+        Without a callback this **opens the login page** rather than doing
+        nothing. The menu offers "Sign in..." precisely when the session is gone,
+        so a click that only wrote to a log file would be a dead menu item --
+        which is what this was: the CLI never wired ``on_login``, so the one
+        action a stuck user is most likely to try was silently inert.
         """
         if self._on_login is not None:
-            threading.Thread(target=self._on_login, name="opencsi-login", daemon=True).start()
+            threading.Thread(
+                target=self._on_login, name="opencsi-login", daemon=True
+            ).start()
             return
-        log.info("login requested from the tray; run 'opencsi login' to sign in")
+        self._open_browser()
 
     def _open_browser(self) -> None:
         if self._on_open is not None:
