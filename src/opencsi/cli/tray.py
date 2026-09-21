@@ -205,7 +205,7 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
 
 
 def _sign_in(service) -> None:
-    """Open the login page, then look for the session it establishes.
+    """Open the login page, then watch for the session it establishes.
 
     Runs on its own thread (``TrayApp`` starts one), because opening a browser
     and waiting for a login is a tens-of-seconds operation that must not block
@@ -213,9 +213,15 @@ def _sign_in(service) -> None:
 
     The refresh afterwards is what makes this more than "open a web page": the
     user signs in, and the tray notices without them having to click anything
-    else. It polls for a bounded window rather than once, because the user has to
-    actually complete the sign-in -- a single immediate check would almost always
-    fire before they had typed anything.
+    else. It polls for a bounded window rather than checking once, because the
+    user has to actually complete the sign-in -- a single immediate check would
+    almost always fire before they had typed anything.
+
+    Note the refresh is **enqueued**, never performed here. All fetching happens
+    on the monitor's worker thread; ``_refresh_once`` mutates the service's state
+    without a lock, so a second thread calling it directly would race the worker
+    on both the HTTP call and the bookkeeping. ``refresh_now(block=False)`` hands
+    the work to the one thread that owns it.
     """
     import time
     import webbrowser
@@ -232,9 +238,8 @@ def _sign_in(service) -> None:
     deadline = time.monotonic() + 300.0
     while time.monotonic() < deadline:
         time.sleep(10.0)
-        snapshot = service.refresh_now(block=True)
-        # A snapshot with data means the session is live again.
-        if snapshot.has_data:
+        service.refresh_now()
+        if service.snapshot.has_data:
             return
 
 

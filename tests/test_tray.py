@@ -12,6 +12,7 @@ import os
 import threading
 import time
 import unittest
+from pathlib import Path
 
 import helpers
 
@@ -504,6 +505,44 @@ class TrayCliTest(unittest.TestCase):
 
         args = build_parser().parse_args(["tray", "--startup-status"])
         self.assertTrue(args.startup_status)
+
+    def test_sign_in_never_fetches_on_its_own_thread(self) -> None:
+        """All fetching belongs to the monitor's worker thread.
+
+        ``MonitorService._refresh_once`` mutates the service's state without a
+        lock, so a second thread calling it directly would race the worker on
+        both the HTTP call and the bookkeeping. The sign-in flow runs on its own
+        thread, so it must only *enqueue* refreshes.
+
+        This is asserted structurally rather than by racing two threads, because
+        a race is exactly the kind of bug that passes a timing test and fails in
+        the field.
+        """
+        source = (
+            Path(__file__).resolve().parent.parent / "src" / "opencsi" / "cli" / "tray.py"
+        ).read_text(encoding="utf-8")
+        sign_in = source.split("def _sign_in(", 1)[1]
+
+        self.assertNotIn(
+            "refresh_now(block=True)",
+            sign_in,
+            "the sign-in thread performs a blocking fetch; it must enqueue instead",
+        )
+        self.assertIn(
+            "refresh_now()",
+            sign_in,
+            "the sign-in flow no longer refreshes, so it would never notice a "
+            "successful login",
+        )
+
+    def test_the_sign_in_wait_is_bounded(self) -> None:
+        """A tray must not spin forever on a sign-in the user abandoned."""
+        source = (
+            Path(__file__).resolve().parent.parent / "src" / "opencsi" / "cli" / "tray.py"
+        ).read_text(encoding="utf-8")
+        sign_in = source.split("def _sign_in(", 1)[1]
+        self.assertIn("deadline", sign_in)
+        self.assertIn("time.monotonic() < deadline", sign_in)
 
 
 class ModuleEntryPointTest(unittest.TestCase):
