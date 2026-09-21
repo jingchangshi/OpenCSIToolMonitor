@@ -465,6 +465,60 @@ class RenewalPolicyTest(unittest.TestCase):
         self.assertEqual(client.calls, 1)
         self.assertIs(service.snapshot.state, MonitorState.OK)
 
+    def test_an_autonomous_renewal_does_not_leave_the_icon_stuck(self) -> None:
+        """The bug a live probe found: the tray sat on "Renewing session".
+
+        ``_tick_once`` returns early after a renewal, so publishing RENEWING and
+        then returning on success stranded the display there until the next
+        scheduled fetch -- up to five minutes of showing work that finished in
+        two seconds. The autonomous path is the one users actually live with, so
+        this is the state they would have seen most often.
+        """
+        session = _Session(expires_in=60.0)
+        client = _Client()
+        service = _service(client, session=session)
+
+        service.tick()
+
+        self.assertIsNot(
+            service.snapshot.state,
+            MonitorState.RENEWING,
+            "the tray was left displaying a renewal that had already finished",
+        )
+        self.assertIs(service.snapshot.state, MonitorState.OK)
+        self.assertEqual(client.calls, 1, "the data was not refreshed after renewal")
+
+    def test_an_autonomous_renewal_that_did_nothing_does_not_strand_the_state(self) -> None:
+        """ALREADY_VALID/TIMEOUT leave the credential unchanged, so restore OK."""
+        for status in (RenewalStatus.ALREADY_VALID, RenewalStatus.TIMEOUT):
+            with self.subTest(status=status.value):
+                session = _Session(
+                    expires_in=60.0,
+                    renew_result=RenewalResult(status),
+                )
+                service = _service(_Client(), session=session)
+                service._maybe_renew()
+                self.assertIsNot(
+                    service.snapshot.state,
+                    MonitorState.RENEWING,
+                    f"a {status.value} renewal stranded the display on RENEWING",
+                )
+
+    def test_the_public_tick_runs_the_scheduled_path(self) -> None:
+        """``tick()`` is the documented way to drive the schedule from outside.
+
+        The class docstring has always claimed the service "can be driven
+        entirely synchronously in tests via refresh_now and tick", but ``tick``
+        did not exist -- only the private ``_tick_once``. That mattered beyond
+        tidiness: it meant the autonomous renewal path could not be exercised
+        except by waiting for a real timer.
+        """
+        session = _Session(expires_in=60.0)
+        service = _service(_Client(), session=session)
+        snapshot = service.tick()
+        self.assertIsInstance(snapshot, MonitorSnapshot)
+        self.assertEqual(session.renew_calls, 1, "tick did not run the scheduled path")
+
 
 class SubscriptionTest(unittest.TestCase):
     def test_subscribers_are_notified_with_each_snapshot(self) -> None:
@@ -499,6 +553,131 @@ class SubscriptionTest(unittest.TestCase):
         off = service.subscribe(lambda _s: None)
         off()
         off()
+
+
+class AttentionNotificationTest(unittest.TestCase):
+    """The tray must be told *once* when the session needs the user.
+
+    This is the §55 requirement, and the edge-triggering is the whole point: the
+    monitor polls every five minutes, so a level-triggered notification would
+    pop a balloon twelve times an hour saying the same thing. Users mute apps
+    that do that, and then miss the one notification that mattered.
+    """
+
+    def _login_required_service(self):
+        from opencsi.errors import OpenCsiError
+
+        class _NotLoggedIn(OpenCsiError):
+            code = "OPENCSITOOL_NOT_LOGGED_IN"
+
+        return _service(_Client(error=_NotLoggedIn("no session")))
+
+    def test_entering_login_required_fires_once(self) -> None:
+        service = self._login_required_service()
+        seen: list[MonitorSnapshot] = []
+        service.subscribe_attention(seen.append)
+
+        service.refresh_now(block=True)
+
+        self.assertEqual(len(seen), 1, "the attention callback did not fire exactly once")
+        self.assertIs(seen[0].state, MonitorState.LOGIN_REQUIRED)
+
+    def test_repeated_polls_do_not_re_notify(self) -> None:
+        """The regression this exists to prevent: nagging every five minutes."""
+        service = self._login_required_service()
+        seen: list[MonitorSnapshot] = []
+        service.subscribe_attention(seen.append)
+
+        for _ in range(5):
+            service.refresh_now(block=True)
+
+        self.assertEqual(
+            len(seen),
+            1,
+            f"the user was notified {len(seen)} times about one problem",
+        )
+
+    def test_recovery_then_relapse_notifies_again(self) -> None:
+        """A new lapse is new information, so the user is told again."""
+        client = _Client()
+        service = _service(client)
+        seen: list[MonitorSnapshot] = []
+        service.subscribe_attention(seen.append)
+
+        from opencsi.errors import OpenCsiError
+
+        class _NotLoggedIn(OpenCsiError):
+            code = "OPENCSITOOL_NOT_LOGGED_IN"
+
+        service.refresh_now(block=True)  # OK
+        self.assertEqual(seen, [])
+
+        client._error = _NotLoggedIn("gone")
+        service.refresh_now(block=True)  # lapses
+        self.assertEqual(len(seen), 1)
+
+        client._error = None
+        service.refresh_now(block=True)  # recovers
+        self.assertEqual(len(seen), 1)
+
+        client._error = _NotLoggedIn("gone again")
+        service.refresh_now(block=True)  # lapses again
+        self.assertEqual(len(seen), 2, "the second lapse was not reported")
+
+    def test_a_network_failure_does_not_notify(self) -> None:
+        """A flaky network is not worth interrupting someone over."""
+        from opencsi.errors import NetworkError
+
+        service = _service(_Client(error=NetworkError("down")))
+        seen: list[MonitorSnapshot] = []
+        service.subscribe_attention(seen.append)
+
+        service.refresh_now(block=True)
+
+        self.assertEqual(seen, [], "an offline blip interrupted the user")
+
+    def test_a_server_error_does_not_notify(self) -> None:
+        from opencsi.errors import ServerError
+
+        service = _service(_Client(error=ServerError("500")))
+        seen: list[MonitorSnapshot] = []
+        service.subscribe_attention(seen.append)
+
+        service.refresh_now(block=True)
+
+        self.assertEqual(seen, [])
+
+    def test_unsubscribing_stops_attention_notifications(self) -> None:
+        service = self._login_required_service()
+        seen: list[MonitorSnapshot] = []
+        off = service.subscribe_attention(seen.append)
+        off()
+        service.refresh_now(block=True)
+        self.assertEqual(seen, [])
+
+    def test_a_raising_attention_callback_does_not_break_the_service(self) -> None:
+        """A missing balloon must not take down the monitor."""
+        service = self._login_required_service()
+
+        def explode(_snapshot):
+            raise RuntimeError("no notifications on this backend")
+
+        service.subscribe_attention(explode)
+        snap = service.refresh_now(block=True)
+        self.assertIs(snap.state, MonitorState.LOGIN_REQUIRED)
+
+    def test_attention_and_plain_subscribers_are_independent(self) -> None:
+        """Both kinds fire; neither replaces the other."""
+        service = self._login_required_service()
+        plain: list[MonitorSnapshot] = []
+        attention: list[MonitorSnapshot] = []
+        service.subscribe(plain.append)
+        service.subscribe_attention(attention.append)
+
+        service.refresh_now(block=True)
+
+        self.assertTrue(plain, "the plain subscriber stopped being called")
+        self.assertEqual(len(attention), 1)
 
 
 class WorkerThreadTest(unittest.TestCase):

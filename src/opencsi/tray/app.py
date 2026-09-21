@@ -95,6 +95,7 @@ class TrayApp:
         self._last_menu_signature: tuple[Any, ...] | None = None
         self._last_icon_state: str | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        self._unsubscribe_attention: Callable[[], None] | None = None
         self._lock = threading.RLock()
 
     # ── rendering ─────────────────────────────────────────────────────────
@@ -242,6 +243,33 @@ class TrayApp:
                 except Exception:  # noqa: BLE001
                     pass
 
+    def _notify_attention(self, snapshot: MonitorSnapshot) -> None:
+        """Show one notification when the session needs the user.
+
+        Called on the *transition* into a state that needs action, never on
+        every poll -- see ``MonitorService.subscribe_attention``. The tray polls
+        every five minutes, so a level-triggered notification would nag twelve
+        times an hour about something the user has already read.
+
+        pystray exposes ``notify`` only on some backends, so a failure here is
+        logged and swallowed: a missing balloon must not take down the tray, and
+        the icon and tooltip already say "Login required".
+        """
+        message = {
+            MonitorState.LOGIN_REQUIRED: "Session expired - click Sign in to continue.",
+            MonitorState.AUTH_ERROR: "The session was rejected - click Renew or Sign in.",
+        }.get(snapshot.state)
+        if message is None:
+            return
+
+        icon = self._icon
+        if icon is None:
+            return
+        try:
+            icon.notify(message, title="OpenCSI Monitor")
+        except Exception as exc:  # noqa: BLE001 - not every backend supports it
+            log.debug("could not show a notification: %s", type(exc).__name__)
+
     # ── lifecycle ─────────────────────────────────────────────────────────
     def _refresh_view(self) -> None:
         """Redraw the icon and menu from the current snapshot.
@@ -314,6 +342,9 @@ class TrayApp:
                 return 0
         else:
             self._unsubscribe = self._service.subscribe(lambda _s: self._refresh_view())
+            self._unsubscribe_attention = self._service.subscribe_attention(
+                self._notify_attention
+            )
             self._service.start()
 
         if not blocking:
@@ -322,6 +353,12 @@ class TrayApp:
         try:
             self._icon.run()
         finally:
+            if self._unsubscribe_attention is not None:
+                try:
+                    self._unsubscribe_attention()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._unsubscribe_attention = None
             self._unsubscribe = None
             self._service.stop()
             self._single.release()

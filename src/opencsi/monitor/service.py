@@ -129,6 +129,23 @@ STATE_LABELS: dict[MonitorState, str] = {
     MonitorState.AUTH_ERROR: "Session expired",
 }
 
+#: States the user must do something about. Deliberately excludes ``OFFLINE``
+#: and ``SERVER_ERROR``: a flaky network is not something to interrupt someone
+#: over, and it usually fixes itself. A session that needs a sign-in does not.
+_ATTENTION_STATES = frozenset(
+    {MonitorState.LOGIN_REQUIRED, MonitorState.AUTH_ERROR}
+)
+
+#: States that describe work in progress rather than an outcome. These must not
+#: reset the attention latch: every refresh publishes ``REFRESHING`` first, so
+#: treating it as "recovered" would re-arm the notification on every poll and
+#: nag the user exactly as badly as no edge detection at all. (That is not
+#: hypothetical -- the first version of this did exactly that, and
+#: ``test_repeated_polls_do_not_re_notify`` caught it.)
+_TRANSIENT_STATES = frozenset(
+    {MonitorState.STARTING, MonitorState.REFRESHING, MonitorState.RENEWING}
+)
+
 
 @dataclass(frozen=True)
 class MonitorSnapshot:
@@ -284,12 +301,16 @@ class MonitorService:
         self._lock = threading.RLock()
         self._snapshot = MonitorSnapshot(state=MonitorState.STARTING)
         self._subscribers: list[Callable[[MonitorSnapshot], None]] = []
+        self._attention: list[Callable[[MonitorSnapshot], None]] = []
 
         self._commands: "Queue[str]" = Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._next_refresh_at = 0.0
         self._last_credential_check = 0.0
+        #: Set once the user has been told the session needs them; cleared by a
+        #: settled healthy state. See :meth:`_publish`.
+        self._attention_latched = False
 
     # ── observation ───────────────────────────────────────────────────────
     @property
@@ -312,6 +333,33 @@ class MonitorService:
 
         return unsubscribe
 
+    def subscribe_attention(
+        self, callback: Callable[[MonitorSnapshot], None]
+    ) -> Callable[[], None]:
+        """Register a callback for states that need the user to *act*.
+
+        Fired on the **transition into** such a state, not on every poll. The
+        difference is the whole point: the tray polls every five minutes, so a
+        level-triggered notification would pop a balloon twelve times an hour
+        telling the user the same thing they already know. Windows notifications
+        that repeat are how a helpful app becomes one people mute.
+
+        The transition is re-armed by recovery: if the session comes back and
+        then lapses again, that is genuinely new information and the user is told
+        again.
+        """
+        with self._lock:
+            self._attention.append(callback)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                try:
+                    self._attention.remove(callback)
+                except ValueError:
+                    pass
+
+        return unsubscribe
+
     def _publish(self, snapshot: MonitorSnapshot) -> None:
         """Swap in a new snapshot and notify subscribers.
 
@@ -322,11 +370,36 @@ class MonitorService:
         with self._lock:
             self._snapshot = snapshot
             callbacks = list(self._subscribers)
+
+            # A *latch*, not a comparison with the previous snapshot. Every
+            # refresh publishes a transient REFRESHING first, so "the previous
+            # state was not an attention state" is true on every single poll --
+            # comparing neighbours re-notifies forever. The latch is cleared only
+            # by a settled, healthy state.
+            if snapshot.state in _ATTENTION_STATES:
+                notify = not self._attention_latched
+                self._attention_latched = True
+            elif snapshot.state in _TRANSIENT_STATES:
+                notify = False  # work in progress says nothing about recovery
+            else:
+                self._attention_latched = False
+                notify = False
+
+            attention = list(self._attention) if notify else []
+
         for callback in callbacks:
             try:
                 callback(snapshot)
             except Exception as exc:  # noqa: BLE001 - a bad UI must not kill us
                 log.debug("snapshot subscriber raised %s", type(exc).__name__)
+
+        if notify:
+            log.info("the session needs attention: %s", snapshot.state.value)
+        for callback in attention:
+            try:
+                callback(snapshot)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("attention subscriber raised %s", type(exc).__name__)
 
     # ── commands ──────────────────────────────────────────────────────────
     def refresh_now(self, *, block: bool = False) -> MonitorSnapshot:
@@ -346,6 +419,24 @@ class MonitorService:
         if block:
             return self._renew_once()
         self._commands.put("renew")
+        return self.snapshot
+
+    def tick(self) -> MonitorSnapshot:
+        """Run one scheduled cycle synchronously.
+
+        This is the same work the worker performs when its timer expires, made
+        callable from outside. It exists because the *autonomous* renewal path --
+        the one users actually depend on -- was previously reachable only by
+        waiting for a real timer, so the only thing anyone could verify was the
+        CLI's forced renewal. Those are different code paths, and a bug in the
+        policy gate would have left the forced one passing while the tray let the
+        session die hourly.
+
+        Exposed publicly (rather than only as ``_tick_once``) so a probe can
+        drive the real schedule, and so the documented API matches what the class
+        docstring has always claimed.
+        """
+        self._tick_once()
         return self.snapshot
 
     def stop(self) -> None:
@@ -426,6 +517,13 @@ class MonitorService:
         result = self._session.renew()
         if result.renewed:
             log.info("session renewed silently")
+            # Publish the new data rather than returning in the RENEWING state.
+            # The tick returns early after a renewal, so without this the icon
+            # would read "Renewing session" until the next scheduled fetch --
+            # up to five minutes of showing work that finished in two seconds.
+            # `force=True` because the refresh clock was not the reason we are
+            # here; the credential changed, which is a better reason.
+            self._refresh_once(force=True)
             return True
         if result.status is RenewalStatus.LOGIN_REQUIRED:
             self._publish(
@@ -441,6 +539,12 @@ class MonitorService:
                     error=result.detail or "silent renewal failed",
                 )
             )
+        else:
+            # ALREADY_VALID, TIMEOUT, UNSUPPORTED: the credential did not change,
+            # so the previous state is still the truthful one. Restoring it stops
+            # the display being stranded on RENEWING for a renewal that did
+            # nothing.
+            self._publish(self.snapshot.with_state(MonitorState.OK))
         return True
 
     def _renew_once(self) -> MonitorSnapshot:
