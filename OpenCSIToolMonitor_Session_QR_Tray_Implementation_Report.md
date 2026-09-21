@@ -525,8 +525,12 @@ one pattern is a pattern, not a coincidence.
 
 ## 11. Commits
 
-26 commits, oldest first, up to and including the last source change. All
-authored as `opencsi contributors <contributors@opencsi.invalid>`.
+26 commits, oldest first, covering `cf34c1b` through `12d77aa`. All authored as
+`opencsi contributors <contributors@opencsi.invalid>`.
+
+The two commits that write and amend this report are excluded, because a commit
+cannot list its own SHA. Every commit that changes source, tests or packaging is
+present, and `542fe4f` — the last of those — is the anchor named in §2.
 
 | SHA | Subject |
 | --- | --- |
