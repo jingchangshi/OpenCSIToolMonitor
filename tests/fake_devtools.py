@@ -399,6 +399,10 @@ class FakeDevToolsServer:
         * ``login``   -- settles on the GitCode login page.
         * ``noop``    -- back on the app host, cookie unchanged.
         * ``timeout`` -- never leaves the OAuth URL.
+        * ``timeout_then_renew`` -- never leaves the OAuth URL *within the
+          budget*, but does install a fresh cookie. This models a cold start
+          that outran its deadline yet genuinely renewed, which is a real
+          outcome: it was observed on a live browser.
         * ``no_cookie`` -- back on the app host with an empty jar.
         """
         scenario = self.oauth
@@ -407,6 +411,19 @@ class FakeDevToolsServer:
         outcome = scenario.outcome
 
         if outcome == "timeout":
+            return "https://gitcode.com/oauth/authorize?client_id=fake"
+
+        if outcome == "timeout_then_renew":
+            # Still on GitCode as far as the URL is concerned -- so the renewer
+            # sees a timeout -- but the cookie has already been installed.
+            with self._lock:
+                self.cookies = [
+                    opencsitool_cookie(
+                        scenario.new_cookie, expires_in=scenario.new_expires_in
+                    )
+                ]
+            if scenario.settle_delay:
+                time.sleep(scenario.settle_delay)
             return "https://gitcode.com/oauth/authorize?client_id=fake"
 
         if outcome == "login":

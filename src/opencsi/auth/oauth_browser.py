@@ -283,19 +283,15 @@ class BrowserOAuthRenewer:
                 detail=f"{type(exc).__name__}: {scrub_text(str(exc))[:240]}",
             )
 
-        if timed_out:
-            # The redirect chain never settled. Whatever cookie is in the jar is
-            # the *old* one -- reporting ALREADY_VALID here would tell the caller
-            # its session is fine when nothing was actually verified.
-            return RenewalResult(
-                RenewalStatus.TIMEOUT,
-                detail=(
-                    "the OAuth round-trip did not finish inside the budget; the "
-                    "browser may be slow or GitCode may be unreachable"
-                ),
-            )
-
-        return self._evaluate(final_host, final_path, cookies, old_token, old_status)
+        # The deadline is passed through rather than short-circuited here.
+        # Exceeding the budget does NOT mean the renewal failed: the cookie can
+        # land just after it. Deciding TIMEOUT without looking at the jar
+        # reports a working session as broken, which is its own kind of lie --
+        # and it was observed doing exactly that on a cold start, where the
+        # round-trip outran the budget yet installed a fresh 3598-second token.
+        return self._evaluate(
+            final_host, final_path, cookies, old_token, old_status, timed_out=timed_out
+        )
 
     # ── target lifecycle ──────────────────────────────────────────────────
     def _create_background_target(self, conn: CdpConnection) -> str:
@@ -461,6 +457,8 @@ class BrowserOAuthRenewer:
         cookies: Sequence[Mapping[str, Any]],
         old_token: str | None,
         old_status: CredentialStatus | None,
+        *,
+        timed_out: bool = False,
     ) -> RenewalResult:
         """Decide the outcome from observed state, not from hope."""
         landed_on_login = self._looks_like_login_page(final_host, final_path)
@@ -494,6 +492,16 @@ class BrowserOAuthRenewer:
 
         if cookie is None:
             self._last_evidence = None
+            if timed_out:
+                # Nothing arrived and the clock ran out: that is a genuine
+                # timeout, and saying so is more useful than "no cookie".
+                return RenewalResult(
+                    RenewalStatus.TIMEOUT,
+                    detail=(
+                        "the OAuth round-trip did not finish inside the budget; "
+                        "the browser may be slow or GitCode may be unreachable"
+                    ),
+                )
             return RenewalResult(
                 RenewalStatus.OAUTH_FAILED,
                 detail=(
@@ -515,7 +523,19 @@ class BrowserOAuthRenewer:
         )
         old_expires_in = old_status.expires_in if old_status is not None else None
 
-        token_changed = bool(old_token) and new_token != old_token
+        # Was there a usable credential *before* this attempt? This is the
+        # distinction the whole comparison rests on. With no prior token there
+        # is nothing to compare against, and a token that now exists is by
+        # definition a new session -- not "already valid".
+        #
+        # Getting this wrong is not hypothetical: with the openCsiTool cookie
+        # deleted (the exact situation silent renewal exists for) `old_token`
+        # is None, so a value comparison can never fire and a fresh
+        # 3598-second token was reported as ALREADY_VALID. Verified on a real
+        # browser, which is how the bug was found.
+        had_credential = bool(old_token)
+
+        token_changed = had_credential and new_token != old_token
         # A server-issued cookie whose expiry moved later is proof of a *new*
         # session even if the value happened to repeat.
         expiry_extended = (
@@ -524,6 +544,9 @@ class BrowserOAuthRenewer:
             and old_status.expires_at is not None
             and new_expires_at > old_status.expires_at + 1.0
         )
+        # A credential that appeared where there was none. This is renewal even
+        # though neither comparison above can fire.
+        credential_appeared = not had_credential
 
         evidence = RenewalEvidence(
             navigated_url_host=_APP_HOST,
@@ -536,7 +559,18 @@ class BrowserOAuthRenewer:
         )
         self._last_evidence = evidence
 
-        if not token_changed and not expiry_extended:
+        renewed = token_changed or expiry_extended or credential_appeared
+
+        if not renewed:
+            if timed_out:
+                return RenewalResult(
+                    RenewalStatus.TIMEOUT,
+                    detail=(
+                        "the OAuth round-trip did not finish inside the budget, "
+                        "and no new credential appeared"
+                    ),
+                    expires_in=new_expires_in,
+                )
             # The navigation completed but nothing about the session moved.
             # Reporting success here would be the exact "loadEventFired means
             # authenticated" mistake this module exists to avoid.
@@ -552,15 +586,29 @@ class BrowserOAuthRenewer:
         # Register the new value for redaction immediately: it is now live and
         # may appear in a later error message.
         register_secret(new_token)
+
+        if credential_appeared:
+            detail = (
+                "a new openCsiTool token cookie was issued by the GitCode OAuth "
+                "round-trip (there was no usable credential beforehand)"
+            )
+        else:
+            detail = (
+                "a new openCsiTool token cookie was issued by the GitCode "
+                "OAuth round-trip"
+            )
+        if timed_out:
+            # The cookie landed after the deadline. Reporting success is
+            # correct -- the session *is* renewed -- but the overrun is worth
+            # saying, because it means the budget is too tight for this machine.
+            detail += "; the round-trip outran its budget but succeeded anyway"
+
         return RenewalResult(
             RenewalStatus.RENEWED,
             renewed=True,
             token_changed=token_changed,
             expires_in=new_expires_in,
-            detail=(
-                "a new openCsiTool token cookie was issued by the GitCode "
-                "OAuth round-trip"
-            ),
+            detail=detail,
         )
 
     @staticmethod

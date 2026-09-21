@@ -171,6 +171,79 @@ class SilentRenewalTest(unittest.TestCase):
         self.assertIs(result.status, RenewalStatus.RENEWED)
 
 
+class ColdStartTest(unittest.TestCase):
+    """Renewal when there is no credential yet -- the case it exists for.
+
+    Both tests here are regressions found by running against a real browser, not
+    by reasoning. The openCsiTool cookie had been deleted (exactly the situation
+    silent renewal is for), the round-trip installed a fresh 3598-second token,
+    and the code reported ``ALREADY_VALID`` -- twice, in two different ways.
+    """
+
+    def setUp(self) -> None:
+        self.scenario = OAuthScenario(outcome="renew")
+        self.server = FakeDevToolsServer(
+            cookies=[opencsitool_cookie(FAKE_COOKIE, expires_in=60.0)],
+            oauth=self.scenario,
+        )
+        self.addCleanup(self.server.close)
+
+    def _provider(self) -> CdpCookieProvider:
+        return CdpCookieProvider(self.server.base_url, discover=False, ttl=0.0)
+
+    def test_a_credential_appearing_where_there_was_none_is_a_renewal(self) -> None:
+        """No prior token means the comparison cannot fire -- but it *is* new.
+
+        ``token_changed`` is false by construction when ``old_token`` is None,
+        so treating "neither comparison fired" as ALREADY_VALID reports a
+        successful renewal as a no-op. Observed on a real browser.
+        """
+        provider = self._provider()
+        # Deliberately NOT refreshed: the provider holds no token, which is the
+        # state a user is in when their cookie has expired.
+        result = _renewer(self.server).renew(before=provider)
+
+        self.assertIs(result.status, RenewalStatus.RENEWED)
+        self.assertTrue(result.renewed)
+        self.assertIsNotNone(result.expires_in)
+        self.assertGreater(result.expires_in or 0, 600)
+
+    def test_a_cold_start_renewal_is_not_merely_already_valid(self) -> None:
+        """The specific wrong answer that was actually produced."""
+        provider = self._provider()
+        result = _renewer(self.server).renew(before=provider)
+        self.assertIsNot(
+            result.status,
+            RenewalStatus.ALREADY_VALID,
+            "a token that appeared from nothing was reported as already valid",
+        )
+
+    def test_a_timeout_that_still_installed_a_token_is_a_success(self) -> None:
+        """Exceeding the budget does not undo a renewal that did happen.
+
+        The first cold-start run reported TIMEOUT, and a valid 3598-second token
+        was in the browser immediately afterwards. Deciding TIMEOUT without
+        looking at the jar reports a working session as broken -- its own kind
+        of lie, and the opposite failure to the one the module guards against.
+        """
+        self.scenario.outcome = "timeout_then_renew"
+        provider = self._provider()
+        result = _renewer(self.server, timeout=3.0).renew(before=provider)
+
+        self.assertIs(result.status, RenewalStatus.RENEWED)
+        self.assertTrue(result.renewed)
+        # The overrun is still reported, because it means the budget is tight.
+        self.assertIn("outran its budget", result.detail or "")
+
+    def test_a_timeout_with_no_token_is_still_a_timeout(self) -> None:
+        """The fix must not turn a real timeout into a false success."""
+        self.scenario.outcome = "timeout"
+        provider = self._provider()
+        result = _renewer(self.server, timeout=2.0).renew(before=provider)
+        self.assertIs(result.status, RenewalStatus.TIMEOUT)
+        self.assertFalse(result.renewed)
+
+
 class EvidenceTest(unittest.TestCase):
     """The evidence object is the audit trail; it must be secret-free."""
 
