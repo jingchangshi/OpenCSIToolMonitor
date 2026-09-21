@@ -11,6 +11,14 @@ reload*, *session renewal* and *interactive login* that the original single
 
 from .base import CredentialProvider, CredentialStatus
 from .cdp import CdpCookieProvider, CdpEndpoint, discover_cdp_endpoint
+from .gitcode_qr import (
+    GitCodeQrAuthenticator,
+    QrChallenge,
+    QrLoginResult,
+    QrLoginStatus,
+    QrProtocolError,
+    QrStatus,
+)
 from .manual import ManualCookieProvider
 from .oauth_browser import BrowserOAuthRenewer, RenewalEvidence, make_cdp_renewer
 from .session import (
@@ -42,4 +50,10 @@ __all__ = [
     "LoginResult",
     "LoginStatus",
     "DEFAULT_RENEW_MARGIN",
+    "GitCodeQrAuthenticator",
+    "QrChallenge",
+    "QrLoginResult",
+    "QrLoginStatus",
+    "QrProtocolError",
+    "QrStatus",
 ]

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import time
 import webbrowser
 
@@ -96,6 +97,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="(default) open the login page and wait for a session",
     )
     mode.add_argument(
+        "--qr",
+        action="store_true",
+        help=(
+            "sign in by scanning a WeChat QR code in the terminal; needs no "
+            "browser (experimental: see docs/gitcode-qr-protocol.md)"
+        ),
+    )
+    mode.add_argument(
         "--manual",
         action="store_true",
         help="read the cookie value from stdin instead of the browser",
@@ -112,6 +121,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         metavar="SECONDS",
         help="how long to wait for the cookie to appear (default: 0 = check once)",
     )
+    parser.add_argument(
+        "--qr-wait",
+        type=float,
+        default=180.0,
+        metavar="SECONDS",
+        help="how long to wait for a QR scan before giving up (default: 180)",
+    )
     parser.set_defaults(handler=run)
 
 
@@ -122,7 +138,132 @@ def run(ctx: CliContext) -> int:
         return _status(ctx)
     if ctx.args.renew:
         return _renew(ctx)
+    if ctx.args.qr:
+        return _qr(ctx)
     return _browser(ctx)
+
+
+# ── QR mode ───────────────────────────────────────────────────────────────
+def _qr(ctx: CliContext) -> int:
+    """Sign in by scanning a WeChat QR code, without a browser.
+
+    This is the *interactive* half of the new authentication architecture. It
+    obtains a GitCode session over plain HTTP -- verified reproducible against
+    the real protocol (docs/gitcode-qr-protocol.md) -- and then reports exactly
+    how far that gets the openCsiTool session, rather than overclaiming.
+
+    The honest limit: openCsiTool's own ``token`` cookie is issued by its OAuth
+    callback, which needs a browser session. A GitCode session alone does not
+    mint it. So this command's success criterion is "GitCode signed in", and it
+    says plainly what still needs the browser afterwards.
+    """
+    from ..auth.gitcode_qr import GitCodeQrAuthenticator, QrLoginStatus, QrStatus
+    from ..auth.qr_render import render_payload
+
+    authenticator = GitCodeQrAuthenticator(
+        api_base=os.environ.get("OPENCSI_GITCODE_API", "https://web-api.gitcode.com"),
+        source=os.environ.get("OPENCSI_QR_SOURCE", "toolbar_login"),
+        max_wait=float(getattr(ctx.args, "qr_wait", 180.0) or 180.0),
+        use_proxy=not bool(getattr(ctx.args, "no_proxy", False)),
+    )
+
+    rendered: dict[str, object] = {}
+
+    def on_challenge(challenge) -> None:
+        result = render_payload(challenge.image)
+        rendered["mode"] = result.mode
+        rendered["path"] = result.path
+        if ctx.json:
+            return
+        ctx.err("")
+        ctx.err("Scan this with WeChat (微信扫一扫) to sign in to GitCode:")
+        ctx.err("")
+        if result.mode == "unicode":
+            for line in result.text.splitlines():
+                ctx.out(line)
+        elif result.mode == "file":
+            ctx.err(f"the QR was written to: {result.path}")
+            ctx.err("open that file and scan it with WeChat.")
+            if result.detail:
+                ctx.err(f"note: {result.detail}")
+        else:
+            ctx.err(f"error: could not display the QR code. {result.detail or ''}")
+        ctx.err("")
+
+    def on_state(state) -> None:
+        if ctx.json:
+            return
+        message = {
+            QrStatus.WAITING: "Waiting for scan...",
+            QrStatus.SCAN: "QR scanned. Confirm on your phone...",
+            QrStatus.LOGIN: "Login confirmed. Completing GitCode sign-in...",
+            QrStatus.TIMEOUT: "The QR expired; issuing a new one...",
+        }.get(state)
+        if message:
+            ctx.err(message)
+
+    ctx.err("Requesting a GitCode login QR code...")
+    result = authenticator.login(
+        timeout=float(getattr(ctx.args, "qr_wait", 180.0) or 180.0),
+        on_challenge=on_challenge,
+        on_state=on_state,
+    )
+
+    cookies = authenticator.session_cookies()
+    payload = {
+        "ok": result.ok,
+        "qr_login": result.as_dict(),
+        "display": {
+            "mode": rendered.get("mode"),
+            "path": rendered.get("path"),
+        },
+        "gitcode_session_cookies": sorted(cookies),
+        "openscitool_session": {
+            "established": False,
+            "next_step": (
+                "openCsiTool's token cookie is issued by its own OAuth callback, "
+                "which needs a browser session. Run 'opencsi login' (or "
+                "'opencsi login --renew') with a browser signed in to GitCode."
+            ),
+        },
+    }
+
+    def render() -> None:
+        if result.ok:
+            ctx.err("")
+            ctx.err("GitCode sign-in complete.")
+            if result.username:
+                ctx.out(f"GitCode user: {result.username}")
+            if result.is_new_user is not None:
+                ctx.out(f"New GitCode account: {'yes' if result.is_new_user else 'no'}")
+            if cookies:
+                ctx.out(
+                    "GitCode session cookies received: " + ", ".join(sorted(cookies))
+                )
+            ctx.blank()
+            ctx.out(
+                "Next: openCsiTool's session cookie comes from its own OAuth "
+                "callback, so run 'opencsi login' in a browser signed in to "
+                "GitCode. 'opencsi login --renew' will then keep it alive "
+                "without further prompts."
+            )
+        else:
+            ctx.err("")
+            ctx.err(f"error: QR sign-in did not complete ({result.status.value}).")
+            if result.detail:
+                ctx.err(f"       {result.detail}")
+
+    ctx.emit(payload, render)
+
+    if result.ok:
+        return 0
+    return {
+        QrLoginStatus.CANCELLED: EXIT_USAGE,
+        QrLoginStatus.EXPIRED: EXIT_SESSION_EXPIRED,
+        QrLoginStatus.TIMEOUT: EXIT_SESSION_EXPIRED,
+        QrLoginStatus.NETWORK_ERROR: 30,
+        QrLoginStatus.PROTOCOL_ERROR: 31,
+    }.get(result.status, 1)
 
 
 # ── status mode ───────────────────────────────────────────────────────────
