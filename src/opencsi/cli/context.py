@@ -127,6 +127,25 @@ class CliContext:
         ports = getattr(self.args, "ports", None)
         return CdpCookieProvider(ports=ports or None)
 
+    def make_renewer(
+        self, provider: CredentialProvider, *, base_url: str
+    ) -> "BrowserOAuthRenewer | None":
+        """Build a silent renewer for ``provider``, or ``None`` if inapplicable.
+
+        A separate seam from :meth:`make_session` because ``login --renew``
+        needs to *inspect* the renewer's evidence, not just hand it to a
+        manager -- and because a test should be able to script a renewal
+        without standing up a browser.
+        """
+        if not isinstance(provider, CdpCookieProvider):
+            return None
+        return BrowserOAuthRenewer(
+            getattr(self.args, "cdp", None),
+            base_url=base_url,
+            timeout=float(getattr(self.args, "renew_timeout", 45.0) or 45.0),
+            ports=getattr(self.args, "ports", None) or None,
+        )
+
     def make_session(
         self,
         provider: CredentialProvider,
@@ -145,20 +164,25 @@ class CliContext:
         renewer = None
         if (
             want_renewer
-            and isinstance(provider, CdpCookieProvider)
             and not getattr(self.args, "no_renew", False)
             and not os.environ.get(ENV_NO_RENEW)
         ):
-            renewer = BrowserOAuthRenewer(
-                getattr(self.args, "cdp", None),
-                base_url=base_url,
-                timeout=float(getattr(self.args, "renew_timeout", 45.0) or 45.0),
-                ports=getattr(self.args, "ports", None) or None,
-            )
+            renewer = self.make_renewer(provider, base_url=base_url)
         return SessionManager(provider, renewer=renewer)
 
-    def make_client(self, *, provider: CredentialProvider | None = None) -> OpenCsiToolClient:
-        """Build the client for this invocation."""
+    def make_client(
+        self,
+        *,
+        provider: CredentialProvider | None = None,
+        renew: bool = True,
+    ) -> OpenCsiToolClient:
+        """Build the client for this invocation.
+
+        ``renew=False`` attaches no renewer. Commands that exist to *inspect* or
+        *establish* the session (``login``, ``doctor``) pass it: a diagnostic
+        that silently re-ran OAuth would both surprise the user and hide the
+        expiry they asked about.
+        """
         base_url = (
             getattr(self.args, "base_url", None)
             or os.environ.get(ENV_BASE_URL)
@@ -191,7 +215,7 @@ class CliContext:
             except Exception:  # pragma: no cover - defensive
                 log.debug("credential refresh failed; the request will report it")
 
-        session = self.make_session(provider, base_url=base_url)
+        session = self.make_session(provider, base_url=base_url, want_renewer=renew)
 
         return OpenCsiToolClient(
             provider,

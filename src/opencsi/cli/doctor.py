@@ -14,6 +14,7 @@ whole point is to show the user *where* the chain broke.
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import sys
 
@@ -81,6 +82,121 @@ def _credential_hint(provider, endpoint_ok: bool) -> str:
     return "supply a credential, then retry."
 
 
+def _record_renewal(record, provider, credential_ok: bool) -> None:
+    """Report whether an expiring session can renew itself (objective §54).
+
+    This is the check that answers "will I have to sign in again in an hour?".
+    A readable credential with no renewer is a *warning*, not a failure: the tool
+    works, it just cannot save the user the next login.
+    """
+    if not credential_ok:
+        record(
+            "silent renewal",
+            WARN,
+            "not attempted: no credential available",
+            "resolve the credential check above first",
+        )
+        return
+
+    if getattr(provider, "name", "") != "cdp":
+        record(
+            "silent renewal",
+            WARN,
+            f"the {getattr(provider, 'name', 'unknown')} credential cannot renew itself",
+            "use a browser-backed credential to get automatic renewal",
+        )
+        return
+
+    if os.environ.get("OPENCSI_NO_RENEW"):
+        record(
+            "silent renewal",
+            WARN,
+            "disabled by configuration",
+            "unset OPENCSI_NO_RENEW to enable it",
+        )
+        return
+
+    # A renewer needs the *browser-level* WebSocket so it can open a background
+    # tab. Checking that up front turns "renewal mysteriously fails later" into
+    # a clear diagnosis now.
+    try:
+        from ..auth.oauth_browser import BrowserOAuthRenewer
+
+        renewer = BrowserOAuthRenewer(
+            getattr(provider, "_explicit", None),
+            ports=getattr(provider, "_ports", None),
+        )
+        endpoint = renewer._resolve_endpoint()
+        ws = endpoint.browser_ws_url()
+        if not ws:
+            record(
+                "silent renewal",
+                WARN,
+                "the DevTools endpoint exposes no browser-level WebSocket",
+                "start the browser with --remote-debugging-port so renewal can "
+                "open a background tab",
+            )
+            return
+        if "/devtools/page/" in ws:
+            record(
+                "silent renewal",
+                WARN,
+                "the configured CDP URL is a page-level socket",
+                "point --cdp at the browser endpoint from /json/version",
+            )
+            return
+        record(
+            "silent renewal",
+            OK,
+            "GitCode SSO available; OAuth can be re-run in a background tab",
+        )
+    except OpenCsiError as exc:
+        record(
+            "silent renewal",
+            WARN,
+            str(exc),
+            "silent renewal needs a reachable browser-level DevTools endpoint",
+        )
+
+
+def _record_tray(record) -> None:
+    """Report whether the Windows tray can run here (objective §54).
+
+    Deliberately informational: the tray is an optional extra, and a machine
+    without it is a perfectly good place to run the CLI.
+    """
+    if os.name != "nt":
+        record("tray support", WARN, "the tray is Windows-only", None)
+        return
+    try:
+        import pystray  # noqa: F401
+
+        has_pystray = True
+    except Exception:
+        has_pystray = False
+    try:
+        import PIL  # noqa: F401
+
+        has_pillow = True
+    except Exception:
+        has_pillow = False
+
+    if has_pystray and has_pillow:
+        record("tray support", OK, "pystray and Pillow installed")
+    else:
+        missing = [
+            name
+            for name, present in (("pystray", has_pystray), ("Pillow", has_pillow))
+            if not present
+        ]
+        record(
+            "tray support",
+            WARN,
+            "missing: " + ", ".join(missing),
+            "install the extra: pip install \"opencsi[tray]\"",
+        )
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "doctor",
@@ -136,7 +252,10 @@ def run(ctx: CliContext) -> int:
         )
 
     # ── 2. DevTools endpoint ──────────────────────────────────────────────
-    client = ctx.make_client()
+    # ``renew=False``: a diagnostic must *report* an expired session, not
+    # silently repair it. Otherwise doctor would always say "session ok" and the
+    # user could never see the problem they ran doctor to find.
+    client = ctx.make_client(renew=False)
     provider = client.credentials
     endpoint_ok = False
     try:
@@ -204,7 +323,17 @@ def run(ctx: CliContext) -> int:
         except OpenCsiError as exc:
             record("session", FAIL, str(exc), exc.hint, exc.exit_code)
 
-    # ── 5. per-endpoint API checks ────────────────────────────────────────
+    # ── 5. silent renewal capability ──────────────────────────────────────
+    # Reported separately from the credential because they fail for different
+    # reasons and need different fixes: a readable cookie with no renewer means
+    # the user will be asked to sign in again in ~an hour, which is exactly the
+    # problem this project exists to remove.
+    _record_renewal(record, provider, credential_ok)
+
+    # ── 6. tray prerequisites ─────────────────────────────────────────────
+    _record_tray(record)
+
+    # ── 7. per-endpoint API checks ────────────────────────────────────────
     # The objective (§28) asks for named rows -- getUserInfo,
     # personalQueueStatus, model prices -- rather than one collapsed "contract"
     # line, because the whole value of a diagnosis is knowing *which* call is

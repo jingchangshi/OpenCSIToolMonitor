@@ -1,9 +1,14 @@
-"""``opencsi login`` -- establish and verify a session.
+"""``opencsi login`` -- establish, inspect and renew a session.
 
-Two modes:
+Four modes, in order of how much user involvement they need:
 
-* **default** -- open the openCsiTool page in the browser you already use, wait
-  for the ``token`` cookie to appear over DevTools, then validate it.
+* **``--status``** -- report the session and credential lifetime without
+  changing anything.
+* **``--renew``** -- run one silent OAuth renewal and report the structured
+  outcome. This is the manual trigger for the automatic path, and the entry
+  point used to verify renewal for real without waiting ~58 minutes.
+* **default (browser)** -- open the openCsiTool page in the browser you already
+  use, wait for the ``token`` cookie to appear over DevTools, then validate it.
 * **``--manual``** -- read a cookie value from *stdin* via :func:`getpass` for
   browsers the tool cannot reach.
 
@@ -22,9 +27,16 @@ import getpass
 import time
 import webbrowser
 
-from ..auth import CdpCookieProvider, ManualCookieProvider
+from ..auth import (
+    BrowserOAuthRenewer,
+    CdpCookieProvider,
+    ManualCookieProvider,
+    RenewalStatus,
+    SessionManager,
+)
 from ..errors import (
     EXIT_INTERRUPTED,
+    EXIT_SESSION_EXPIRED,
     EXIT_USAGE,
     OpenCsiError,
     UsageError,
@@ -37,18 +49,57 @@ from .context import CliContext, add_common_options
 LOGIN_URL = "https://opencsitool.com/myTools"
 POLL_INTERVAL = 2.0
 
+#: Renewal outcomes that mean "a human is needed after all", and the exit code
+#: to report for each. Derived from the *status*, never from parsing prose.
+_RENEWAL_EXIT = {
+    RenewalStatus.RENEWED: 0,
+    RenewalStatus.ALREADY_VALID: 0,
+    RenewalStatus.LOGIN_REQUIRED: EXIT_SESSION_EXPIRED,
+    RenewalStatus.CDP_UNAVAILABLE: 10,
+    RenewalStatus.OAUTH_FAILED: EXIT_SESSION_EXPIRED,
+    RenewalStatus.TIMEOUT: 30,
+    RenewalStatus.UNSUPPORTED: EXIT_USAGE,
+}
+
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "login",
-        help="open the login page and verify the resulting session",
+        help="open the login page, inspect the session, or renew it silently",
         description=(
-            "Open openCsiTool in your browser, wait for the session cookie, and "
-            "verify it. Use --manual to paste a cookie value on stdin instead "
-            "(the value is never stored on disk)."
+            "Establish, inspect or renew an openCsiTool session. Without a mode "
+            "flag this opens the login page in your browser and waits for the "
+            "session cookie. --status reports the current session; --renew "
+            "re-runs the GitCode OAuth flow in a background browser tab without "
+            "asking you anything. --manual reads a cookie from stdin (the value "
+            "is never stored on disk)."
         ),
     )
     add_common_options(parser)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--status",
+        action="store_true",
+        help="report the current session and credential lifetime; change nothing",
+    )
+    mode.add_argument(
+        "--renew",
+        action="store_true",
+        help=(
+            "re-run GitCode OAuth in a background tab to renew an expiring "
+            "session, then report the structured outcome"
+        ),
+    )
+    mode.add_argument(
+        "--browser",
+        action="store_true",
+        help="(default) open the login page and wait for a session",
+    )
+    mode.add_argument(
+        "--manual",
+        action="store_true",
+        help="read the cookie value from stdin instead of the browser",
+    )
     parser.add_argument(
         "--no-browser",
         action="store_true",
@@ -61,23 +112,195 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         metavar="SECONDS",
         help="how long to wait for the cookie to appear (default: 0 = check once)",
     )
-    parser.add_argument(
-        "--manual",
-        action="store_true",
-        help="read the cookie value from stdin instead of the browser",
-    )
     parser.set_defaults(handler=run)
 
 
 def run(ctx: CliContext) -> int:
     if ctx.args.manual:
         return _manual(ctx)
+    if ctx.args.status:
+        return _status(ctx)
+    if ctx.args.renew:
+        return _renew(ctx)
     return _browser(ctx)
+
+
+# ── status mode ───────────────────────────────────────────────────────────
+def _status(ctx: CliContext) -> int:
+    """Report the session without changing it.
+
+    ``--no-renew`` is forced on: a status check that silently performed an OAuth
+    round-trip would be a surprising side effect, and would also hide the very
+    expiry the user asked about.
+    """
+    client = ctx.make_client(provider=ctx.make_provider(), renew=False)
+    provider = client.credentials
+    cred = provider.status()
+
+    identity = None
+    error: OpenCsiError | None = None
+    try:
+        identity = client.login_or_restore_session(refresh=True)
+    except OpenCsiError as exc:
+        error = exc
+
+    session = client.session
+    payload = {
+        "ok": identity is not None,
+        "credential": cred.as_dict(),
+        "renewal": {
+            "available": session.renewer is not None,
+            "needs_renewal": session.needs_renewal(),
+            "margin_seconds": session.renew_margin,
+            "last": session.last_renewal.as_dict() if session.last_renewal else None,
+        },
+        "session": (
+            {
+                "user_name": identity.user_name,
+                "employee_id": identity.employee_id,
+            }
+            if identity
+            else None
+        ),
+    }
+    if error is not None:
+        payload["error"] = error.as_dict()
+
+    def render() -> None:
+        ctx.out(section("Session"))
+        ctx.out(render_kv([("Status", "OK" if identity else "FAILED")]))
+        if identity:
+            ctx.out(
+                render_kv(
+                    [
+                        ("User", identity.display_name),
+                        ("Employee", identity.employee_id),
+                    ]
+                )
+            )
+        ctx.blank()
+        ctx.out(
+            render_kv(
+                [
+                    ("Credential source", cred.source),
+                    ("Cookie lifetime left", format_relative_seconds(cred.expires_in)),
+                    ("Silent renewal", "available" if session.renewer else "unavailable"),
+                ]
+            )
+        )
+        if session.renewer and session.needs_renewal():
+            ctx.out(
+                "The session is inside the renewal margin; the next request will "
+                "renew it silently."
+            )
+        if error is not None:
+            ctx.err(f"error: {error}")
+            if error.hint:
+                ctx.err(f"       -> {error.hint}")
+
+    ctx.emit(payload, render)
+    return 0 if identity is not None else exit_code_for(error)
+
+
+# ── renew mode ────────────────────────────────────────────────────────────
+def _renew(ctx: CliContext) -> int:
+    """Run one silent renewal, on demand.
+
+    This exists so the automatic path can be exercised deliberately -- waiting
+    ~58 minutes for a cookie to expire is not a workable way to verify renewal,
+    and forcing expiry by tampering with the server's cookie would prove
+    nothing about the real flow.
+    """
+    provider = ctx.make_provider()
+    if not isinstance(provider, CdpCookieProvider):
+        raise UsageError(
+            "--renew needs a browser-backed credential; a manually supplied "
+            "token has no GitCode SSO session to renew against"
+        )
+
+    base_url = ctx.args.base_url or "https://opencsitool.com"
+    renewer = ctx.make_renewer(provider, base_url=base_url)
+    if renewer is None:
+        raise UsageError(
+            "--renew needs a browser-backed credential; a manually supplied "
+            "token has no GitCode SSO session to renew against"
+        )
+    session = SessionManager(provider, renewer=renewer)
+
+    # Read the current credential first so the before/after comparison has a
+    # real "before", and so the report can show what the expiry was.
+    before = provider.status()
+    result = session.renew(force=True)
+    evidence = getattr(renewer, "last_evidence", None)
+
+    # A renewal that reports success is only credible if the server agrees, so
+    # verify with a real request rather than trusting the cookie's presence.
+    verified = False
+    verify_error: OpenCsiError | None = None
+    if result.renewed:
+        client = ctx.make_client(provider=ctx.make_provider(), renew=False)
+        try:
+            client.login_or_restore_session(refresh=True)
+            verified = True
+        except OpenCsiError as exc:
+            verify_error = exc
+
+    payload = {
+        "ok": result.ok and (verified or not result.renewed),
+        "renewal": result.as_dict(),
+        "before": before.as_dict(),
+        "verified": verified,
+        "evidence": evidence.as_dict() if evidence else None,
+    }
+    if verify_error is not None:
+        payload["verify_error"] = verify_error.as_dict()
+
+    def render() -> None:
+        ctx.out(section("Session renewal"))
+        ctx.out(render_kv([("Outcome", result.status.value)]))
+        if result.detail:
+            ctx.out(render_kv([("Detail", result.detail)]))
+        rows = [("Cookie lifetime before", format_relative_seconds(before.expires_in))]
+        if result.expires_in is not None:
+            rows.append(
+                ("Cookie lifetime after", format_relative_seconds(result.expires_in))
+            )
+        ctx.out(render_kv(rows))
+        if result.renewed:
+            ctx.out(
+                render_kv(
+                    [
+                        ("Token changed", "yes" if result.token_changed else "no"),
+                        ("Server accepted it", "yes" if verified else "no"),
+                    ]
+                )
+            )
+        if not result.ok:
+            ctx.blank()
+            if result.requires_interaction:
+                ctx.err(
+                    "error: the GitCode SSO session is gone, so silent renewal "
+                    "cannot help."
+                )
+                ctx.err(f"       -> sign in at {LOGIN_URL}")
+            else:
+                ctx.err(f"error: renewal did not succeed ({result.status.value}).")
+                if result.detail:
+                    ctx.err(f"       {result.detail}")
+        if verify_error is not None:
+            ctx.err(f"error: the new cookie was rejected: {verify_error}")
+
+    ctx.emit(payload, render)
+    if not result.ok:
+        return _RENEWAL_EXIT.get(result.status, 1)
+    if result.renewed and not verified:
+        return EXIT_SESSION_EXPIRED
+    return 0
 
 
 # ── browser mode ──────────────────────────────────────────────────────────
 def _browser(ctx: CliContext) -> int:
-    client = ctx.make_client(provider=CdpCookieProvider(ports=ctx.args.ports or None))
+    client = ctx.make_client(provider=ctx.make_provider(), renew=False)
     provider = client.credentials
     assert isinstance(provider, CdpCookieProvider)
 

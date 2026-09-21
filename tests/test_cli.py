@@ -53,7 +53,7 @@ def run_cli(argv: list[str], *, client=None, provider=None) -> tuple[int, str, s
 
             original = ctx_module.CliContext.make_client
 
-            def fake_make_client(self, *, provider=None):  # noqa: ANN001
+            def fake_make_client(self, *, provider=None, renew=True):  # noqa: ANN001
                 return client
 
             ctx_module.CliContext.make_client = fake_make_client
@@ -773,9 +773,13 @@ class FailureReportingTest(unittest.TestCase):
         session appeared -- including when the DevTools endpoint was never
         reachable, which tells the user to sign in inside a browser that is not
         open. The cause has to survive to the exit code.
+
+        The provider is now built through ``CliContext.make_provider`` rather
+        than by a module-level name in ``login``, so the seam this patches is
+        the one the command actually uses.
         """
         import opencsi.auth.cdp as cdp_module
-        import opencsi.cli.login as login_module
+        import opencsi.cli.context as ctx_module
 
         from opencsi.errors import CdpUnavailableError
 
@@ -785,12 +789,12 @@ class FailureReportingTest(unittest.TestCase):
                     "no DevTools endpoint", hint="start Chrome with --remote-debugging-port"
                 )
 
-        original = login_module.CdpCookieProvider
-        login_module.CdpCookieProvider = UnreachableCdp
+        original = ctx_module.CliContext.make_provider
+        ctx_module.CliContext.make_provider = lambda self: UnreachableCdp(discover=False)
         try:
             code, _, err = run_cli(["login", "--no-browser", "--wait", "0"])
         finally:
-            login_module.CdpCookieProvider = original
+            ctx_module.CliContext.make_provider = original
         self.assertEqual(code, EXIT_CDP_UNAVAILABLE, err)
         self.assertNotEqual(code, EXIT_NOT_LOGGED_IN)
 
