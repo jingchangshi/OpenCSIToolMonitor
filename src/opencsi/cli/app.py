@@ -23,26 +23,44 @@ from .context import CliContext, build_parser
 
 
 def _make_output_robust() -> None:
-    """Stop an un-encodable character from crashing the CLI.
+    """Make CLI text output survive a non-UTF-8 console.
 
-    A Chinese Windows console defaults to GBK, and the API returns free-text
-    fields (``remark``) that can contain a character GBK cannot represent. With
-    the default ``strict`` error handler, ``print()`` then raises
+    A Chinese Windows console defaults to GBK (code page 936), and the API
+    returns free-text fields (``remark``) that can contain a character GBK cannot
+    represent. With the default ``strict`` error handler, ``print()`` then raises
     ``UnicodeEncodeError`` -- turning a successful query into a traceback.
 
-    Reconfiguring to ``errors="replace"`` degrades that one character to ``?``
-    instead. This never affects the JSON path, which is written as UTF-8 bytes
-    when redirected to a file, and it is a no-op on platforms whose streams
-    cannot be reconfigured (for example a stream replaced by a test harness).
+    Two separate problems are handled here, and they need different answers:
+
+    * **A character the console cannot represent.** Solved by
+      ``errors="replace"``, which degrades that one character to ``?`` instead of
+      killing the command.
+    * **Which encoding is used at all.** Set explicitly to UTF-8. The tray's
+      labels are Chinese by design, and a *frozen* build does not honour
+      ``PYTHONIOENCODING`` the way the source tree does -- so the packaged EXE
+      emitted GBK bytes and every Chinese label arrived as mojibake, while the
+      same code run from source printed correctly. Relying on an environment
+      variable the user must set is not a fix for the artefact we actually ship.
+
+    Pinning UTF-8 is safe on a real console: when stdout is a Windows console,
+    Python writes through ``WriteConsoleW`` and the encoding is already UTF-8, so
+    this is a no-op there. It only changes the piped/redirected case -- which is
+    precisely the case that was broken, and where UTF-8 is the right default (and
+    already what the JSON path produces).
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
-            reconfigure(errors="replace")
-        except (ValueError, OSError):  # pragma: no cover - detached stream
-            pass
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError, LookupError):
+            # A stream that cannot be reconfigured (for example one replaced by a
+            # test harness). Fall back to tolerating un-encodable characters.
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):  # pragma: no cover - detached stream
+                pass
 
 
 def main(argv: Sequence[str] | None = None) -> int:

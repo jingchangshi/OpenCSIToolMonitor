@@ -1099,8 +1099,16 @@ class GlobalOptionTest(unittest.TestCase):
 class WindowsConsoleTest(unittest.TestCase):
     """A Chinese Windows console must not crash on un-encodable output."""
 
-    def test_output_streams_are_reconfigured_to_replace(self) -> None:
-        """``_make_output_robust`` sets errors=replace on both streams."""
+    def test_output_streams_are_reconfigured_to_utf8(self) -> None:
+        """Output is pinned to UTF-8, not left to the console's code page.
+
+        This is the fix for a defect that only appeared in the *packaged* build:
+        a frozen EXE does not honour ``PYTHONIOENCODING`` the way the source tree
+        does, so on a GBK console (code page 936) every Chinese tray label
+        arrived as mojibake -- while the identical code run from source printed
+        correctly. Telling users to set an environment variable is not a fix for
+        the artefact we ship.
+        """
         import io
 
         from opencsi.cli.app import _make_output_robust
@@ -1115,17 +1123,36 @@ class WindowsConsoleTest(unittest.TestCase):
         sys.stdout, sys.stderr = gbk_out, gbk_err
         try:
             _make_output_robust()
-            # An emoji is not representable in GBK; with errors=replace it
-            # degrades instead of raising.
-            gbk_out.write("\U0001F600")
+            self.assertEqual(gbk_out.encoding, "utf-8")
+            self.assertEqual(gbk_err.encoding, "utf-8")
+            # Chinese must round-trip as real UTF-8 bytes, not as "?" or as the
+            # GBK bytes that produced the mojibake.
+            gbk_out.write("启动中")
             gbk_out.flush()
-            gbk_err.write("\U0001F600")
-            gbk_err.flush()
         finally:
             sys.stdout, sys.stderr = real_out, real_err
 
-        self.assertIn(b"?", buffer_out.getvalue())
-        self.assertIn(b"?", buffer_err.getvalue())
+        self.assertEqual(buffer_out.getvalue(), "启动中".encode("utf-8"))
+
+    def test_an_unrepresentable_character_does_not_crash(self) -> None:
+        """An emoji in an API ``remark`` must not turn a query into a traceback."""
+        import io
+        import sys
+
+        from opencsi.cli.app import _make_output_robust
+
+        buffer_out = io.BytesIO()
+        stream = io.TextIOWrapper(buffer_out, encoding="gbk", errors="strict")
+        real_out, real_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = stream, stream
+        try:
+            _make_output_robust()
+            stream.write("\U0001F600")
+            stream.flush()
+        finally:
+            sys.stdout, sys.stderr = real_out, real_err
+
+        self.assertTrue(buffer_out.getvalue())
 
     def test_make_output_robust_tolerates_a_detached_stream(self) -> None:
         """A stream without ``reconfigure`` (e.g. StringIO) must be skipped."""
