@@ -256,8 +256,8 @@ class TrayApp:
         the icon and tooltip already say "Login required".
         """
         message = {
-            MonitorState.LOGIN_REQUIRED: "Session expired - click Sign in to continue.",
-            MonitorState.AUTH_ERROR: "The session was rejected - click Renew or Sign in.",
+            MonitorState.LOGIN_REQUIRED: "会话已过期，点击「登录」重新认证。",
+            MonitorState.AUTH_ERROR: "会话被拒绝，点击「立即续期」或「登录」。",
         }.get(snapshot.state)
         if message is None:
             return

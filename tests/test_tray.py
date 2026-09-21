@@ -23,8 +23,10 @@ from opencsi.tray import (
     actions_for,
     format_age,
     format_count,
+    format_count_cn,
     format_duration,
     headline_for,
+    label_cn,
     menu_signature,
     status_text,
     tooltip_for,
@@ -85,6 +87,41 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(format_duration(5400), "1.5h")
 
 
+class ChineseUnitTest(unittest.TestCase):
+    """The tray is read by someone who thinks in 万 and 亿, not K and B."""
+
+    def test_counts_use_chinese_units(self) -> None:
+        self.assertEqual(format_count_cn(0), "0")
+        self.assertEqual(format_count_cn(9999), "9999")
+        self.assertEqual(format_count_cn(10_000), "1.0万")
+        self.assertEqual(format_count_cn(43_210), "4.3万")
+        self.assertEqual(format_count_cn(1_234_567), "123.5万")
+        self.assertEqual(format_count_cn(100_000_000), "1.0亿")
+        self.assertEqual(format_count_cn(3_634_063_175), "36.3亿")
+
+    def test_small_counts_stay_exact(self) -> None:
+        """Padding 4321 into "0.4万" would lose information for no gain."""
+        self.assertEqual(format_count_cn(4321), "4321")
+
+    def test_negative_counts_do_not_produce_nonsense(self) -> None:
+        self.assertEqual(format_count_cn(-15_000), "-1.5万")
+
+    def test_the_real_figure_from_the_live_account_reads_naturally(self) -> None:
+        """The number this was built for: 3,634,063,175 tokens."""
+        self.assertEqual(format_count_cn(3_634_063_175), "36.3亿")
+
+    def test_every_state_has_a_chinese_label(self) -> None:
+        """A missing label would silently fall back to English mid-tooltip."""
+        for state in MonitorState:
+            with self.subTest(state=state.value):
+                label = label_cn(MonitorSnapshot(state=state))
+                self.assertTrue(label)
+                self.assertTrue(
+                    any("\u4e00" <= ch <= "\u9fff" for ch in label),
+                    f"{state.value} has no Chinese label: {label!r}",
+                )
+
+
 class TooltipTest(unittest.TestCase):
     def test_tooltip_fits_the_windows_limit(self) -> None:
         """Windows truncates at 127 chars; we must choose what fits."""
@@ -97,30 +134,32 @@ class TooltipTest(unittest.TestCase):
 
     def test_tooltip_shows_the_headline_numbers(self) -> None:
         text = tooltip_for(_snap())
-        self.assertIn("1.2M tokens", text)
-        self.assertIn("4.3K req", text)
+        # Chinese units: 1,234,567 tokens is 123.5万, and 4,321 requests is below
+        # 万 so it stays exact rather than being padded to "0.4万".
+        self.assertIn("123.5万 tokens", text)
+        self.assertIn("4321 次请求", text)
         self.assertIn("17 PR", text)
 
     def test_tooltip_names_the_state(self) -> None:
-        self.assertIn("OK", tooltip_for(_snap()))
+        self.assertIn("正常", tooltip_for(_snap()))
 
     def test_stale_data_is_labelled_as_stale(self) -> None:
         """Showing old numbers without saying so is a lie by omission."""
         snap = _snap(state=MonitorState.OFFLINE, last_error="network is down")
         text = tooltip_for(snap, now=snap.fetched_at.timestamp() + 7200)
-        self.assertIn("OFFLINE", text)
-        self.assertIn("last update", text)
-        self.assertNotIn("updated 2h ago", text)
+        self.assertIn("离线", text)
+        self.assertIn("最后更新", text)
+        self.assertNotIn("更新于 2h 前", text)
 
     def test_a_healthy_tooltip_says_updated_not_offline(self) -> None:
         snap = _snap()
         text = tooltip_for(snap, now=snap.fetched_at.timestamp() + 60)
-        self.assertIn("updated", text)
-        self.assertNotIn("OFFLINE", text)
+        self.assertIn("更新于", text)
+        self.assertNotIn("离线", text)
 
     def test_no_data_yet_is_stated_plainly(self) -> None:
         text = tooltip_for(MonitorSnapshot(state=MonitorState.STARTING))
-        self.assertIn("waiting for the first update", text)
+        self.assertIn("等待首次更新", text)
 
     def test_a_failure_before_any_data_shows_the_reason(self) -> None:
         snap = MonitorSnapshot(state=MonitorState.OFFLINE, last_error="no route to host")
@@ -135,7 +174,7 @@ class TooltipTest(unittest.TestCase):
             self.assertNotIn(banned, names)
 
     def test_session_lifetime_is_shown_when_known(self) -> None:
-        self.assertIn("session 30m", tooltip_for(_snap(credential_expires_in=1800.0)))
+        self.assertIn("会话 30m", tooltip_for(_snap(credential_expires_in=1800.0)))
 
 
 class HeadlineTest(unittest.TestCase):
@@ -146,7 +185,7 @@ class HeadlineTest(unittest.TestCase):
     def test_headline_before_any_data_is_honest(self) -> None:
         self.assertEqual(
             headline_for(MonitorSnapshot(state=MonitorState.STARTING)),
-            "No data yet",
+            "暂无数据",
         )
 
 
@@ -712,7 +751,7 @@ class NotificationTest(unittest.TestCase):
         app._notify_attention(MonitorSnapshot(state=MonitorState.LOGIN_REQUIRED))
         self.assertEqual(len(app._icon.calls), 1)
         _title, message = app._icon.calls[0]
-        self.assertIn("Sign in", message)
+        self.assertIn("登录", message)
 
     def test_auth_error_produces_a_notification(self) -> None:
         app = self._app()

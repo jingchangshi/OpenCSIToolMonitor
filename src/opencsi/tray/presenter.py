@@ -28,6 +28,28 @@ from ..monitor import MonitorSnapshot, MonitorState
 #: Staying under it means we choose what the user reads, rather than the OS.
 MAX_TOOLTIP = 127
 
+#: Chinese display labels for the tray, kept *separate* from
+#: :data:`opencsi.monitor.STATE_LABELS` rather than replacing it. The enum values
+#: and their English labels are a stable contract that appears in JSON and in
+#: logs; the tray is read by a Chinese-speaking user who thinks in these words.
+#: Conflating the two would mean either a Chinese ``state`` field in machine
+#: output or an English tooltip for the person using it.
+STATE_LABELS_CN: dict[MonitorState, str] = {
+    MonitorState.STARTING: "启动中",
+    MonitorState.OK: "正常",
+    MonitorState.REFRESHING: "刷新中",
+    MonitorState.RENEWING: "续期中",
+    MonitorState.LOGIN_REQUIRED: "需要登录",
+    MonitorState.OFFLINE: "离线",
+    MonitorState.SERVER_ERROR: "服务异常",
+    MonitorState.AUTH_ERROR: "会话失效",
+}
+
+
+def label_cn(snapshot: MonitorSnapshot) -> str:
+    """The state, in the language the tray's user reads."""
+    return STATE_LABELS_CN.get(snapshot.state, snapshot.label)
+
 
 def format_count(value: int) -> str:
     """Compact, human-readable count: ``1234`` -> ``1.2K``.
@@ -44,6 +66,27 @@ def format_count(value: int) -> str:
     if value < 1_000_000_000:
         return f"{value / 1_000_000:.1f}M"
     return f"{value / 1_000_000_000:.1f}B"
+
+
+def format_count_cn(value: int) -> str:
+    """Compact count in the units a Chinese reader reads at a glance.
+
+    ``3634063175`` -> ``36.3亿``. The site is Chinese, the numbers are Chinese
+    users' own usage, and the brief asks for Chinese output -- but the real
+    reason is legibility: ``3.6B`` requires the reader to convert a
+    Western-scale unit back into the 亿 they think in, which is exactly the
+    mental arithmetic a tooltip exists to save.
+
+    万 (10^4) and 亿 (10^8) are the units that matter. Below 万 the raw number
+    is short enough to just show.
+    """
+    if value < 0:
+        return "-" + format_count_cn(-value)
+    if value < 10_000:
+        return str(value)
+    if value < 100_000_000:
+        return f"{value / 10_000:.1f}万"
+    return f"{value / 100_000_000:.1f}亿"
 
 
 def format_age(seconds: float | None) -> str:
@@ -82,26 +125,26 @@ def tooltip_for(snapshot: MonitorSnapshot, *, now: float | None = None) -> str:
     so explicitly -- a tray that shows stale numbers without saying they are
     stale is worse than one that shows nothing.
     """
-    head = f"OpenCSI | {snapshot.label}"
+    head = f"OpenCSI | {label_cn(snapshot)}"
 
     if not snapshot.has_data:
-        line = snapshot.last_error or "waiting for the first update"
+        line = snapshot.last_error or "等待首次更新"
         text = f"{head}\n{line}"
         return text[:MAX_TOOLTIP]
 
     parts = [
         head,
-        f"{format_count(snapshot.total_tokens)} tokens  "
-        f"{format_count(snapshot.requests)} req  {snapshot.prs} PR",
+        f"{format_count_cn(snapshot.total_tokens)} tokens  "
+        f"{format_count_cn(snapshot.requests)} 次请求  {snapshot.prs} PR",
     ]
 
     age = snapshot.age_seconds(now=now)
     if snapshot.is_healthy:
-        freshness = f"updated {format_age(age)} ago"
+        freshness = f"更新于 {format_age(age)} 前"
     else:
-        freshness = f"OFFLINE - last update {format_age(age)} ago"
+        freshness = f"离线 - 最后更新 {format_age(age)} 前"
     if snapshot.credential_expires_in is not None:
-        freshness += f" | session {format_duration(snapshot.credential_expires_in)}"
+        freshness += f" | 会话 {format_duration(snapshot.credential_expires_in)}"
     parts.append(freshness)
 
     if not snapshot.is_healthy and snapshot.last_error:
@@ -111,10 +154,19 @@ def tooltip_for(snapshot: MonitorSnapshot, *, now: float | None = None) -> str:
 
 
 def headline_for(snapshot: MonitorSnapshot) -> str:
-    """The default (bold, first) menu item: the number people open the menu for."""
+    """The default (bold, first) menu item: the number people open the menu for.
+
+    Exact figures, not the abbreviated ones the tooltip uses. The tooltip has
+    127 characters for everything and must compress; the menu has room, and a
+    user who opens a menu to read a number wants the number, not ``123.5万``.
+    Abbreviating here would throw away precision exactly where someone came
+    looking for it.
+    """
     if not snapshot.has_data:
-        return snapshot.last_error or "No data yet"
-    return f"{snapshot.total_tokens:,} tokens / {snapshot.requests:,} requests"
+        return snapshot.last_error or "暂无数据"
+    return (
+        f"{snapshot.total_tokens:,} tokens / {snapshot.requests:,} 次请求"
+    )
 
 
 @dataclass(frozen=True)
@@ -146,28 +198,28 @@ def actions_for(snapshot: MonitorSnapshot, *, auto_refresh: bool = True) -> list
     ]
 
     if snapshot.state is MonitorState.LOGIN_REQUIRED:
-        items.append(Action("login", "Sign in...", default=True))
+        items.append(Action("login", "登录 / Sign in...", default=True))
     elif snapshot.state is MonitorState.AUTH_ERROR:
-        items.append(Action("renew", "Renew session now"))
-        items.append(Action("login", "Sign in..."))
+        items.append(Action("renew", "立即续期"))
+        items.append(Action("login", "登录 / Sign in..."))
     elif snapshot.state is MonitorState.STARTING:
-        items.append(Action("refresh", "Refresh now"))
+        items.append(Action("refresh", "立即刷新"))
     else:
         # Healthy, refreshing, offline or server-side: a manual refresh is
         # always meaningful, and a renewal is offered when the credential is
         # close to expiry.
-        items.append(Action("refresh", "Refresh now"))
+        items.append(Action("refresh", "立即刷新"))
         if _renewal_is_useful(snapshot):
-            items.append(Action("renew", "Renew session now"))
+            items.append(Action("renew", "立即续期"))
 
-    items.append(Action("open", "Open openCsiTool in browser"))
+    items.append(Action("open", "打开 openCsiTool 网站"))
     items.append(Action("sep1", "-", enabled=False))
     items.append(
-        Action("autorefresh", "Auto refresh", checked=auto_refresh)
+        Action("autorefresh", "自动刷新", checked=auto_refresh)
     )
-    items.append(Action("copy", "Copy status to clipboard"))
+    items.append(Action("copy", "复制状态到剪贴板"))
     items.append(Action("sep2", "-", enabled=False))
-    items.append(Action("quit", "Quit"))
+    items.append(Action("quit", "退出"))
     return items
 
 
