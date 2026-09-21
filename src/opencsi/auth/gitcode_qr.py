@@ -58,7 +58,7 @@ from http.cookiejar import CookieJar
 from typing import Any, Callable, Mapping
 from urllib.parse import urlencode
 
-from ..errors import NetworkError, OpenCsiError
+from ..errors import EXIT_QR_PROTOCOL, NetworkError, OpenCsiError
 from ..redaction import register_secret, scrub_text
 
 log = logging.getLogger("opencsi.auth.gitcode_qr")
@@ -104,7 +104,7 @@ class QrProtocolError(OpenCsiError):
     """The QR endpoint answered in a shape this client does not recognise."""
 
     code = "QR_PROTOCOL_ERROR"
-    exit_code = 31
+    exit_code = EXIT_QR_PROTOCOL
 
 
 class QrStatus(str, Enum):

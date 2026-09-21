@@ -22,11 +22,15 @@ from helpers import FakeTransport, StubCredentialProvider, make_client
 
 from opencsi.cli.app import main
 from opencsi.cli.context import build_parser
+from opencsi import errors
+from opencsi.auth.gitcode_qr import QrProtocolError
 from opencsi.errors import (
     EXIT_CDP_UNAVAILABLE,
     EXIT_NO_BROWSER_TARGET,
     EXIT_NOT_LOGGED_IN,
     EXIT_OK,
+    EXIT_QR_PROTOCOL,
+    EXIT_SERVER_ERROR,
     EXIT_SESSION_EXPIRED,
     EXIT_USAGE,
 )
@@ -156,15 +160,32 @@ class ExitCodeTest(unittest.TestCase):
     """Exit codes are a public contract; scripts branch on them."""
 
     def test_documented_codes_are_distinct(self) -> None:
-        codes = [
-            EXIT_OK,
-            EXIT_USAGE,
-            EXIT_CDP_UNAVAILABLE,
-            EXIT_NO_BROWSER_TARGET,
-            EXIT_NOT_LOGGED_IN,
-            EXIT_SESSION_EXPIRED,
-        ]
-        self.assertEqual(len(codes), len(set(codes)))
+        """Every named EXIT_* constant must have its own value.
+
+        This previously listed six codes by hand, so a seventh constant
+        colliding with an existing one was invisible: ``QrProtocolError``
+        shipped with ``exit_code = 31``, which is already
+        ``EXIT_SERVER_ERROR``. A script branching on 31 could not tell a 5xx
+        from a malformed QR response. Enumerating the module means a new
+        constant is checked the moment it is added, rather than when someone
+        remembers to extend this list.
+        """
+        named = {
+            name: value
+            for name, value in vars(errors).items()
+            if name.startswith("EXIT_") and isinstance(value, int)
+        }
+        self.assertGreaterEqual(len(named), 10)
+        by_value: dict[int, list[str]] = {}
+        for name, value in named.items():
+            by_value.setdefault(value, []).append(name)
+        collisions = {v: names for v, names in by_value.items() if len(names) > 1}
+        self.assertEqual(collisions, {}, f"exit codes reused: {collisions}")
+
+    def test_the_qr_protocol_error_does_not_borrow_the_server_code(self) -> None:
+        """The specific collision, pinned so it cannot come back."""
+        self.assertNotEqual(QrProtocolError.exit_code, EXIT_SERVER_ERROR)
+        self.assertEqual(QrProtocolError.exit_code, EXIT_QR_PROTOCOL)
 
     def test_ok_is_zero(self) -> None:
         self.assertEqual(EXIT_OK, 0)

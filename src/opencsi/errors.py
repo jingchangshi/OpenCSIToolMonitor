@@ -18,6 +18,7 @@ Code Meaning
 30   network error
 31   server error (HTTP 5xx)
 32   business API error (HTTP 200, code != 200)
+33   GitCode QR protocol error (unexpected response shape)
 ==== ==========================================
 
 Codes 0/2/10/11/12/13/20/30/31 come from the project specification.
@@ -38,6 +39,12 @@ EXIT_PERMISSION_DENIED = 20
 EXIT_NETWORK_ERROR = 30
 EXIT_SERVER_ERROR = 31
 EXIT_BUSINESS_ERROR = 32
+#: The GitCode QR endpoints answered in a shape this client does not recognise.
+#: Distinct from ``EXIT_SERVER_ERROR`` on purpose: a 5xx from openCsiTool and a
+#: malformed body from GitCode are different failures with different fixes, and
+#: code 31 previously meant both. That is the same conflation that motivated
+#: ``EXIT_BUSINESS_ERROR`` above.
+EXIT_QR_PROTOCOL = 33
 #: Ctrl-C. Documented in the README alongside the codes above, and now named so
 #: every site that reports an interrupt says the same thing rather than
 #: repeating a literal and drifting apart.

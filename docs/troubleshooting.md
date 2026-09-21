@@ -23,6 +23,7 @@ opencsi doctor
 | `SSLEOFError` / `UNEXPECTED_EOF` | 30 | 本地代理劫持了连接 | [§5b](#5b-ssleoferror--unexpected_eof_while_reading) |
 | `server error` | 31 | 服务端故障 | [§6](#6-服务端错误-5xx) |
 | `code=…` 业务错误 | 32 | 业务层拒绝 | [§7](#7-业务错误-code--200) |
+| 扫码协议错误 | 33 | GitCode 改了响应结构 | [§14](#14-扫码登录-login---qr) |
 | 控制台乱码 | — | 终端编码 | [§8](#8-中文乱码) |
 | 表格没对齐 | — | 终端字体宽度 | [§9](#9-表格对齐) |
 | `pip install -e .` 失败 | — | 缺 setuptools | [§10](#10-安装问题) |

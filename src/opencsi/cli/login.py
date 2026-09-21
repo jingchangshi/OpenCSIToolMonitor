@@ -37,6 +37,8 @@ from ..auth import (
 )
 from ..errors import (
     EXIT_INTERRUPTED,
+    EXIT_NETWORK_ERROR,
+    EXIT_QR_PROTOCOL,
     EXIT_SESSION_EXPIRED,
     EXIT_USAGE,
     OpenCsiError,
@@ -58,7 +60,7 @@ _RENEWAL_EXIT = {
     RenewalStatus.LOGIN_REQUIRED: EXIT_SESSION_EXPIRED,
     RenewalStatus.CDP_UNAVAILABLE: 10,
     RenewalStatus.OAUTH_FAILED: EXIT_SESSION_EXPIRED,
-    RenewalStatus.TIMEOUT: 30,
+    RenewalStatus.TIMEOUT: EXIT_NETWORK_ERROR,
     RenewalStatus.UNSUPPORTED: EXIT_USAGE,
 }
 
@@ -288,8 +290,8 @@ def _qr(ctx: CliContext) -> int:
         QrLoginStatus.CANCELLED: EXIT_USAGE,
         QrLoginStatus.EXPIRED: EXIT_SESSION_EXPIRED,
         QrLoginStatus.TIMEOUT: EXIT_SESSION_EXPIRED,
-        QrLoginStatus.NETWORK_ERROR: 30,
-        QrLoginStatus.PROTOCOL_ERROR: 31,
+        QrLoginStatus.NETWORK_ERROR: EXIT_NETWORK_ERROR,
+        QrLoginStatus.PROTOCOL_ERROR: EXIT_QR_PROTOCOL,
     }.get(result.status, 1)
 
 
