@@ -5,6 +5,10 @@ without needing the console script to be on ``PATH``. It exits quietly rather
 than printing a traceback, because when Windows launches this at sign-in there
 is no console to show it in and nobody to read it -- the log file is the place
 for that.
+
+The context is built through the same ``make_context`` the CLI uses, with an
+explicitly empty argv, so the tray gets exactly the defaults a user would get
+from a bare ``opencsi tray`` and no argument parsing happens twice.
 """
 
 from __future__ import annotations
@@ -13,13 +17,15 @@ import sys
 
 
 def main() -> int:
-    from .app import TrayApp, TrayUnavailableError
-
+    service = None
     try:
-        from ..cli.context import CliContext
+        from ..cli.context import make_context
         from ..monitor import MonitorService
+        from .app import TrayApp, TrayUnavailableError
 
-        ctx = CliContext.from_args([])
+        # ``[]`` rather than sys.argv: this entry point takes no arguments, and
+        # parsing the real argv would make an unrelated flag an error.
+        ctx, _args = make_context([])
         service = MonitorService(ctx.make_client())
     except Exception as exc:  # noqa: BLE001
         _report(exc)

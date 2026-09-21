@@ -452,6 +452,134 @@ class IconTest(unittest.TestCase):
         self.assertIsNotNone(image)
 
 
+class TrayCliTest(unittest.TestCase):
+    """The CLI surface, which is where a user first meets the tray."""
+
+    def test_tray_accepts_the_common_options_every_command_has(self) -> None:
+        """The tray must not be the one command that cannot honour --no-proxy.
+
+        Found by running it: `opencsi tray --once --no-proxy` failed with
+        "unrecognized arguments", on the very command a user reaches for when
+        the default connection settings are wrong for their machine.
+        """
+        from opencsi.cli.context import build_parser
+
+        parser = build_parser()
+        for argv in (
+            ["tray", "--once", "--no-proxy"],
+            ["tray", "--once", "--cdp", "http://127.0.0.1:9222"],
+            ["tray", "--once", "--timeout", "20"],
+            ["tray", "--once", "--json"],
+            ["tray", "--once", "--base-url", "https://example.test"],
+        ):
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertEqual(args.command, "tray")
+
+    def test_every_command_accepts_the_common_options(self) -> None:
+        """A consistency guard: a new subcommand must wire up the shared group."""
+        from opencsi.cli.context import build_parser
+
+        parser = build_parser()
+        subparsers = None
+        for action in parser._actions:  # noqa: SLF001 - argparse has no public API
+            if hasattr(action, "choices") and action.choices and "tray" in action.choices:
+                subparsers = action.choices
+                break
+        self.assertIsNotNone(subparsers, "no subcommands were discovered")
+
+        for name, sub in subparsers.items():
+            with self.subTest(command=name):
+                options = set()
+                for action in sub._actions:  # noqa: SLF001
+                    options.update(action.option_strings)
+                self.assertIn("--json", options, f"{name} lacks --json")
+                self.assertIn("--no-proxy", options, f"{name} lacks --no-proxy")
+                self.assertIn("--cdp", options, f"{name} lacks --cdp")
+
+    def test_startup_status_flag_is_accepted(self) -> None:
+        from opencsi.cli.context import build_parser
+
+        args = build_parser().parse_args(["tray", "--startup-status"])
+        self.assertTrue(args.startup_status)
+
+
+class ModuleEntryPointTest(unittest.TestCase):
+    """`python -m opencsi.tray` -- the exact command Windows runs at sign-in.
+
+    This entry point is the least-exercised code in the project: it runs with no
+    console, at sign-in, and a failure there is invisible. It was in fact
+    broken -- it called a ``CliContext.from_args`` that does not exist, so the
+    tray exited 1 on every sign-in while `opencsi tray` worked fine.
+
+    The wiring is exercised in-process with the icon stubbed, so the test proves
+    the context and service are constructed correctly without opening a real
+    notification-area icon during the suite.
+    """
+
+    def test_main_wires_up_a_context_and_a_service(self) -> None:
+        import opencsi.tray.__main__ as entry
+        from opencsi.tray import app as app_module
+
+        seen: dict[str, object] = {}
+
+        class _FakeApp:
+            def __init__(self, service):
+                seen["service"] = service
+
+            def run(self, **kwargs):
+                seen["ran"] = True
+                return 0
+
+        original = app_module.TrayApp
+        app_module.TrayApp = _FakeApp
+        try:
+            code = entry.main()
+        finally:
+            app_module.TrayApp = original
+
+        self.assertEqual(code, 0)
+        self.assertTrue(seen.get("ran"), "the tray was never started")
+        self.assertIsNotNone(seen.get("service"), "no monitor service was built")
+
+    def test_the_entry_point_does_not_reference_a_missing_context_api(self) -> None:
+        """Guards the specific bug: an invented CliContext.from_args."""
+        from opencsi.cli.context import CliContext, make_context
+
+        self.assertFalse(
+            hasattr(CliContext, "from_args"),
+            "CliContext.from_args exists now; update __main__ and this test",
+        )
+        self.assertTrue(callable(make_context))
+
+    def test_make_context_accepts_an_empty_argv(self) -> None:
+        """The entry point parses no arguments, so this must not raise."""
+        from opencsi.cli.context import make_context
+
+        ctx, args = make_context([])
+        self.assertIsNotNone(ctx)
+        self.assertIsNone(getattr(args, "command", None))
+
+    def test_an_unexpected_failure_is_reported_not_raised(self) -> None:
+        """With no console at sign-in, a traceback would be lost entirely."""
+        import opencsi.tray.__main__ as entry
+
+        original = entry.__dict__
+
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        import opencsi.cli.context as context_module
+
+        saved = context_module.make_context
+        context_module.make_context = explode
+        try:
+            code = entry.main()
+        finally:
+            context_module.make_context = saved
+        self.assertEqual(code, 1)
+
+
 class TrayAppLogicTest(unittest.TestCase):
     """The view's decision-making, exercised without showing an icon."""
 

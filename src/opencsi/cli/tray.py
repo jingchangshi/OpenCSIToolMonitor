@@ -12,7 +12,7 @@ import argparse
 import sys
 
 from ..errors import EXIT_USAGE, UsageError
-from .context import CliContext
+from .context import CliContext, add_common_options
 
 
 def register(subparsers) -> None:  # noqa: ANN001 - argparse plumbing
@@ -77,6 +77,10 @@ def register(subparsers) -> None:  # noqa: ANN001 - argparse plumbing
         action="store_true",
         help="report whether the tray starts at sign-in, then exit",
     )
+    # Without this the tray would be the one command that cannot honour
+    # --no-proxy / --cdp / --timeout, which is exactly the command a user runs
+    # when the default connection settings are wrong for their machine.
+    add_common_options(parser)
     parser.set_defaults(handler=run)
 
 
