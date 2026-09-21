@@ -102,6 +102,9 @@ _CODE_STATE: dict[str, MonitorState] = {
     "INVALID_ARGUMENTS": MonitorState.SERVER_ERROR,
     "INVALID_CONFIGURATION": MonitorState.SERVER_ERROR,
     "MISSING_PARAMETER": MonitorState.SERVER_ERROR,
+    # The tray extra is not installed. A local setup problem, not a server one,
+    # but the monitor genuinely cannot display anything either way.
+    "TRAY_UNAVAILABLE": MonitorState.SERVER_ERROR,
 }
 
 

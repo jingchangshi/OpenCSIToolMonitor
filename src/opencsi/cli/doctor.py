@@ -164,36 +164,42 @@ def _record_tray(record) -> None:
 
     Deliberately informational: the tray is an optional extra, and a machine
     without it is a perfectly good place to run the CLI.
+
+    Uses the tray's own availability check rather than re-testing the imports
+    here, so doctor and the tray can never disagree about what is missing.
     """
     if os.name != "nt":
         record("tray support", WARN, "the tray is Windows-only", None)
         return
-    try:
-        import pystray  # noqa: F401
 
-        has_pystray = True
-    except Exception:
-        has_pystray = False
-    try:
-        import PIL  # noqa: F401
+    from ..tray import tray_available
 
-        has_pillow = True
-    except Exception:
-        has_pillow = False
-
-    if has_pystray and has_pillow:
+    available, reason = tray_available()
+    if available:
         record("tray support", OK, "pystray and Pillow installed")
     else:
-        missing = [
-            name
-            for name, present in (("pystray", has_pystray), ("Pillow", has_pillow))
-            if not present
-        ]
         record(
             "tray support",
             WARN,
-            "missing: " + ", ".join(missing),
-            "install the extra: pip install \"opencsi[tray]\"",
+            reason or "unavailable",
+            'install the extra: pip install "opencsi[tray]"',
+        )
+
+    # Whether it starts at sign-in is a separate question from whether it can
+    # run, and it is the one a user forgets they answered.
+    from ..tray.startup import StartupManager
+
+    status = StartupManager().status()
+    if status.detail and not status.enabled:
+        record("tray startup", WARN, status.detail, None)
+    elif status.enabled:
+        record("tray startup", OK, "starts at sign-in")
+    else:
+        record(
+            "tray startup",
+            WARN,
+            "does not start at sign-in",
+            "enable it with: opencsi tray --install-startup",
         )
 
 

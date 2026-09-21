@@ -421,9 +421,31 @@ def build_parser(prog: str = "opencsi") -> argparse.ArgumentParser:
     add_common_options(parser)
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
-    from . import doctor, login, logs, prices, status, tools, trend, usage, contract
+    from . import (
+        contract,
+        doctor,
+        login,
+        logs,
+        prices,
+        status,
+        tools,
+        tray,
+        trend,
+        usage,
+    )
 
-    for module in (status, tools, usage, trend, prices, logs, doctor, login, contract):
+    for module in (
+        status,
+        tools,
+        usage,
+        trend,
+        prices,
+        logs,
+        doctor,
+        login,
+        tray,
+        contract,
+    ):
         module.register(subparsers)
 
     parser.set_defaults(_parser=parser)
