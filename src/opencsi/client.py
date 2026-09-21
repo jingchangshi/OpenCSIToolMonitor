@@ -29,6 +29,7 @@ from typing import Any, Mapping, Sequence
 
 from .aggregation import CostEstimate, Summary, estimate_usage_cost, summarise
 from .auth.base import CredentialProvider
+from .auth.session import RenewalResult, RenewalStatus, SessionManager
 from .cache import DEFAULT_TTL, Cache
 from .errors import (
     BadAuthHeaderError,
@@ -109,12 +110,27 @@ class OpenCsiToolClient:
         transport: HttpTransport | None = None,
         verbose: bool = False,
         use_proxy: bool = True,
+        session: SessionManager | None = None,
     ) -> None:
         self.credentials = credentials
+        # The manager owns *when* to reload and *when* to renew. When the caller
+        # supplies only a provider (the common case, and every existing test),
+        # a manager is wrapped around it with no renewer -- so behaviour is
+        # exactly the old reload-once path until a renewer is attached.
+        self.session = session if session is not None else SessionManager(credentials)
+        if self.session.credentials is not credentials:
+            # A caller-supplied manager must be describing the same credential
+            # source, or a 401 recovery would refresh one provider while the
+            # transport used another.
+            raise UsageError(
+                "the supplied SessionManager manages a different credential "
+                "provider than the client was given"
+            )
         self.base_url = base_url.rstrip("/")
         self.cache = Cache(cache_ttl)
         self._identity: Identity | None = None
         self._prices: tuple[ModelPrice, ...] | None = None
+        self._last_renewal: RenewalResult | None = None
 
         if transport is not None:
             self.http = transport
@@ -462,18 +478,30 @@ class OpenCsiToolClient:
     ) -> Any:
         """Perform a GET and decode the body, recovering once from a 401.
 
-        Recovery sequence (project brief §13):
+        Recovery sequence (project brief §13, revised):
 
-        * On 401, call ``credentials.invalidate()`` then ``get_token()`` and
-          retry **exactly once**.
-        * If the retry also fails, raise :class:`SessionExpiredError`. There is
-          no loop, so a permanently invalid credential cannot spin.
+        * On 401, ask the :class:`~opencsi.auth.session.SessionManager` to
+          recover. That means **reload the credential first** (cheap, and
+          occasionally enough when the site itself rotated the cookie), then
+          **renew the session** (re-run OAuth) only if the reload produced
+          nothing newer.
+        * Retry **exactly once**. If the retry also fails, raise
+          :class:`SessionExpiredError` -- or, when renewal determined that the
+          user is genuinely required, that fact is preserved in the hint so the
+          caller can say "sign in" rather than "expired". There is no loop, so
+          a permanently invalid credential cannot spin.
+
+        The distinction this preserves is the whole point of the session layer:
+        ``refresh()`` alone can never extend a session whose cookie the server
+        has already expired, which is why the previous reload-only path left the
+        user re-logging-in every hour.
 
         A 401 body of ``Invalid Authorization`` is reported as
         :class:`BadAuthHeaderError`, because it means an Authorization header
         was sent -- which this client never does, so it indicates a caller
         misconfiguration worth surfacing distinctly.
         """
+        self._ensure_session_valid()
         response = self._attempt(path, params, timeout)
 
         if response.status == 401:
@@ -485,14 +513,15 @@ class OpenCsiToolClient:
                     http_status=response.status,
                 )
 
-            log.debug("401 from %s; refreshing credentials once", path)
-            self._refresh_credentials()
+            log.debug("401 from %s; recovering the session once", path)
+            renewal = self._recover_session()
             response = self._attempt(path, params, timeout)
 
             if response.status == 401:
                 raise SessionExpiredError(
                     "openCsiTool rejected the session cookie (HTTP 401) after a "
-                    "credential refresh.",
+                    "credential reload and session renewal.",
+                    hint=self._session_hint(renewal),
                     http_status=response.status,
                 )
             if "Invalid Authorization" in (response.body or ""):
@@ -520,14 +549,73 @@ class OpenCsiToolClient:
         self.http.set_cookie(token)
         return self.http.get_json(path, params, timeout=timeout)
 
-    def _refresh_credentials(self) -> None:
-        """Invalidate and re-read the credential, if the source supports it."""
-        self.credentials.invalidate()
+    def _ensure_session_valid(self) -> None:
+        """Renew proactively when the credential is close to expiry.
+
+        This is the *scheduled* half of the renewal policy. It runs before a
+        normal request and costs nothing when there is time left, because
+        :meth:`SessionManager.needs_renewal` is a local expiry comparison. It is
+        what turns "the cookie dies mid-session" into a renewal instead of a 401
+        the user has to notice.
+
+        A failure here is deliberately swallowed: the request that follows will
+        report the real HTTP outcome, which is more accurate than a renewal
+        error raised in its place.
+        """
         try:
-            self.credentials.refresh()
-        except OpenCsiError:
-            # The retry attempt will surface the real error.
-            log.debug("credential refresh failed; retry will report the outcome")
+            if not self.session.needs_renewal():
+                return
+            result = self.session.renew()
+            self._last_renewal = result
+            if result.renewed:
+                log.debug("proactively renewed the session (%s)", result.status.value)
+        except Exception as exc:  # noqa: BLE001 - renewal is an optimisation
+            log.debug("proactive renewal skipped: %s", type(exc).__name__)
+
+    def _recover_session(self) -> RenewalResult | None:
+        """Reload the credential, then renew the session if that was not enough.
+
+        Returns the renewal result when one was attempted, ``None`` when the
+        reload alone produced a newer credential. Never raises: the retry
+        attempt reports the real outcome, and a renewal failure must not mask
+        the HTTP status that triggered it.
+        """
+        try:
+            result = self.session.reload_then_renew()
+        except Exception as exc:  # noqa: BLE001 - recovery is best-effort
+            log.debug("session recovery raised %s; retry will report the outcome", type(exc).__name__)
+            return None
+        self._last_renewal = result
+        return result
+
+    @staticmethod
+    def _session_hint(renewal: RenewalResult | None) -> str | None:
+        """The most useful next step, given what renewal actually said."""
+        if renewal is None:
+            return None
+        if renewal.status is RenewalStatus.LOGIN_REQUIRED:
+            return (
+                "the GitCode SSO session in your browser has itself expired, so "
+                "silent renewal cannot help. Sign in again at "
+                "https://opencsitool.com/myTools."
+            )
+        if renewal.status is RenewalStatus.CDP_UNAVAILABLE:
+            return (
+                "silent renewal needs a browser with remote debugging enabled. "
+                "Start one (see README 'Browser preparation'), sign in once, and "
+                "retry."
+            )
+        if renewal.status is RenewalStatus.RENEWED:
+            return (
+                "a new openCsiTool cookie was issued but the server still "
+                "rejected it; re-run 'opencsi doctor'."
+            )
+        return None
+
+    @property
+    def last_renewal(self) -> RenewalResult | None:
+        """The most recent renewal outcome, for diagnostics (secret-free)."""
+        return self._last_renewal
 
     @staticmethod
     def _raise_for_status(response: Response) -> None:

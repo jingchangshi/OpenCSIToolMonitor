@@ -1,12 +1,18 @@
 """A minimal in-process fake DevTools server.
 
 Implements just enough of the Chrome DevTools Protocol to exercise
-:class:`~opencsi.auth.cdp.CdpCookieProvider` without a browser:
+:class:`~opencsi.auth.cdp.CdpCookieProvider` and
+:class:`~opencsi.auth.oauth_browser.BrowserOAuthRenewer` without a browser:
 
 * ``GET /json/version``  -- browser metadata (or a 404, to model Chrome 147+)
 * ``GET /json/list``     -- page targets
 * a WebSocket endpoint that answers ``Storage.getCookies``,
   ``Network.getCookies`` and ``Target.attachToTarget``.
+* ``Target.createTarget`` / ``Target.closeTarget`` / ``Page.navigate`` /
+  ``Runtime.evaluate`` -- the silent-renewal surface, driven by an
+  :class:`OAuthScenario` so a test can script "SSO still valid, here is a new
+  cookie", "SSO gone, we landed on the login page" or "the callback never
+  completes".
 
 It also models the two failure modes that actually occur in the field:
 
@@ -27,12 +33,18 @@ import json
 import socket
 import struct
 import threading
+import time
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 #: A synthetic cookie value; never a real credential.
 FAKE_COOKIE = "TESTCOOKIE" + "f0e1d2c3b4a5" * 20
+
+#: A second synthetic cookie, distinct from :data:`FAKE_COOKIE`, used as the
+#: "newly issued after renewal" value. Also never a real credential.
+RENEWED_COOKIE = "RENEWEDCOOKIE" + "9a8b7c6d5e4f" * 20
 
 #: Two other cookies so the selector has to actually choose.
 OTHER_COOKIES = [
@@ -48,8 +60,6 @@ def opencsitool_cookie(
     domain: str = "opencsitool.com",
 ) -> dict[str, Any]:
     """Build a cookie record in CDP's shape."""
-    import time
-
     return {
         "name": "token",
         "value": value,
@@ -61,6 +71,43 @@ def opencsitool_cookie(
         "secure": True,
         "session": False,
     }
+
+
+@dataclass
+class OAuthScenario:
+    """Scripted behaviour for the silent-renewal CDP surface.
+
+    ``outcome`` drives what a ``Page.navigate`` to the OAuth URL does:
+
+    ``"renew"``
+        The GitCode SSO session is alive. The tab ends up back on the app host
+        and the cookie jar is replaced with ``new_cookie``.
+    ``"login"``
+        The GitCode SSO session is gone. The tab settles on the GitCode login
+        page and no new cookie appears.
+    ``"noop"``
+        The round-trip completes but the cookie is unchanged (the server
+        re-issued an identical value with the same expiry) -- renewal must NOT
+        be reported as success.
+    ``"timeout"``
+        The tab never leaves the OAuth URL; the caller's deadline expires.
+    ``"no_cookie"``
+        Back on the app host, but the cookie jar is empty.
+    """
+
+    outcome: str = "renew"
+    new_cookie: str = RENEWED_COOKIE
+    new_expires_in: float = 3600.0
+    navigate_raises: str | None = None
+    create_target_fails: bool = False
+    close_target_fails: bool = False
+    #: Extra delay before the cookie is swapped, to exercise the settle wait.
+    settle_delay: float = 0.0
+    #: Methods observed, for assertions about what the renewer actually did.
+    calls: list[str] = field(default_factory=list)
+    created_targets: list[str] = field(default_factory=list)
+    closed_targets: list[str] = field(default_factory=list)
+    navigated_urls: list[str] = field(default_factory=list)
 
 
 class FakeDevToolsServer:
@@ -76,12 +123,14 @@ class FakeDevToolsServer:
         list_pages: list[dict[str, Any]] | None = None,
         refuse_browser_ws: bool = False,
         on_call: Callable[[str, dict[str, Any]], dict[str, Any] | None] | None = None,
+        oauth: OAuthScenario | None = None,
     ) -> None:
         self.cookies = list(cookies) if cookies is not None else [opencsitool_cookie()]
         self.json_api = json_api
         self.allow_ws = allow_ws
         self.refuse_browser_ws = refuse_browser_ws
         self.on_call = on_call
+        self.oauth = oauth
         self.pages = pages if pages is not None else [
             {
                 "id": "PAGE1",
@@ -97,6 +146,10 @@ class FakeDevToolsServer:
         self.list_pages = list_pages if list_pages is not None else self.pages
         self.requests: list[str] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        #: Target id -> current URL, for the renewal surface.
+        self.target_urls: dict[str, str] = {}
+        self._target_seq = 0
+        self._lock = threading.Lock()
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
@@ -295,7 +348,88 @@ class FakeDevToolsServer:
             return {"sessionId": "SESSION-1"}, "SESSION-1"
         if method == "Browser.getVersion":
             return {"product": "Chrome/153.0.8010.50"}, session_id
+
+        # ── silent-renewal surface ────────────────────────────────────────
+        if method == "Target.createTarget":
+            if self.oauth is not None and self.oauth.create_target_fails:
+                return {"targetId": ""}, session_id
+            with self._lock:
+                self._target_seq += 1
+                target_id = f"RENEW-{self._target_seq}"
+                self.target_urls[target_id] = str(params.get("url") or "about:blank")
+            if self.oauth is not None:
+                self.oauth.calls.append(method)
+                self.oauth.created_targets.append(target_id)
+            return {"targetId": target_id}, session_id
+
+        if method == "Target.closeTarget":
+            target_id = str(params.get("targetId") or "")
+            if self.oauth is not None:
+                self.oauth.calls.append(method)
+                self.oauth.closed_targets.append(target_id)
+                if self.oauth.close_target_fails:
+                    raise ValueError("closeTarget refused")
+            self.target_urls.pop(target_id, None)
+            return {"success": True}, session_id
+
+        if method == "Page.navigate":
+            if self.oauth is not None:
+                self.oauth.calls.append(method)
+                self.oauth.navigated_urls.append(str(params.get("url") or ""))
+                if self.oauth.navigate_raises:
+                    raise ValueError(self.oauth.navigate_raises)
+            return {"frameId": "FRAME-1"}, session_id
+
+        if method == "Runtime.evaluate":
+            return {"result": {"type": "string", "value": self._renewal_location()}}, session_id
+
+        if method == "Page.enable":
+            return {}, session_id
+
         return {}, session_id
+
+    def _renewal_location(self) -> str:
+        """Where the renewal tab currently is, per the scenario.
+
+        This is what the renewer polls, so it is where the state machine of a
+        renewal is actually encoded:
+
+        * ``renew``   -- first poll: still on GitCode; later polls: back on the
+          app host, and the cookie jar has been swapped by then.
+        * ``login``   -- settles on the GitCode login page.
+        * ``noop``    -- back on the app host, cookie unchanged.
+        * ``timeout`` -- never leaves the OAuth URL.
+        * ``no_cookie`` -- back on the app host with an empty jar.
+        """
+        scenario = self.oauth
+        if scenario is None:
+            return "https://opencsitool.com/myTools"
+        outcome = scenario.outcome
+
+        if outcome == "timeout":
+            return "https://gitcode.com/oauth/authorize?client_id=fake"
+
+        if outcome == "login":
+            return "https://gitcode.com/login"
+
+        # Every other outcome ends up back on the app host. The cookie swap
+        # happens on the *second* poll so the renewer's settle wait is exercised
+        # rather than accidentally skipped.
+        with self._lock:
+            polls = getattr(self, "_renewal_polls", 0) + 1
+            self._renewal_polls = polls
+            if polls >= 2:
+                if outcome == "renew":
+                    self.cookies = [
+                        opencsitool_cookie(
+                            scenario.new_cookie, expires_in=scenario.new_expires_in
+                        )
+                    ]
+                elif outcome == "no_cookie":
+                    self.cookies = []
+        if scenario.settle_delay:
+            time.sleep(scenario.settle_delay)
+        return "https://opencsitool.com/myTools"
 
     @staticmethod
     def _recv_frame(conn: socket.socket) -> str | None:

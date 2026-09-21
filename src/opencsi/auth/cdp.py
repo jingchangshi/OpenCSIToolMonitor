@@ -534,6 +534,19 @@ class CdpCookieProvider:
         self._expires_at = None
         self._read_at = 0.0
 
+    def peek_token(self) -> str | None:
+        """The currently cached value, **without** re-reading the browser.
+
+        Exists so a caller can answer "has the token changed?" without that
+        question perturbing the answer. ``get_token()`` is allowed to fetch, so
+        using it for a before/after comparison would compare a fresh read
+        against itself and always report "unchanged".
+
+        Returns ``None`` when nothing is cached; it never raises for a missing
+        browser, because it never touches one.
+        """
+        return self._token
+
     def refresh(self) -> str | None:
         """Force a re-read from the browser, bypassing the TTL."""
         try:

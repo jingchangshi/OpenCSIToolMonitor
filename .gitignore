@@ -53,3 +53,10 @@ _try.py
 _o*.txt
 _evidence_*.py
 _ev.txt
+
+# ── protocol investigation scratch ────────────────────────────────────────
+# Downloaded third-party JS bundles used to reverse the GitCode login flow.
+# They are somebody else's minified build output, not this project's source,
+# and the conclusions drawn from them live in docs/gitcode-qr-protocol.md.
+_scratch_*/
+docs/_gitcode_qr_evidence.txt

@@ -23,7 +23,13 @@ import sys
 from dataclasses import dataclass
 from typing import Any, TextIO
 
-from ..auth import CdpCookieProvider, CredentialProvider, ManualCookieProvider
+from ..auth import (
+    BrowserOAuthRenewer,
+    CdpCookieProvider,
+    CredentialProvider,
+    ManualCookieProvider,
+    SessionManager,
+)
 from ..client import BASE_URL, OpenCsiToolClient
 from ..errors import ConfigError, UsageError
 from ..formatting import Table, to_json
@@ -31,6 +37,7 @@ from ..version import USER_AGENT, __version__
 
 ENV_CDP_URL = "OPENCSI_CDP_URL"
 ENV_BASE_URL = "OPENCSI_BASE_URL"
+ENV_NO_RENEW = "OPENCSI_NO_RENEW"
 
 log = logging.getLogger("opencsi.cli")
 
@@ -120,6 +127,36 @@ class CliContext:
         ports = getattr(self.args, "ports", None)
         return CdpCookieProvider(ports=ports or None)
 
+    def make_session(
+        self,
+        provider: CredentialProvider,
+        *,
+        base_url: str,
+        want_renewer: bool = True,
+    ) -> SessionManager:
+        """Attach a silent renewer to ``provider`` when that makes sense.
+
+        A renewer is only meaningful for a browser-backed credential: a manual
+        token has no upstream SSO session to re-run OAuth against. ``--no-renew``
+        and ``$OPENCSI_NO_RENEW`` disable it, which is what keeps
+        ``opencsi doctor`` able to *report* an expired session rather than
+        silently fixing it, and what makes the read-only contract auditable.
+        """
+        renewer = None
+        if (
+            want_renewer
+            and isinstance(provider, CdpCookieProvider)
+            and not getattr(self.args, "no_renew", False)
+            and not os.environ.get(ENV_NO_RENEW)
+        ):
+            renewer = BrowserOAuthRenewer(
+                getattr(self.args, "cdp", None),
+                base_url=base_url,
+                timeout=float(getattr(self.args, "renew_timeout", 45.0) or 45.0),
+                ports=getattr(self.args, "ports", None) or None,
+            )
+        return SessionManager(provider, renewer=renewer)
+
     def make_client(self, *, provider: CredentialProvider | None = None) -> OpenCsiToolClient:
         """Build the client for this invocation."""
         base_url = (
@@ -154,6 +191,8 @@ class CliContext:
             except Exception:  # pragma: no cover - defensive
                 log.debug("credential refresh failed; the request will report it")
 
+        session = self.make_session(provider, base_url=base_url)
+
         return OpenCsiToolClient(
             provider,
             base_url=base_url,
@@ -161,6 +200,7 @@ class CliContext:
             cache_ttl=cache_ttl,
             verbose=self.verbose,
             use_proxy=not bool(getattr(self.args, "no_proxy", False)),
+            session=session,
         )
 
 
@@ -239,6 +279,23 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
             "local proxy cannot reach opencsitool.com (urllib honours the "
             "Windows registry proxy, unlike curl)"
         ),
+    )
+
+    renew = parser.add_argument_group("session renewal")
+    renew.add_argument(
+        "--no-renew",
+        action="store_true",
+        help=(
+            "never re-run OAuth to renew an expiring session; report the "
+            f"expiry instead (also settable via ${ENV_NO_RENEW})"
+        ),
+    )
+    renew.add_argument(
+        "--renew-timeout",
+        type=float,
+        default=45.0,
+        metavar="SECONDS",
+        help="budget for one silent OAuth renewal (default: 45)",
     )
 
 
