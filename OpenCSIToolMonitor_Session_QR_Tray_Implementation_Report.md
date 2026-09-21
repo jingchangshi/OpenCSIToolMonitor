@@ -32,7 +32,7 @@ The tray is a view.           It never shells out to the CLI.
 | Tests | **Done** | **656 tests** (655 passed, 1 skipped) green under `pytest` **and** `unittest` |
 | Windows real-machine verification | **Done** | Live CLI, QR, tray, frozen binaries, entry points |
 | Documentation | **Done** | 5 docs + README + this report |
-| Normative commits | **Done** | 26 commits, `cf34c1b` → `12d77aa` |
+| Normative commits | **Done** | 27 commits, `cf34c1b` onward; 3 fixes for defects found by running the real artifacts |
 
 One honest non-claim: **the QR flow's final step is not machine-verifiable.** It
 requires a human to scan a WeChat mini-program code with a phone. The code
@@ -43,9 +43,16 @@ as a distinguishable exit code rather than pretending to succeed.
 
 ## 2. Final HEAD
 
+The last commit that changes **source or tests**:
+
 ```
-12d77aa  docs: record the frozen tray's arguments and the two new exit codes
+542fe4f  fix(packaging): make the frozen tray honour its own arguments
 ```
+
+Documentation-only commits follow it, including the ones that carry this report.
+Naming those here would be circular — a commit cannot contain its own SHA — so
+the anchor is the last behavioural change, which is the thing a reader actually
+needs to check out.
 
 Baseline for this phase was `cf34c1b~1` (`4739898`). Working tree is clean; no
 untracked scratch files; no stray processes; no `Run` registry entry left behind.
@@ -518,8 +525,9 @@ one pattern is a pattern, not a coincidence.
 
 ## 11. Commits
 
-26 commits, oldest first. All authored as
-`opencsi contributors <contributors@opencsi.invalid>`.
+26 commits, oldest first, up to and including the last source change. All
+authored as `opencsi contributors <contributors@opencsi.invalid>`.
+
 | SHA | Subject |
 | --- | --- |
 | `cf34c1b` | refactor: separate credential reload from session renewal |
@@ -548,7 +556,6 @@ one pattern is a pattern, not a coincidence.
 | `39967ad` | fix(errors): stop the QR protocol error borrowing the server-error code |
 | `542fe4f` | fix(packaging): make the frozen tray honour its own arguments |
 | `12d77aa` | docs: record the frozen tray's arguments and the two new exit codes |
-
 ---
 
 ## 12. User instructions
