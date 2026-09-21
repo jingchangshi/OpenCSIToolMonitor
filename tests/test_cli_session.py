@@ -21,11 +21,14 @@ import json
 import os
 import time
 import unittest
+import unittest.mock
+from pathlib import Path
 
 from helpers import FAKE_TOKEN, StubCredentialProvider, make_client
 
 from opencsi.auth.base import remaining_seconds
 from opencsi.auth.cdp import CdpCookieProvider
+from opencsi.auth.oauth_browser import RenewalCapability
 from opencsi.auth.session import (
     LoginResult,
     LoginStatus,
@@ -35,6 +38,8 @@ from opencsi.auth.session import (
 )
 from opencsi.cli.app import main
 from opencsi.errors import EXIT_SESSION_EXPIRED, EXIT_USAGE
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def run_cli(
@@ -287,6 +292,73 @@ class RenewExitCodeTest(unittest.TestCase):
         code, _, err = run_cli(["login", "--renew", "--manual"])
         self.assertEqual(code, EXIT_USAGE)
         self.assertIn("not allowed with", err)
+
+
+class RenewalCapabilityConsistencyTest(unittest.TestCase):
+    """``login --status`` and ``doctor`` must agree about silent renewal.
+
+    They did not. ``--status`` built its session with ``renew=False``, so it read
+    ``session.renewer is None`` -- true by construction -- and printed
+    "unavailable" on a machine where ``doctor`` reported renewal working. A
+    status command that reports a working feature as broken is worse than one
+    that says nothing, because the user acts on it.
+
+    Both now ask ``renewal_capability``, so the only way they can diverge is if
+    someone reintroduces a second answer. These tests make that fail loudly.
+    """
+
+    def test_status_does_not_claim_renewal_is_unavailable_when_it_is_not(self) -> None:
+        """The specific regression: a working renewer must not read as missing."""
+        provider = _FakeCdpProvider("TOKEN")
+        client = _stub_client(token="TOKEN")
+        with unittest.mock.patch(
+            "opencsi.auth.oauth_browser.renewal_capability"
+        ) as probe:
+            probe.return_value = RenewalCapability(True, "GitCode SSO available")
+            code, out, _ = run_cli(
+                ["login", "--status", "--json"], client=client, provider=provider
+            )
+        payload = json.loads(out)
+        self.assertTrue(
+            payload["renewal"]["available"],
+            "login --status reported renewal unavailable while the capability "
+            "probe said it was available",
+        )
+        self.assertEqual(code, 0)
+
+    def test_status_reports_the_reason_when_renewal_is_unavailable(self) -> None:
+        """A bare "unavailable" is not actionable; the reason is."""
+        provider = _FakeCdpProvider("TOKEN")
+        client = _stub_client(token="TOKEN")
+        with unittest.mock.patch(
+            "opencsi.auth.oauth_browser.renewal_capability"
+        ) as probe:
+            probe.return_value = RenewalCapability(False, "no browser endpoint")
+            _, out, _ = run_cli(
+                ["login", "--status", "--json"], client=client, provider=provider
+            )
+        payload = json.loads(out)
+        self.assertFalse(payload["renewal"]["available"])
+        self.assertIn("no browser endpoint", payload["renewal"]["reason"])
+
+    def test_doctor_and_status_use_the_same_probe(self) -> None:
+        """Neither command may answer this question on its own."""
+        for module in ("src/opencsi/cli/login.py", "src/opencsi/cli/doctor.py"):
+            source = (ROOT / module).read_text(encoding="utf-8")
+            self.assertIn(
+                "renewal_capability",
+                source,
+                f"{module} does not use the shared capability probe",
+            )
+
+    def test_a_manual_credential_is_reported_as_unable_to_renew(self) -> None:
+        """The probe's own answer for the case that has no upstream session."""
+        from opencsi.auth.manual import ManualCookieProvider
+        from opencsi.auth.oauth_browser import renewal_capability
+
+        capability = renewal_capability(ManualCookieProvider("TOKEN"))
+        self.assertFalse(capability.available)
+        self.assertIn("manual", capability.reason.lower())
 
 
 class DoctorSessionTest(unittest.TestCase):

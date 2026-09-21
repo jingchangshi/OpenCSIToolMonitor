@@ -130,6 +130,30 @@ opencsi --version     # opencsi 0.1.0
 opencsi doctor        # 检查整条链路
 ```
 
+### 方式四：独立 EXE（目标机器上没有 Python）
+
+见下方[打包成独立 EXE](#打包成独立-exe无需安装-python)。
+
+### 可选依赖
+
+核心是**纯标准库**（`dependencies = []`），不装任何额外包也能用。
+只有下面两个功能需要额外依赖：
+
+| 额外依赖 | 装什么 | 用在哪 |
+| --- | --- | --- |
+| `opencsi[qr]` | Pillow, segno | `opencsi login --qr` 的图片解码与终端预览 |
+| `opencsi[tray]` | pystray, Pillow | `opencsi tray` 托盘 |
+| `opencsi[all]` | 以上全部 | 工作站安装 |
+
+```bash
+pip install "opencsi[all]"
+```
+
+缺哪个依赖时，命令会**明确告诉你装什么**，而不是抛一个 ImportError 让你自己猜。
+
+> 注意：`pystray` 不在清华镜像上。如果用的是镜像源，需要指定
+> `--index-url https://pypi.org/simple`。
+
 ---
 
 ## 快速开始
@@ -265,7 +289,8 @@ opencsi login --manual
 | `opencsi prices` | 模型与工具价目表 | 是 |
 | `opencsi logs` | LLM 网关调用日志 | 是 |
 | `opencsi doctor` | 诊断整条链路 | 部分 |
-| `opencsi login` | 打开登录页并确认会话 | 是 |
+| `opencsi login` | 建立 / 续期会话（支持无浏览器扫码） | 是 |
+| `opencsi tray` | Windows 11 托盘常驻监控 | 是 |
 | `opencsi contract-check` | 校验线上 API 是否仍符合已验证契约 | 是 |
 
 所有命令都支持 `--json`、`-v/--verbose`、`--cdp URL`、`--timeout SECONDS` 等通用选项。
@@ -506,14 +531,87 @@ All 15 checks passed.
 
 ### `opencsi login`
 
-打开登录页面，并轮询确认会话是否建立。
+建立、查看或续期 openCsiTool 会话。这是**认证生命周期**的唯一入口。
 
 ```bash
-opencsi login                # 打开浏览器，等待登录
-opencsi login --no-browser   # 不自动打开浏览器
-opencsi login --wait 120     # 最多等待 120 秒
-opencsi login --manual       # 从 stdin 读 Cookie（getpass）
+opencsi login                 # 打开登录页，等待会话建立
+opencsi login --status        # 只看会话与凭据剩余寿命，不做任何改动
+opencsi login --renew         # 后台标签页静默续期，不打扰你
+opencsi login --qr            # 用微信扫码登录 GitCode，无需浏览器
+opencsi login --no-browser    # 不自动打开浏览器
+opencsi login --wait 120      # 最多等待 120 秒
+opencsi login --manual        # 从 stdin 读 Cookie（getpass）
 ```
+
+#### 三种语义，不要混淆
+
+| 概念 | 做什么 | 会不会弹窗 |
+| --- | --- | --- |
+| **凭据重载**（credential reload） | 从浏览器重新读一次 Cookie | 不会 |
+| **会话续期**（session renewal） | 在后台标签页重跑 GitCode OAuth，换一个新的 `token` | 不会抢焦点 |
+| **交互登录**（interactive login） | 需要你本人操作（扫码 / 输密码） | 会 |
+
+`--renew` 是第二种。它**不会**打断你正在浏览的页面：续期在后台目标里完成，
+用完即关。触发策略也很克制：
+
+- 凭据剩余寿命 **> 5 分钟** → 什么都不做（`ALREADY_VALID`）；
+- 剩余 **≤ 5 分钟** → 静默续期；
+- API 返回 **401** → 先重载 Cookie，再尝试静默续期。
+
+续期成功的判据不是"页面加载完了"，而是 **旧 token ≠ 新 token 且新过期时间更晚**，
+并且服务端确实接受了它。
+
+#### `--qr`：无浏览器登录（重要限制）
+
+`opencsi login --qr` 走的是 GitCode 的微信扫码协议，**纯 HTTP + JSON 轮询**，
+不需要 DevTools、不需要浏览器、不做任何 DOM 抓取。协议已实测复现，
+细节见 [`docs/gitcode-qr-protocol.md`](docs/gitcode-qr-protocol.md)。
+
+**但必须说清楚一个实测结论：GitCode 返回的 `qrcode` 字段不是二维码（QR code），
+而是微信小程序码。** 依据（三重独立证据，可用
+`python tools/verify_qr_render.py` 复现）：
+
+1. 真实 QR 解码器（zxing-cpp）读不出来 —— 返回空；
+2. 没有定位图案：二维码三个角必定有的回字形方块，实测暗像素占比全是 `0.000`；
+3. 最细特征只有 **1 像素**（430 px 图内），而二维码最细特征是一个模块（约 7–20 px）。
+
+第 3 点决定了**终端里画出来的一定扫不了**：终端宽度 80–120 列，
+把 430 px 缩下去会摧毁亚像素细节。所以：
+
+- **能扫的是文件**：命令会把原始 PNG 写到
+  `%LOCALAPPDATA%\OpenCSI\login-code\`，你在屏幕上打开它再用微信扫。
+- **终端里的图只是预览**：用灰度字符画出形状，方便你确认它加载出来了。
+  它被明确标注为不可扫 —— 不会让你拿着手机对着一个永远读不出的图发呆。
+
+还有一个诚实的边界：**openCsiTool 自己的 `token` Cookie 由它自己的 OAuth 回调签发，
+那一步需要浏览器会话。** 单靠 GitCode 会话拿不到它。所以 `--qr` 的成功判据是
+"GitCode 已登录"，命令会明确告诉你后面还需要什么。
+
+### `opencsi tray`
+
+Windows 11 通知区域（托盘）常驻监控。
+
+```bash
+opencsi tray                      # 启动托盘（阻塞）
+opencsi tray --check              # 检查托盘是否可用，不发网络请求、不起线程
+opencsi tray --once               # 只取一次数据并打印，不进托盘
+opencsi tray --interval 600       # 刷新间隔（秒），默认 300
+opencsi tray --renew-margin 300   # 剩余多久开始续期（秒），默认 300
+opencsi tray --install-startup    # 注册开机自启（写 HKCU Run 键）
+opencsi tray --remove-startup     # 取消开机自启
+opencsi tray --startup-status     # 查看自启状态
+opencsi tray --allow-multiple     # 允许多开（默认单实例）
+```
+
+托盘是**纯 UI**：它直接 import `MonitorService` / `OpenCsiToolClient`，
+不通过 `subprocess` 调 `opencsi usage --json`。因此没有子进程、没有 JSON 二次解析、
+也没有第二份认证逻辑。菜单里的操作只是把请求入队，阻塞工作都在工作线程里做 ——
+否则取一次数据就会把图标卡住。
+
+开机自启用 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`：它是**每用户**的
+（不需要管理员权限、不影响其他账户），而且 Windows 自己的任务管理器"启动"标签页
+读的就是它 —— 在这里关和在系统里关是同一件事。**不显式执行 `--install-startup`
+就不会写任何东西。**
 
 ### `opencsi contract-check`
 
@@ -523,6 +621,35 @@ opencsi login --manual       # 从 stdin 读 Cookie（getpass）
 ```bash
 opencsi contract-check
 ```
+
+---
+
+## 打包成独立 EXE（无需安装 Python）
+
+```powershell
+pip install "opencsi[build]"
+python tools/build_exe.py
+```
+
+产出两个文件（各约 16 MB）：
+
+| 文件 | 用途 |
+| --- | --- |
+| `dist\opencsi.exe` | 命令行版（有控制台） |
+| `dist\opencsi-tray.exe` | 托盘版（无控制台，**不会闪黑窗**） |
+
+**为什么是两个而不是一个**：它们需求不同，而 PyInstaller 的 `--windowed`
+是按二进制设置的。命令行版的全部意义就是输出文本；托盘版则绝不能在每次开机时
+弹出一个控制台窗口。一个 EXE 无法同时满足这两点。
+
+`packaging/opencsi.spec` 里的 `hiddenimports` 是关键。本项目的可选依赖
+（pystray / Pillow / segno）都是**在函数内部惰性 import** 的 —— 这样
+`opencsi --help` 在没有装任何额外依赖的机器上也能用 —— 但 PyInstaller 的
+静态分析看不穿这一点。少了这份清单，托盘会**编译成功、然后在用户机器上崩掉**，
+这是最糟糕的一类打包 bug，因为构建过程看起来完全正常。
+
+`upx=False` 是刻意的：UPX 压缩是杀毒软件误报的常见诱因，而一个会读取用户
+会话 Cookie 的工具，本来就更容易被盯上。
 
 ---
 
@@ -541,9 +668,13 @@ opencsi contract-check
 | `13` | 会话已过期（401） |
 | `20` | 权限不足（403） |
 | `30` | 网络错误 |
-| `31` | 服务端错误（5xx） |
+| `31` | 服务端错误（5xx）／扫码协议错误 |
 | `32` | 业务错误（HTTP 200 但 `code != 200`） |
 | `130` | 被用户中断（Ctrl-C） |
+
+`opencsi login --renew` 还会用一组独立的续期状态码，见
+[`docs/authentication.md`](docs/authentication.md)：续期失败但会话仍可用时**不会**
+返回非零码 —— 那是"这次没续上"，不是"命令失败了"。
 
 示例：
 

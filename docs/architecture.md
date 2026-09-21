@@ -17,16 +17,31 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  用户                                                                 │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                │  opencsi usage --json
-┌───────────────────────────────▼──────────────────────────────────────┐
-│  CLI 层            src/opencsi/cli/                                  │
+└──────┬───────────────────────────────────────────┬───────────────────┘
+       │  opencsi usage --json                     │  托盘图标 / 菜单
+┌──────▼───────────────────────────────┐  ┌────────▼───────────────────┐
+│  CLI 层            src/opencsi/cli/  │  │  托盘层  src/opencsi/tray/ │
+│                                      │  │                            │
+│   app.py        入口、退出码映射      │  │   app.py     TrayApp       │
+│   context.py    参数解析、输出        │  │   presenter.py 纯函数：    │
+│   status.py …   每个命令一个模块      │  │              快照 → 文案/菜单│
+│   login.py      认证生命周期入口      │  │   icons.py  状态图标       │
+│   tray.py       托盘命令入口          │  │   startup.py 开机自启      │
+│                                      │  │   single_instance.py 互斥  │
+│   职责：参数 → 调用 → 渲染。          │  │                            │
+│   不含任何业务逻辑或 HTTP 细节。      │  │   职责：**纯 UI**。        │
+└──────┬───────────────────────────────┘  └────────┬───────────────────┘
+       │                                            │
+       │              ┌─────────────────────────────┘
+       │              │  直接 import，不是 subprocess
+┌──────▼──────────────▼────────────────────────────────────────────────┐
+│  监控层            src/opencsi/monitor/                              │
 │                                                                      │
-│   app.py        入口、退出码映射、日志脱敏安装                        │
-│   context.py    参数解析、输出、客户端构造                            │
-│   status.py …   每个命令一个模块，各自 register() + run()             │
+│   service.py   MonitorService —— 刷新循环、退避、状态机              │
+│                MonitorSnapshot —— 冻结快照，不含任何可承载密钥的字段  │
 │                                                                      │
-│   职责：参数 → 调用 → 渲染。不含任何业务逻辑或 HTTP 细节。            │
+│   职责：决定"什么时候去取数据、失败了怎么退避"。不认识终端，也不认识 │
+│   托盘控件。因为这一层不依赖 UI，它才能在任意平台上被测。            │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼──────────────────────────────────────┐
@@ -41,13 +56,20 @@
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │  只依赖 CredentialProvider 协议
 ┌───────────────────────────────▼──────────────────────────────────────┐
-│  凭据层            src/opencsi/auth/                                 │
+│  认证层            src/opencsi/auth/                                 │
 │                                                                      │
-│   base.py     CredentialProvider 协议 + CredentialStatus             │
-│   cdp.py      CdpCookieProvider   —— 从浏览器读 Cookie                │
-│   manual.py   ManualCookieProvider —— 手工/测试用                     │
+│   base.py         CredentialProvider 协议 + CredentialStatus          │
+│   cdp.py          CdpCookieProvider    —— 从浏览器读 Cookie           │
+│   manual.py       ManualCookieProvider —— 手工/测试用                 │
+│   session.py      SessionManager       —— 三种语义的协调者            │
+│   oauth_browser.py BrowserOAuthRenewer —— 后台标签页静默续期          │
+│   gitcode_qr.py   GitCodeQrAuthenticator —— 无浏览器扫码登录          │
+│   qr_render.py    把登录码画到终端 / 存成文件                         │
 │                                                                      │
-│   职责：只回答一个问题 —— "会话 Cookie 的值是什么？"                  │
+│   职责：回答三个不同的问题 ——                                        │
+│     "Cookie 的值是什么？"（重载）                                    │
+│     "能换一个新的吗？"（续期）                                       │
+│     "需要用户本人操作吗？"（交互登录）                               │
 └───────────────┬──────────────────────────────┬───────────────────────┘
                 │                              │
 ┌───────────────▼──────────────┐  ┌────────────▼──────────────────────┐
@@ -56,13 +78,18 @@
 │   ws.py         WebSocket     │  │  Chrome / Edge / Brave            │
 │   errors.py     退出码与异常   │  │  --remote-debugging-port=9222     │
 │   redaction.py  脱敏           │  │                                   │
-│   formatting.py CJK 宽度/数字  │  │  只被读取 Cookie，不被"操作"      │
+│   formatting.py CJK 宽度/数字  │  │  只被读取 Cookie 和跑后台标签页    │
 └───────────────┬──────────────┘  └───────────────────────────────────┘
                 │
 ┌───────────────▼──────────────────────────────────────────────────────┐
 │  opencsitool.com  内部 Web API（仅 GET）                             │
+│  web-api.gitcode.com  扫码登录协议（纯 HTTP 轮询）                   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+**一条必须守住的边界**：托盘层 import 监控层，**不是** subprocess 调
+`opencsi usage --json`。少了子进程、少了 JSON 二次解析、也少了第二份认证逻辑。
+托盘里没有任何业务逻辑 —— 它只把快照渲染成图标和菜单。
 
 ---
 
@@ -257,7 +284,17 @@ display_width("使用中")  # → 6，不是 3
 | `auth/base.py` | 小 | `CredentialProvider` 协议 |
 | `auth/cdp.py` | 大 | 从浏览器读 Cookie |
 | `auth/manual.py` | 小 | 手工凭据 |
-| `cli/*.py` | 中 | 9 个命令 + 入口 + 上下文 |
+| `auth/session.py` | 大 | `SessionManager`：重载 / 续期 / 登录三种语义 |
+| `auth/oauth_browser.py` | 大 | `BrowserOAuthRenewer`：后台标签页静默续期 |
+| `auth/gitcode_qr.py` | 大 | `GitCodeQrAuthenticator`：无浏览器扫码登录 |
+| `auth/qr_render.py` | 中 | 登录码的终端预览与文件落盘 |
+| `monitor/service.py` | 大 | `MonitorService`：刷新循环、退避、状态机 |
+| `tray/app.py` | 大 | `TrayApp`：pystray 图标与菜单（纯 UI） |
+| `tray/presenter.py` | 中 | 快照 → 文案 / 菜单的纯函数 |
+| `tray/icons.py` | 中 | 状态图标绘制 |
+| `tray/startup.py` | 中 | HKCU Run 键读写 |
+| `tray/single_instance.py` | 小 | 命名互斥量单实例守卫 |
+| `cli/*.py` | 中 | 10 个命令 + 入口 + 上下文 |
 
 ---
 
@@ -273,6 +310,15 @@ display_width("使用中")  # → 6，不是 3
 | `client` | `FakeTransport` 重放 fixture | 否 |
 | `transport` | 构造 header 后断言 | 否 |
 | `auth/cdp` | 进程内假 DevTools 服务器 | 否（仅 127.0.0.1） |
+| `auth/session` | 假 provider + 假 renewer | 否 |
+| `auth/gitcode_qr` | 进程内假 HTTP 服务器 | 否（仅 127.0.0.1） |
+| `monitor` | 假 client，可控时钟 | 否 |
+| `tray/presenter` | 纯函数断言 | 否 |
 | `cli` | 替换 `make_client` | 否 |
 
-这就是为什么整个测试套件能在**离线环境**下跑完 298 个测试。
+**托盘层是唯一无法在 CI 里完整验证的层** —— pystray 需要一个真实的
+Windows 消息循环。所以业务逻辑全部被推到 `monitor/` 和 `tray/presenter.py`，
+它们都是纯的、可测的；`tray/app.py` 只剩下"把已经算好的东西交给 pystray"，
+这部分用真机验证（见 README 的托盘一节）。
+
+这就是为什么整个测试套件能在**离线环境**下跑完 609 个测试。

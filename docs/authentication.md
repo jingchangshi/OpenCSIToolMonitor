@@ -230,6 +230,103 @@ f"{key[:10]}****"     # sk-bM4LUSm****
 
 ---
 
+## 会话生命周期管理（`SessionManager`）
+
+上面第 2 步的"重新读取"是**凭据重载**，不是**会话续期**。这两件事必须分开，
+因为它们的成本和成功率完全不同：重载只是再读一次浏览器里的 Cookie，
+而续期要重跑一次 OAuth。
+
+### 三种语义
+
+| 概念 | 做什么 | 要用户参与 | 成功率 |
+| --- | --- | --- | --- |
+| **凭据重载** `credential reload` | 重新读浏览器 Cookie | 否 | 只要浏览器还在就必成 |
+| **会话续期** `session renewal` | 后台标签页重跑 GitCode OAuth，签发新 `token` | 否 | 取决于 GitCode SSO 会话是否还在 |
+| **交互登录** `interactive login` | 用户本人操作（扫码 / 输密码） | **是** | —— |
+
+把这三件事混为一谈是原始设计的问题所在：`token` 只有约 58 分钟寿命，
+而原来的 `CdpCookieProvider.refresh()` **只是重载**。浏览器里的 Cookie 一旦
+真的过期，重载多少次都没用，只会得到同一个死 Cookie。
+
+### 架构
+
+```
+                     ┌──────────────────────────────┐
+                     │        SessionManager        │
+                     │  needs_renewal()             │
+                     │  ensure_valid()              │
+                     │  renew(force=False)          │
+                     │  reload_then_renew()         │
+                     │  login()                     │
+                     └───────┬──────────┬───────────┘
+                             │          │
+              ┌──────────────┘          └───────────────┐
+              ▼                                         ▼
+   ┌────────────────────┐                  ┌────────────────────────┐
+   │ CredentialProvider │                  │    SessionRenewer      │
+   │  (协议)            │                  │     (协议)             │
+   │                    │                  │                        │
+   │ get_credential()   │                  │ renew(before=None)     │
+   │ invalidate()       │                  │  -> RenewalResult      │
+   │ describe()         │                  └───────────┬────────────┘
+   └─────────┬──────────┘                              │
+             │                                         │
+   ┌─────────▼──────────┐                  ┌───────────▼────────────┐
+   │ CdpCookieProvider  │                  │ BrowserOAuthRenewer    │
+   │  从 CDP 读 Cookie  │                  │  后台标签页跑 OAuth    │
+   └────────────────────┘                  └────────────────────────┘
+
+   另一条路（无需浏览器）：
+   ┌────────────────────────────┐
+   │ InteractiveAuthenticator   │  GitCodeQrAuthenticator
+   │   login(...)               │  纯 HTTP 轮询，微信扫码
+   └────────────────────────────┘
+```
+
+### 续期触发策略
+
+刻意保守，避免任何形式的循环：
+
+| 条件 | 动作 |
+| --- | --- |
+| `expires_in > 5 分钟` | **什么都不做** → `ALREADY_VALID` |
+| `expires_in <= 5 分钟` | 静默续期 |
+| API 返回 `401` | 先**重载** Cookie，再尝试静默续期 |
+
+`renew()` 内部最多重试一次，**不会无限循环**。续期失败也不会让一个仍然
+可用的会话变成错误：如果续期没成功但当前 Cookie 还能用，命令正常返回 ——
+那是"这次没续上"，不是"命令失败了"。
+
+### 续期成功的判据
+
+**不是** "页面加载完了"。`Page.loadEventFired` 只说明导航发生，
+不说明认证成功。真正的判据是：
+
+- 旧 token ≠ 新 token，**且**
+- 新过期时间 > 旧过期时间，**且**
+- 服务端确实接受了它（`getUserInfo` → `200`）
+
+冷启动（本来就没有 Cookie）是一个特例：此时没有"旧 token"可比，
+所以用**第三个信号** —— `credential_appeared`（从"无凭据"变成"有凭据"）。
+缺了它，一个全新的 3598 秒 token 会被误判成"什么都没发生"。
+
+超时是另一个特例：如果续期**超过了截止时间但成功了**，报告 `TIMEOUT` 是错的。
+所以 `_evaluate()` 接收 `timed_out` 标志，最终**以 Cookie jar 的实际状态为准**；
+只有确实超时且**没有**拿到 token 时才报 `TIMEOUT`。
+
+### 静默续期不抢焦点
+
+续期用 `Target.createTarget` 开一个**后台**目标，完成后 `Target.closeTarget` 关掉。
+**绝不导航用户当前正在看的页面** —— 那会在用户阅读时把页面换掉。
+
+### 为什么保留两条路
+
+即使 `login --qr` 可用，`CdpCookieProvider` + `BrowserOAuthRenewer` 也**不删除**。
+理由：openCsiTool 的 `token` 由**它自己的 OAuth 回调**签发，那一步需要浏览器会话。
+扫码能拿到 GitCode 会话，但拿不到 openCsiTool 的 Cookie。两条路解决的是不同问题。
+
+---
+
 ## 为什么不自动启动浏览器
 
 `CdpCookieProvider` 会连接一个**已经在运行**的调试端点；

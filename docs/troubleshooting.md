@@ -27,6 +27,10 @@ opencsi doctor
 | 表格没对齐 | — | 终端字体宽度 | [§9](#9-表格对齐) |
 | `pip install -e .` 失败 | — | 缺 setuptools | [§10](#10-安装问题) |
 | 表格被截断 | — | 终端太窄 | [§11](#11-输出被截断) |
+| `tray: unavailable` | 2 | 没装 `opencsi[tray]` | [§13](#13-托盘问题) |
+| 扫码登录卡住 / 扫不出来 | — | 扫的是终端图，不是文件 | [§14](#14-扫码登录-login---qr) |
+| 续期报 `LOGIN_REQUIRED` | 13 | GitCode SSO 也过期了 | [§15](#15-续期失败) |
+| 托盘图标不出现 | — | 被折叠进溢出区 | [§13](#13-托盘问题) |
 
 ---
 
@@ -599,6 +603,146 @@ opencsi contract-check
 ```
 
 它验证 11 项契约。全通过说明接口形状没变。
+
+---
+
+## 13. 托盘问题
+
+### `tray: unavailable`（退出码 2）
+
+托盘需要两个可选依赖：
+
+```bash
+pip install "opencsi[tray]"
+```
+
+先确认到底缺什么：
+
+```bash
+opencsi doctor        # 看 "tray support" 那一行
+opencsi tray --check  # 只看托盘可用性，不发网络请求、不起线程
+```
+
+`--check` 是刻意不碰网络的：判断"能不能显示托盘"不该依赖 API 是否可达。
+
+> 如果用的是镜像源，`pystray` 可能不在上面。加
+> `--index-url https://pypi.org/simple`。
+
+### 托盘图标不出现
+
+Windows 11 **默认把新图标折叠进溢出区**（任务栏那个 `^`）。
+点开它，把图标拖到任务栏上就固定住了。
+
+图标确实没出现的话，按顺序检查：
+
+```bash
+opencsi tray --once      # 业务逻辑能不能跑通？
+opencsi tray             # 前台启动，看有没有报错
+```
+
+如果 `--once` 正常但托盘不显示，问题在 UI 层；如果 `--once` 就失败，
+那是认证或网络问题，见前面几节。
+
+### 开了两个托盘图标
+
+默认是**单实例**的（命名互斥量）。如果你看到两个，说明其中之一是用
+`--allow-multiple` 启动的。
+
+### 每次开机都闪一个黑窗口
+
+说明自启项写的是 `python.exe` 而不是 `pythonw.exe`，或者用的是命令行版 EXE。
+重新注册一次即可：
+
+```bash
+opencsi tray --remove-startup
+opencsi tray --install-startup
+opencsi tray --startup-status    # 确认命令里是 pythonw 或 opencsi-tray.exe
+```
+
+托盘版 EXE 是 `--windowed` 构建的，不会有控制台窗口。
+
+### 怎么彻底关掉自启
+
+```bash
+opencsi tray --remove-startup
+```
+
+也可以在**任务管理器 → 启动应用**里禁用 `OpenCSIToolMonitor` ——
+读的是同一个 `HKCU` 注册表键，两种方式等效。
+
+---
+
+## 14. 扫码登录（`login --qr`）
+
+### 扫不出来 —— 这是预期行为，不是 bug
+
+**GitCode 返回的不是二维码，是微信小程序码。** 它的点阵比终端字符格还细
+（430 px 图里最细只有 1 像素），所以**终端里画出来的那个图一定扫不出来**。
+
+正确做法：扫**文件**。
+
+```bash
+opencsi login --qr
+# 输出里会有一行：
+# Open this file and scan it with WeChat: C:\Users\...\opencsi-login-code-xxxx.png
+```
+
+在屏幕上打开那个 PNG，再用微信"扫一扫"。
+
+终端里的图只是**预览**，用来确认码已经加载出来了。
+
+### 为什么不用浏览器也能登录，但还是要浏览器
+
+这是最容易误解的一点，所以写清楚：
+
+| 步骤 | 需要浏览器吗 |
+| --- | --- |
+| 拿到 GitCode 会话 | **不需要**（纯 HTTP 轮询） |
+| 拿到 openCsiTool 的 `token` Cookie | **需要**（它由自己的 OAuth 回调签发） |
+
+所以 `login --qr` 成功后，命令会明确告诉你还需要跑一次 `opencsi login`
+（在已登录 GitCode 的浏览器里）。**一次扫码不能替代 openCsiTool 的 OAuth 回调。**
+
+### 码过期了
+
+登录码寿命只有几分钟。命令会自动换一个新的（最多一次），
+超时后重新运行即可：
+
+```bash
+opencsi login --qr --qr-wait 300
+```
+
+### 登录码文件会堆积吗
+
+不会。只保留最新的 3 个，旧的自动清理。
+文件在 `%LOCALAPPDATA%\OpenCSI\login-code\`。
+
+---
+
+## 15. 续期失败
+
+`opencsi login --renew` 会报告一个明确的结果，而不是含糊的失败：
+
+| 结果 | 含义 | 怎么办 |
+| --- | --- | --- |
+| `RENEWED` | 换到了新 token | 无需操作 |
+| `ALREADY_VALID` | 剩余寿命还够，没动 | 无需操作 |
+| `LOGIN_REQUIRED` | GitCode SSO 也过期了 | 跑 `opencsi login`（要浏览器） |
+| `CDP_UNAVAILABLE` | 连不上调试端点 | 见 [§1](#1-websocket-could-not-be-used) |
+| `OAUTH_FAILED` | OAuth 流程被拒 | 先确认浏览器里 GitCode 还是登录态 |
+| `TIMEOUT` | 超时且**没**拿到新 token | 重试；仍失败就跑 `opencsi login` |
+| `UNSUPPORTED` | 当前 provider 不支持续期 | 用 `opencsi login` |
+
+**关键区分**：续期失败**不等于**命令失败。如果当前 Cookie 仍然可用，
+命令会正常返回 —— 那是"这次没续上"，不是"你不能用了"。
+
+只有 `LOGIN_REQUIRED` 才真的需要你本人操作。
+
+### 为什么静默续期有时会失败
+
+它依赖浏览器里**仍然有效的 GitCode SSO 会话**。如果那个也过期了
+（比如很久没开过浏览器、或者手动登出了 GitCode），就只能交互登录。
+这是设计使然 —— 本工具不会替你保存 GitCode 的长期凭据。
 
 ---
 

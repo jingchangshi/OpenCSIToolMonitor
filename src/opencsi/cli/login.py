@@ -300,9 +300,17 @@ def _status(ctx: CliContext) -> int:
     ``--no-renew`` is forced on: a status check that silently performed an OAuth
     round-trip would be a surprising side effect, and would also hide the very
     expiry the user asked about.
+
+    That means ``session.renewer`` is ``None`` here *by construction*, so it
+    cannot be used to answer "can this session renew itself?" -- reading it was a
+    real bug: it made ``--status`` print "unavailable" on a machine where
+    ``doctor`` reported renewal working. The capability is probed separately,
+    through the same helper ``doctor`` uses, so the two commands agree.
     """
-    client = ctx.make_client(provider=ctx.make_provider(), renew=False)
-    provider = client.credentials
+    from ..auth.oauth_browser import renewal_capability
+
+    provider = ctx.make_provider()
+    client = ctx.make_client(provider=provider, renew=False)
     cred = provider.status()
 
     identity = None
@@ -312,12 +320,14 @@ def _status(ctx: CliContext) -> int:
     except OpenCsiError as exc:
         error = exc
 
+    capability = renewal_capability(provider)
     session = client.session
     payload = {
         "ok": identity is not None,
         "credential": cred.as_dict(),
         "renewal": {
-            "available": session.renewer is not None,
+            "available": capability.available,
+            "reason": capability.reason,
             "needs_renewal": session.needs_renewal(),
             "margin_seconds": session.renew_margin,
             "last": session.last_renewal.as_dict() if session.last_renewal else None,
@@ -352,11 +362,19 @@ def _status(ctx: CliContext) -> int:
                 [
                     ("Credential source", cred.source),
                     ("Cookie lifetime left", format_relative_seconds(cred.expires_in)),
-                    ("Silent renewal", "available" if session.renewer else "unavailable"),
+                    (
+                        "Silent renewal",
+                        "available" if capability.available else "unavailable",
+                    ),
                 ]
             )
         )
-        if session.renewer and session.needs_renewal():
+        if not capability.available:
+            # Say *why*, not just "unavailable": the reason is the difference
+            # between a fixable misconfiguration and a credential that has no
+            # upstream session to renew against.
+            ctx.out(f"  {capability.reason}")
+        if capability.available and session.needs_renewal():
             ctx.out(
                 "The session is inside the renewal margin; the next request will "
                 "renew it silently."

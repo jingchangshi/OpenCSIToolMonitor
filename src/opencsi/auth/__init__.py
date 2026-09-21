@@ -20,7 +20,13 @@ from .gitcode_qr import (
     QrStatus,
 )
 from .manual import ManualCookieProvider
-from .oauth_browser import BrowserOAuthRenewer, RenewalEvidence, make_cdp_renewer
+from .oauth_browser import (
+    BrowserOAuthRenewer,
+    RenewalCapability,
+    RenewalEvidence,
+    make_cdp_renewer,
+    renewal_capability,
+)
 from .session import (
     DEFAULT_RENEW_MARGIN,
     InteractiveAuthenticator,
@@ -42,6 +48,8 @@ __all__ = [
     "BrowserOAuthRenewer",
     "RenewalEvidence",
     "make_cdp_renewer",
+    "RenewalCapability",
+    "renewal_capability",
     "SessionManager",
     "SessionRenewer",
     "InteractiveAuthenticator",

@@ -677,3 +677,82 @@ def make_cdp_renewer(
         timeout=timeout,
         ports=getattr(provider, "_ports", None),
     )
+
+
+@dataclass(frozen=True)
+class RenewalCapability:
+    """Whether silent renewal could work right now, and why not when it could not.
+
+    A *capability* check, not a renewal: it answers "is a background OAuth
+    round-trip possible?" without performing one. That distinction matters,
+    because the answer is needed by commands that must not change anything --
+    ``login --status`` and ``doctor`` both report it, and neither may trigger an
+    OAuth exchange just to find out whether it could.
+
+    ``reason`` is a human-readable explanation, so a caller never has to
+    translate a boolean into advice.
+    """
+
+    available: bool
+    reason: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {"available": self.available, "reason": self.reason}
+
+
+def renewal_capability(
+    provider: CredentialProvider,
+    *,
+    base_url: str = "https://opencsitool.com",
+) -> RenewalCapability:
+    """Whether ``provider`` could renew itself silently.
+
+    This is the single source of truth for that question. ``doctor`` and
+    ``login --status`` both call it, because they previously answered it
+    separately and **disagreed**: ``--status`` built its session with
+    ``renew=False``, so it read ``session.renewer is None`` -- which is true by
+    construction -- and printed "unavailable" on a machine where renewal was
+    demonstrably working. A status command that reports a working feature as
+    broken is worse than one that says nothing.
+
+    A renewer needs the *browser-level* WebSocket so it can open a background
+    tab. Checking that here turns "renewal mysteriously fails later" into a clear
+    diagnosis now.
+    """
+    if not isinstance(provider, CdpCookieProvider):
+        return RenewalCapability(
+            False,
+            f"the {getattr(provider, 'name', 'unknown')} credential cannot renew "
+            "itself; a manually supplied token has no GitCode SSO session",
+        )
+
+    try:
+        renewer = make_cdp_renewer(provider, base_url=base_url)
+        endpoint = renewer._resolve_endpoint()
+        ws = endpoint.browser_ws_url()
+    except OpenCsiError as exc:
+        return RenewalCapability(
+            False,
+            f"{exc} (silent renewal needs a reachable browser-level DevTools endpoint)",
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail a status report
+        return RenewalCapability(
+            False, f"could not reach the DevTools endpoint ({type(exc).__name__})"
+        )
+
+    if not ws:
+        return RenewalCapability(
+            False,
+            "the DevTools endpoint exposes no browser-level WebSocket; start the "
+            "browser with --remote-debugging-port so renewal can open a "
+            "background tab",
+        )
+    if "/devtools/page/" in ws:
+        return RenewalCapability(
+            False,
+            "the configured CDP URL is a page-level socket; point --cdp at the "
+            "browser endpoint from /json/version",
+        )
+    return RenewalCapability(
+        True, "GitCode SSO available; OAuth can be re-run in a background tab"
+    )

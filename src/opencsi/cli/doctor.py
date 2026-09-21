@@ -88,6 +88,10 @@ def _record_renewal(record, provider, credential_ok: bool) -> None:
     This is the check that answers "will I have to sign in again in an hour?".
     A readable credential with no renewer is a *warning*, not a failure: the tool
     works, it just cannot save the user the next login.
+
+    The verdict comes from ``renewal_capability``, which ``login --status`` also
+    uses -- the two commands reported this independently once and disagreed, with
+    ``--status`` claiming renewal was unavailable on a machine where it worked.
     """
     if not credential_ok:
         record(
@@ -95,15 +99,6 @@ def _record_renewal(record, provider, credential_ok: bool) -> None:
             WARN,
             "not attempted: no credential available",
             "resolve the credential check above first",
-        )
-        return
-
-    if getattr(provider, "name", "") != "cdp":
-        record(
-            "silent renewal",
-            WARN,
-            f"the {getattr(provider, 'name', 'unknown')} credential cannot renew itself",
-            "use a browser-backed credential to get automatic renewal",
         )
         return
 
@@ -116,45 +111,16 @@ def _record_renewal(record, provider, credential_ok: bool) -> None:
         )
         return
 
-    # A renewer needs the *browser-level* WebSocket so it can open a background
-    # tab. Checking that up front turns "renewal mysteriously fails later" into
-    # a clear diagnosis now.
-    try:
-        from ..auth.oauth_browser import BrowserOAuthRenewer
+    from ..auth.oauth_browser import renewal_capability
 
-        renewer = BrowserOAuthRenewer(
-            getattr(provider, "_explicit", None),
-            ports=getattr(provider, "_ports", None),
-        )
-        endpoint = renewer._resolve_endpoint()
-        ws = endpoint.browser_ws_url()
-        if not ws:
-            record(
-                "silent renewal",
-                WARN,
-                "the DevTools endpoint exposes no browser-level WebSocket",
-                "start the browser with --remote-debugging-port so renewal can "
-                "open a background tab",
-            )
-            return
-        if "/devtools/page/" in ws:
-            record(
-                "silent renewal",
-                WARN,
-                "the configured CDP URL is a page-level socket",
-                "point --cdp at the browser endpoint from /json/version",
-            )
-            return
-        record(
-            "silent renewal",
-            OK,
-            "GitCode SSO available; OAuth can be re-run in a background tab",
-        )
-    except OpenCsiError as exc:
+    capability = renewal_capability(provider)
+    if capability.available:
+        record("silent renewal", OK, capability.reason)
+    else:
         record(
             "silent renewal",
             WARN,
-            str(exc),
+            capability.reason,
             "silent renewal needs a reachable browser-level DevTools endpoint",
         )
 
