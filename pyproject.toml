@@ -35,12 +35,15 @@ dependencies = []
 # The suite also runs on the standard library's unittest runner.
 test = ["pytest>=7"]
 
-# Terminal QR rendering for `opencsi login --qr`.
-# Pillow is the only *required* piece: GitCode returns the QR as an image, so
-# the work is decoding and painting it with Unicode half-blocks, not encoding a
-# QR ourselves. segno is kept for the case where a payload turns out to be a
-# string to encode rather than an image -- it is not needed for the flow GitCode
-# actually implements, and the code says so instead of silently requiring it.
+# Displaying the login code for `opencsi login --qr`.
+# Pillow is the only *required* piece: GitCode returns the code as an image, so
+# the work is decoding and painting it, not encoding anything ourselves. Note
+# that image is a WeChat mini-program code, not a QR code, so the terminal
+# rendering is a preview and the saved file is what gets scanned -- see
+# docs/gitcode-qr-protocol.md §9.0.
+# segno is kept for the case where a payload turns out to be a string to encode
+# rather than an image -- it is not needed for the flow GitCode actually
+# implements, and the code says so instead of silently requiring it.
 qr = ["Pillow>=10", "segno>=1.6"]
 
 # Windows system tray. pystray wraps Shell_NotifyIcon and the message loop;
