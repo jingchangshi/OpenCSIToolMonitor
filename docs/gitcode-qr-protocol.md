@@ -21,8 +21,9 @@ GitCode 的微信小程序扫码登录是一个**纯 HTTP + JSON 的轮询式流
 `X-Source`、`X-Platform` 等头都**不在** CORS `Access-Control-Allow-Headers` 白名单里（白名单实际只回显 `traceparent`），但这是浏览器同源策略的约束，**对普通 HTTP 客户端无效** —— 服务端不校验它们。
 
 保留意见（不改变判定，但必须诚实记录）：
-- 按约束要求，**未对创建二维码的 POST 做线上实测**（该调用会产生服务端状态）。`X-Source` 是否被服务端**强制**校验，仅有静态证据 + 该头在 CORS 白名单之外这一间接证据，**未经 wire-level 验证**。
+- ~~按约束要求，**未对创建二维码的 POST 做线上实测**~~ —— **该限制已解除**：`opencsi login --qr` 实现后已对创建接口做过 wire-level 实测（详见 §9.0），`X-Source` 未被服务端强制校验。
 - 扫码动作本身必须由真实微信客户端完成，但这属于"用户拿着手机扫码"的物理步骤，不属于"浏览器 JS 强制执行"，因此不构成 `QR_FLOW_BROWSER_BOUND`。
+- **`qrcode` 字段不是 QR 码，而是微信小程序码（微信小程序二维码）**。这是渲染环节的硬约束，详见 §9.0；它不改变协议判定，但改变了终端展示方式。
 - 详见 §9 未解问题。
 
 ---
@@ -827,7 +828,40 @@ return l(e.qr_code_url || e.url || e.qr_code || e.image || "")
 
 ## 未解问题
 
-1. **创建二维码的 POST 未经线上实测。**
+> **§9.0 更新（实现阶段的 wire-level 实测结果）**
+>
+> 本报告最初是只读调查，因此留下了"创建二维码的 POST 未实测"这一保留意见。实现 `opencsi login --qr` 时对该接口做了实测，结果如下 —— 三个问题得到回答，并发现了一个**新的、影响渲染方式的硬约束**。
+>
+> **实测方法**：`GitCodeQrAuthenticator.start_login()` 对 `https://web-api.gitcode.com/uc/api/v1/qrcode/wechat_mini_program` 发起一次真实 `POST`。脚本：`tools/verify_qr_render.py`（可重复运行）。
+>
+> | 观测项 | 结果 |
+> | --- | --- |
+> | HTTP 结果 | `200`，JSON 正常返回 |
+> | `scene_id` | 24 字符（值不打印） |
+> | `qrcode` 前缀 | `data:image/png;base64,iVBORw0KGgo...` —— **确认是 data URI**，不是 http(s) URL |
+> | `qrcode` 长度 | 约 65 KB |
+> | 解码后图像 | `430 × 430`，`RGBA` |
+> | `X-Source` 是否必需 | **否**。未带任何签名/反爬头即成功，与静态推断一致 |
+> | captcha / CSRF | 均不需要 |
+>
+> 这回答了原问题 1 与问题 3，并确证了问题 1 中的双层包裹推断。
+>
+> **新发现的硬约束：`qrcode` 不是 QR 码，而是微信小程序码。**
+>
+> 该结论由三重独立证据确证（均可用 `tools/verify_qr_render.py` 复现）：
+>
+> 1. **真实 QR 解码器读不出来**。`zxing-cpp` 对源图 `read_barcodes()` 返回**空列表**。
+> 2. **没有定位图案（finder pattern）**。QR 码必定在三个角有 7×7 回字形方块；实测三个角的暗像素占比均为 `0.000`。
+> 3. **最细特征为 1 像素**。430 px 图像中最窄的暗色连续段只有 **1 px**（若是 QR，该值应约等于一个模块宽度，即 `430/版本模块数 ≈ 7–20 px`）。
+>
+> 第 3 点决定了终端渲染**不可能可扫**：终端宽度通常 80–120 列，把 430 px 缩到该宽度会摧毁亚像素特征。因此：
+>
+> - **可扫路径是文件**：把原始 PNG 写到 `%LOCALAPPDATA%\OpenCSI\login-code\`，用户在屏幕上打开再用微信扫。
+> - **终端绘制降级为预览**：用灰度字符渐变（` .:-=+*#%@`）而非黑白二值化 —— 二值化会把细密点阵变成无法辨认的散点。预览明确标注为"不可扫"。
+>
+> 这一点**不改变协议判定**（`QR_FLOW_REPRODUCIBLE` 仍然成立：协议本身确实是纯 HTTP 轮询），但改变了"如何在终端展示"的实现方式。回归测试见 `tests/test_gitcode_qr.py::MiniProgramCodeTest`。
+
+1. ~~**创建二维码的 POST 未经线上实测。**~~ **已解决，见 §9.0。**
    该调用会在服务端创建二维码场景（状态变更），按本次调查的 READ-ONLY 约束**主动跳过**。因此以下两点只有静态证据：
    - 响应体的确切 JSON 包裹层级（推断为 `{"data":{"scene_id":...,"qrcode":...}}`，依据 `a.data.data` 的双层解构）；
    - 服务端是否**强制**校验 `X-Source`（推断为不强制，依据：CORS 白名单不含该头 + 该值纯本地读取）。
@@ -836,9 +870,9 @@ return l(e.qr_code_url || e.url || e.qr_code || e.image || "")
 
 2. **`scene_id` 的格式未确定。**
    实测表明任意字符串（含空串、1 字符、36 字符 UUID）都被服务端当作"未知场景"并返回 `TIMEOUT`，无法从响应反推真实格式。前端把它当作不透明字符串处理（`M({scene_id:"", qrcode:""})`），未做任何格式校验或解析。可能是 UUID v4 或短随机 ID。
+   实现阶段的实测补充：真实 `scene_id` 长度为 **24 字符**，仍不足以确定生成算法；客户端继续将其视为不透明字符串，与前端一致。
 
-3. **`qrcode` 字段究竟是 data URI 还是 http(s) URL，未经线上确证。**
-   由"登录模板不做 base64→data URI 拼接"推断它必须是完整可加载串，但无法从静态代码区分两种形态。同仓库的 `AtomcodePreviewQrcode` 两种都处理，说明后端两种都可能返回。
+3. ~~**`qrcode` 字段究竟是 data URI 还是 http(s) URL，未经线上确证。**~~ **已解决，见 §9.0**：实测为 `data:image/png;base64,...`。但代码仍两种形态都处理，因为 `AtomcodePreviewQrcode` 表明后端两种都可能返回。
 
 4. **华为云 WAF 的行为边界。**
    在探测 `web-api.gitcode.com/api/v1/user/oauth/login/qrcode/...`（无 `/uc` 前缀）时，观察到**间歇性 `418` + `X-Hwwaf-Attack-Id` + `X-Hwwaf-Delay-Ms: 500`**（CloudWAF 拦截页"访问被拦截！"）。同一 URL 加 `Referer`/`Origin` 后返回正常的 `401`。这说明边缘 WAF 会基于请求头组合做启发式判定。

@@ -100,8 +100,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--qr",
         action="store_true",
         help=(
-            "sign in by scanning a WeChat QR code in the terminal; needs no "
-            "browser (experimental: see docs/gitcode-qr-protocol.md)"
+            "sign in to GitCode by scanning a WeChat code, with no browser; "
+            "the code is saved as an image to scan (see "
+            "docs/gitcode-qr-protocol.md)"
         ),
     )
     mode.add_argument(
@@ -145,20 +146,28 @@ def run(ctx: CliContext) -> int:
 
 # ── QR mode ───────────────────────────────────────────────────────────────
 def _qr(ctx: CliContext) -> int:
-    """Sign in by scanning a WeChat QR code, without a browser.
+    """Sign in by scanning a WeChat code, without a browser.
 
     This is the *interactive* half of the new authentication architecture. It
     obtains a GitCode session over plain HTTP -- verified reproducible against
-    the real protocol (docs/gitcode-qr-protocol.md) -- and then reports exactly
-    how far that gets the openCsiTool session, rather than overclaiming.
+    the real protocol (docs/gitcode-qr-protocol.md).
 
-    The honest limit: openCsiTool's own ``token`` cookie is issued by its OAuth
-    callback, which needs a browser session. A GitCode session alone does not
-    mint it. So this command's success criterion is "GitCode signed in", and it
-    says plainly what still needs the browser afterwards.
+    Two honest limits, both established by decoding a real code rather than by
+    assuming:
+
+    * GitCode's ``qrcode`` field is a **WeChat mini-program code**, not a QR
+      code. Its dots are finer than a terminal cell, so a terminal rendering
+      cannot be scanned. The code is therefore written to a file at full
+      resolution and the user is pointed at it; the terminal drawing is a
+      preview so they can see it loaded.
+    * openCsiTool's own ``token`` cookie is issued by its OAuth callback, which
+      needs a browser session. A GitCode session alone does not mint it.
+
+    So this command's success criterion is "GitCode signed in", and it says
+    plainly what still needs the browser afterwards.
     """
     from ..auth.gitcode_qr import GitCodeQrAuthenticator, QrLoginStatus, QrStatus
-    from ..auth.qr_render import render_payload
+    from ..auth.qr_render import decode_payload_image, render_payload, write_image
 
     authenticator = GitCodeQrAuthenticator(
         api_base=os.environ.get("OPENCSI_GITCODE_API", "https://web-api.gitcode.com"),
@@ -171,23 +180,41 @@ def _qr(ctx: CliContext) -> int:
 
     def on_challenge(challenge) -> None:
         result = render_payload(challenge.image)
+        # Write the full-resolution image separately: it is the only rendering
+        # that can actually be scanned, and `render_payload` may have returned a
+        # preview.
+        path = None
+        raw = decode_payload_image(challenge.image)
+        if raw is not None:
+            path = write_image(raw)
         rendered["mode"] = result.mode
-        rendered["path"] = result.path
+        rendered["path"] = path or result.path
+        rendered["scannable"] = bool(path) or result.scannable
+        rendered["detail"] = result.detail
         if ctx.json:
             return
+
         ctx.err("")
-        ctx.err("Scan this with WeChat (微信扫一扫) to sign in to GitCode:")
+        ctx.err("Sign in to GitCode by scanning this with WeChat (微信扫一扫):")
         ctx.err("")
         if result.mode == "unicode":
+            # Drawn on stderr with the rest of the interactive block. Splitting
+            # the picture onto stdout and its caption onto stderr makes the two
+            # interleave unpredictably once either stream is a pipe, and a
+            # caption that arrives before its picture is worse than useless.
             for line in result.text.splitlines():
-                ctx.out(line)
-        elif result.mode == "file":
-            ctx.err(f"the QR was written to: {result.path}")
-            ctx.err("open that file and scan it with WeChat.")
-            if result.detail:
-                ctx.err(f"note: {result.detail}")
-        else:
-            ctx.err(f"error: could not display the QR code. {result.detail or ''}")
+                ctx.err(line)
+        if rendered["path"]:
+            ctx.err("")
+            ctx.err(f"Open this file and scan it with WeChat: {rendered['path']}")
+            if not result.scannable:
+                ctx.err(
+                    "Scan the image, not the terminal drawing above: this is a "
+                    "WeChat mini-program code, and its dots are finer than a "
+                    "terminal cell."
+                )
+        elif result.mode == "none":
+            ctx.err(f"error: could not display the code. {result.detail or ''}")
         ctx.err("")
 
     def on_state(state) -> None:
@@ -195,14 +222,14 @@ def _qr(ctx: CliContext) -> int:
             return
         message = {
             QrStatus.WAITING: "Waiting for scan...",
-            QrStatus.SCAN: "QR scanned. Confirm on your phone...",
+            QrStatus.SCAN: "Scanned. Confirm on your phone...",
             QrStatus.LOGIN: "Login confirmed. Completing GitCode sign-in...",
-            QrStatus.TIMEOUT: "The QR expired; issuing a new one...",
+            QrStatus.TIMEOUT: "The code expired; issuing a new one...",
         }.get(state)
         if message:
             ctx.err(message)
 
-    ctx.err("Requesting a GitCode login QR code...")
+    ctx.err("Requesting a GitCode login code...")
     result = authenticator.login(
         timeout=float(getattr(ctx.args, "qr_wait", 180.0) or 180.0),
         on_challenge=on_challenge,
@@ -216,6 +243,8 @@ def _qr(ctx: CliContext) -> int:
         "display": {
             "mode": rendered.get("mode"),
             "path": rendered.get("path"),
+            "scannable": rendered.get("scannable", False),
+            "note": rendered.get("detail"),
         },
         "gitcode_session_cookies": sorted(cookies),
         "openscitool_session": {
@@ -237,9 +266,7 @@ def _qr(ctx: CliContext) -> int:
             if result.is_new_user is not None:
                 ctx.out(f"New GitCode account: {'yes' if result.is_new_user else 'no'}")
             if cookies:
-                ctx.out(
-                    "GitCode session cookies received: " + ", ".join(sorted(cookies))
-                )
+                ctx.out("GitCode session cookies received: " + ", ".join(sorted(cookies)))
             ctx.blank()
             ctx.out(
                 "Next: openCsiTool's session cookie comes from its own OAuth "

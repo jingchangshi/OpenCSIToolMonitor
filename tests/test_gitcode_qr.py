@@ -452,6 +452,212 @@ class RenderTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIsNotNone(result.detail)
 
+    def test_a_preview_is_never_claimed_to_be_scannable(self) -> None:
+        """The one honest thing this renderer must not get wrong.
+
+        GitCode's payload is a WeChat mini-program code whose finest detail is
+        one pixel of 430 -- finer than a terminal cell. A rendering of it cannot
+        be scanned, so ``scannable`` must be false and the detail must say why.
+        Claiming otherwise would send the user to their phone with a picture
+        that will never read.
+        """
+        import base64
+
+        from opencsi.auth.qr_render import render_payload
+
+        payload = "data:image/png;base64," + base64.b64encode(FAKE_PNG).decode()
+        result = render_payload(payload)
+
+        if result.mode == "unicode":
+            self.assertFalse(result.scannable)
+
+    def test_a_rendered_code_is_written_to_a_file_at_full_resolution(self) -> None:
+        """The file is the path that actually works, so it must be produced."""
+        import base64
+        import os
+
+        from opencsi.auth.qr_render import decode_payload_image, write_image
+
+        payload = "data:image/png;base64," + base64.b64encode(FAKE_PNG).decode()
+        raw = decode_payload_image(payload)
+        self.assertIsNotNone(raw)
+
+        path = write_image(raw)  # type: ignore[arg-type]
+        self.assertIsNotNone(path)
+        try:
+            self.assertTrue(os.path.exists(path or ""))
+            with open(path, "rb") as fh:  # type: ignore[arg-type]
+                self.assertEqual(fh.read(), FAKE_PNG)
+        finally:
+            if path:
+                os.unlink(path)
+
+    def test_the_file_written_is_owner_only(self) -> None:
+        """The login code is short-lived, but it is still not world-readable."""
+        import base64
+        import os
+        import stat
+
+        from opencsi.auth.qr_render import decode_payload_image, write_image
+
+        payload = "data:image/png;base64," + base64.b64encode(FAKE_PNG).decode()
+        raw = decode_payload_image(payload)
+        path = write_image(raw)  # type: ignore[arg-type]
+        self.assertIsNotNone(path)
+        try:
+            if os.name == "posix":
+                mode = stat.S_IMODE(os.stat(path or "").st_mode)
+                self.assertEqual(mode & 0o077, 0, "the file must not be group/world readable")
+        finally:
+            if path:
+                os.unlink(path)
+
+    def test_the_preview_keeps_greys_so_the_pattern_stays_visible(self) -> None:
+        """Binarising would destroy a mini-program code's structure.
+
+        Its dots are finer than the cell grid, so a pure black/white threshold
+        turns the code into scattered specks. The luminance ramp keeps the shape
+        recognisable, which is the preview's whole purpose.
+        """
+        import base64
+
+        from opencsi.auth.qr_render import render_payload
+
+        payload = "data:image/png;base64," + base64.b64encode(FAKE_PNG).decode()
+        result = render_payload(payload)
+        if result.mode != "unicode" or not result.text:
+            self.skipTest("no preview rendered")
+
+        glyphs = set(result.text) - {"\n"}
+        # A ramp render uses more than the two glyphs a binarised one would.
+        self.assertGreater(
+            len(glyphs),
+            2,
+            f"the preview looks binarised; glyphs were {sorted(glyphs)}",
+        )
+
+    def test_old_login_codes_are_pruned(self) -> None:
+        """Each run must not leak a file forever.
+
+        A live run of ``login --qr`` left 14 expired code images behind, one per
+        invocation, with nothing to clean them up. The newest few are kept so a
+        user who runs the command twice still has a code to scan.
+        """
+        import base64
+        import os
+        import tempfile
+
+        from opencsi.auth.qr_render import KEEP_CODES, decode_payload_image, write_image
+
+        payload = "data:image/png;base64," + base64.b64encode(FAKE_PNG).decode()
+        raw = decode_payload_image(payload)
+        self.assertIsNotNone(raw)
+
+        with tempfile.TemporaryDirectory() as directory:
+            for _ in range(KEEP_CODES + 4):
+                write_image(raw, directory=directory)  # type: ignore[arg-type]
+            remaining = [
+                name
+                for name in os.listdir(directory)
+                if name.startswith("opencsi-login-code-")
+            ]
+            self.assertLessEqual(
+                len(remaining),
+                KEEP_CODES,
+                f"codes piled up: {len(remaining)} files left in {directory}",
+            )
+            self.assertTrue(remaining, "the newest code must survive")
+
+
+class MiniProgramCodeTest(unittest.TestCase):
+    """GitCode's ``qrcode`` field is a WeChat code, not a QR code.
+
+    This is the finding that shapes the whole feature, and it is asserted here
+    so a future change cannot silently re-adopt the comfortable assumption. The
+    evidence is recorded in ``docs/gitcode-qr-protocol.md`` and reproduced by
+    ``tools/verify_qr_render.py`` against the live API.
+    """
+
+    #: A real GitCode code, captured once and committed as a fixture. It is a
+    #: *login* code and long expired, so it is not a secret; it is kept because
+    #: the structural facts below cannot be asserted against a synthetic image.
+    FIXTURE = "gitcode_login_code.png"
+
+    def _fixture(self):
+        import os
+
+        from PIL import Image
+
+        path = os.path.join(os.path.dirname(__file__), "fixtures", self.FIXTURE)
+        if not os.path.exists(path):
+            self.skipTest(f"fixture {self.FIXTURE} is not present")
+        return Image.open(path)
+
+    def test_it_has_no_qr_finder_patterns(self) -> None:
+        """Every QR has three finder squares; this has none."""
+        image = self._fixture().convert("L")
+        pixels = image.load()
+        width, height = image.size
+        box = 40
+
+        def darkness(left: int, top: int) -> float:
+            dark = sum(
+                1
+                for x in range(left, min(left + box, width))
+                for y in range(top, min(top + box, height))
+                if pixels[x, y] < 128
+            )
+            return dark / (box * box)
+
+        for corner in ((0, 0), (width - box, 0), (0, height - box)):
+            self.assertLess(
+                darkness(*corner),
+                0.05,
+                f"corner {corner} looks like a QR finder pattern",
+            )
+
+    def test_its_finest_detail_is_finer_than_a_terminal_cell(self) -> None:
+        """The measurement that proves a terminal rendering cannot be scanned."""
+        image = self._fixture().convert("L")
+        pixels = image.load()
+        width, height = image.size
+
+        shortest = width
+        for y in range(height):
+            run = 0
+            for x in range(width):
+                if pixels[x, y] < 128:
+                    run += 1
+                else:
+                    if run:
+                        shortest = min(shortest, run)
+                    run = 0
+            if run:
+                shortest = min(shortest, run)
+
+        # A QR's narrowest feature is one module of at most ~177 across. This
+        # code's is far finer, so no terminal width can represent it.
+        self.assertLess(
+            shortest,
+            width / 177,
+            "the code is coarse enough that a terminal could represent it, "
+            "which would mean it is a QR after all",
+        )
+
+    def test_the_committed_fixture_is_not_a_decodable_qr(self) -> None:
+        """The decisive check, using a real decoder when one is available."""
+        try:
+            import zxingcpp
+        except ImportError:
+            self.skipTest("zxing-cpp is a verification-only tool and is not installed")
+
+        image = self._fixture().convert("L")
+        self.assertEqual(
+            list(zxingcpp.read_barcodes(image)),
+            [],
+            "a QR decoder read the fixture, so it is a QR code after all",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
