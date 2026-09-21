@@ -32,7 +32,7 @@ The tray is a view.           It never shells out to the CLI.
 | Tests | **Done** | **656 tests** (655 passed, 1 skipped) green under `pytest` **and** `unittest` |
 | Windows real-machine verification | **Done** | Live CLI, QR, tray, frozen binaries, entry points |
 | Documentation | **Done** | 5 docs + README + this report |
-| Normative commits | **Done** | 25 commits, `cf34c1b` → `542fe4f` |
+| Normative commits | **Done** | 26 commits, `cf34c1b` → `12d77aa` |
 
 One honest non-claim: **the QR flow's final step is not machine-verifiable.** It
 requires a human to scan a WeChat mini-program code with a phone. The code
@@ -44,7 +44,7 @@ as a distinguishable exit code rather than pretending to succeed.
 ## 2. Final HEAD
 
 ```
-542fe4f  fix(packaging): make the frozen tray honour its own arguments
+12d77aa  docs: record the frozen tray's arguments and the two new exit codes
 ```
 
 Baseline for this phase was `cf34c1b~1` (`4739898`). Working tree is clean; no
@@ -518,7 +518,7 @@ one pattern is a pattern, not a coincidence.
 
 ## 11. Commits
 
-25 commits, oldest first. All authored as
+26 commits, oldest first. All authored as
 `opencsi contributors <contributors@opencsi.invalid>`.
 | SHA | Subject |
 | --- | --- |
@@ -547,6 +547,7 @@ one pattern is a pattern, not a coincidence.
 | `5ab3ad3` | docs: refresh the architecture test count to 651 |
 | `39967ad` | fix(errors): stop the QR protocol error borrowing the server-error code |
 | `542fe4f` | fix(packaging): make the frozen tray honour its own arguments |
+| `12d77aa` | docs: record the frozen tray's arguments and the two new exit codes |
 
 ---
 
