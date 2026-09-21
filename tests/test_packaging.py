@@ -52,6 +52,81 @@ class EntryPointTest(unittest.TestCase):
         self.assertIn("from opencsi.tray.__main__ import main", source)
 
 
+class DeclaredScriptTest(unittest.TestCase):
+    """Every target in ``[project.scripts]`` must actually resolve.
+
+    This is the bug class that produced a broken ``opencsi-monitor``:
+    ``pyproject.toml`` declared ``opencsi.tray.app:main`` and no such function
+    existed. Nothing failed, because the machine's installed console script
+    predated the declaration, so the target was never resolved by anything --
+    a fresh ``pip install`` would have created a command that dies on import with
+    an ``AttributeError`` about a missing attribute.
+
+    A declared entry point that does not exist is worse than a missing one: the
+    failure surfaces after installation, in the user's shell, as a traceback
+    about an attribute rather than a message about the tool. Resolving them here
+    costs nothing and cannot regress.
+    """
+
+    def _declared(self) -> dict[str, str]:
+        """Parse ``[project.scripts]`` without needing a TOML library.
+
+        ``tomllib`` is 3.11+, and this project supports 3.10, so the suite cannot
+        depend on it. The section is a flat map of ``name = "module:attr"``, which
+        is simple enough to read directly.
+        """
+        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(
+            r"^\[project\.scripts\]\s*$(.*?)(?=^\[|\Z)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "pyproject.toml has no [project.scripts]")
+        scripts: dict[str, str] = {}
+        for line in match.group(1).splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            name, _, value = line.partition("=")
+            scripts[name.strip()] = value.strip().strip('"').strip("'")
+        return scripts
+
+    def test_the_scripts_section_is_not_empty(self) -> None:
+        """Guards the parser: a regex that matched nothing would pass vacuously."""
+        scripts = self._declared()
+        self.assertIn("opencsi", scripts)
+        self.assertIn("opencsi-monitor", scripts)
+
+    def test_every_declared_target_is_importable_and_callable(self) -> None:
+        import importlib
+
+        for name, target in self._declared().items():
+            with self.subTest(script=name, target=target):
+                module_name, _, attr = target.partition(":")
+                self.assertTrue(module_name, f"{name} has no module")
+                self.assertTrue(attr, f"{name} has no attribute")
+                module = importlib.import_module(module_name)
+                func = getattr(module, attr, None)
+                self.assertIsNotNone(
+                    func,
+                    f"{name} points at {target}, which does not exist -- a fresh "
+                    "install would create a command that fails on import",
+                )
+                self.assertTrue(callable(func), f"{name} -> {target} is not callable")
+
+    def test_the_tray_console_script_takes_no_arguments(self) -> None:
+        """``opencsi-monitor`` is a GUI entry point; argv is not parsed.
+
+        It must match ``python -m opencsi.tray``, which is what the Windows
+        startup registration runs, so both routes behave identically.
+        """
+        import inspect
+
+        from opencsi.tray.app import main
+
+        self.assertEqual(len(inspect.signature(main).parameters), 0)
+
+
 class SpecTest(unittest.TestCase):
     """The spec must agree with what the source actually imports lazily."""
 

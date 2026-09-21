@@ -367,3 +367,28 @@ class TrayApp:
     def __repr__(self) -> str:
         state = self._service.snapshot.state.value
         return f"TrayApp(state={state}, auto_refresh={self._auto_refresh})"
+
+
+def main() -> int:
+    """Console-script entry point: ``opencsi-monitor``.
+
+    ``pyproject.toml`` has always declared ``opencsi-monitor =
+    "opencsi.tray.app:main"``, but this function did not exist -- the real entry
+    logic lived only in :mod:`opencsi.tray.__main__`, which the startup
+    registration invokes as ``pythonw.exe -m opencsi.tray``. So the module form
+    worked while the *declared console script* was broken: a fresh
+    ``pip install`` created an ``opencsi-monitor`` that died on import with
+    ``AttributeError: module 'opencsi.tray.app' has no attribute 'main'``.
+
+    It went unnoticed because the machine's installed ``opencsi.exe`` predated
+    the declaration, so nothing ever resolved the target. A declared entry point
+    that does not exist is worse than a missing one: the failure happens after
+    installation, in the user's shell, with a traceback about an attribute rather
+    than a message about the tool.
+
+    Delegates rather than duplicating, so there is exactly one place that decides
+    how the tray starts.
+    """
+    from .__main__ import main as _main
+
+    return _main()
