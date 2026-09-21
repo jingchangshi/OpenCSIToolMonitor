@@ -52,6 +52,123 @@ class EntryPointTest(unittest.TestCase):
         self.assertIn("from opencsi.tray.__main__ import main", source)
 
 
+class TrayEntryArgumentsTest(unittest.TestCase):
+    """``opencsi-tray.exe --once`` must honour its arguments.
+
+    The entry script used to ignore argv entirely and always start the resident
+    GUI. So ``opencsi-tray.exe --once`` -- which reads as "print one snapshot and
+    exit" -- printed nothing and then sat in the notification area forever. A
+    user asking for a one-shot report got a process that never returns, with no
+    output and no error to explain it.
+
+    The console binary was unaffected because it goes through argparse, which is
+    exactly why the bug survived: every test drove ``opencsi tray --once``, and
+    nothing exercised the frozen tray's own entry script.
+
+    These tests call the real entry module with a patched ``sys.argv`` and assert
+    which target it reached, so they test the delegation rather than the presence
+    of a string.
+    """
+
+    def _entry(self):
+        """Load ``packaging/tray_entry.py`` as a module."""
+        import importlib.util
+
+        path = ROOT / "packaging" / "tray_entry.py"
+        spec = importlib.util.spec_from_file_location("_tray_entry_under_test", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_no_arguments_starts_the_tray(self) -> None:
+        """The double-click and start-at-sign-in case must be unchanged."""
+        from unittest import mock
+
+        import opencsi.tray.__main__ as tray_main
+
+        entry = self._entry()
+        calls = []
+
+        def fake_tray_main() -> int:
+            calls.append("tray")
+            return 0
+
+        with mock.patch.object(tray_main, "main", fake_tray_main), mock.patch.object(
+            sys, "argv", ["opencsi-tray.exe"]
+        ):
+            code = entry.main()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["tray"], "a bare launch must start the tray")
+
+    def test_once_is_forwarded_to_the_cli_tray_command(self) -> None:
+        """The reported bug: ``--once`` must reach the CLI, not be discarded.
+
+        ``opencsi.tray.__main__.main`` is stubbed as well as spied on. Without
+        that, a regression that discarded the arguments would call the *real*
+        GUI entry point and hang the suite instead of failing it -- which is
+        precisely how the original bug hid, so the test refuses to reproduce
+        that shape.
+        """
+        from unittest import mock
+
+        import opencsi.cli.app as cli_app
+        import opencsi.tray.__main__ as tray_main
+
+        entry = self._entry()
+        seen = []
+
+        def fake_cli_main(argv=None) -> int:
+            seen.append(list(argv) if argv is not None else None)
+            return 0
+
+        with mock.patch.object(cli_app, "main", fake_cli_main), mock.patch.object(
+            tray_main, "main", lambda: seen.append("TRAY-STARTED") or 0
+        ), mock.patch.object(sys, "argv", ["opencsi-tray.exe", "--once", "--no-proxy"]):
+            code = entry.main()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            seen,
+            [["tray", "--once", "--no-proxy"]],
+            "the tray sub-command name must be supplied and the flags preserved",
+        )
+
+    def test_the_arguments_are_not_reordered_or_dropped(self) -> None:
+        from unittest import mock
+
+        import opencsi.cli.app as cli_app
+        import opencsi.tray.__main__ as tray_main
+
+        entry = self._entry()
+        seen = []
+        flags = ["--interval", "60", "--json"]
+
+        with mock.patch.object(
+            cli_app, "main", lambda argv=None: seen.append(list(argv)) or 0
+        ), mock.patch.object(
+            tray_main, "main", lambda: seen.append("TRAY-STARTED") or 0
+        ), mock.patch.object(sys, "argv", ["opencsi-tray.exe", *flags]):
+            entry.main()
+
+        self.assertEqual(seen, [["tray", *flags]])
+
+    def test_the_exit_code_from_the_cli_is_returned(self) -> None:
+        """A failing one-shot must not be reported as success."""
+        from unittest import mock
+
+        import opencsi.cli.app as cli_app
+        import opencsi.tray.__main__ as tray_main
+
+        entry = self._entry()
+
+        with mock.patch.object(cli_app, "main", lambda argv=None: 13), mock.patch.object(
+            tray_main, "main", lambda: 0
+        ), mock.patch.object(sys, "argv", ["opencsi-tray.exe", "--once"]):
+            self.assertEqual(entry.main(), 13)
+
+
 class DeclaredScriptTest(unittest.TestCase):
     """Every target in ``[project.scripts]`` must actually resolve.
 
