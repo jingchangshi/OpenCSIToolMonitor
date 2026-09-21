@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 
 from helpers import FakeResponse, FakeTransport, StubCredentialProvider, make_client
 
@@ -320,6 +321,52 @@ class ReadOnlyGuaranteeTest(unittest.TestCase):
         client.get_model_prices()
         for path, _ in transport.calls:
             self.assertNotIn("admin", path.lower())
+
+    def test_the_business_client_can_only_reach_a_get(self) -> None:
+        """A structural guard: the read-only promise cannot be edited away.
+
+        The behavioural test above only covers the calls it happens to make. This
+        one asserts the *shape* of the code: :meth:`OpenCsiToolClient._attempt` is
+        the single place a business request is issued, and it calls ``get_json``.
+        A future edit that added a POST there would have to change this line, and
+        the failure would name the reason.
+        """
+        import ast
+
+        from opencsi.client import OpenCsiToolClient
+
+        source = Path(__file__).resolve().parent.parent / "src" / "opencsi" / "client.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+
+        # Every attribute call on the transport must be a read.
+        verbs: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if isinstance(node.func.value, ast.Attribute) and (
+                    node.func.value.attr in ("http", "_http")
+                ):
+                    verbs.add(node.func.attr)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in ("post", "put", "delete", "patch"):
+                    verbs.add(node.func.attr)
+
+        forbidden = verbs & {"post", "put", "delete", "patch"}
+        self.assertEqual(
+            forbidden,
+            set(),
+            f"the business client issues write verbs: {sorted(forbidden)}. "
+            "OpenCsiToolClient must stay GET-only; authentication lives in "
+            "opencsi.auth, not here.",
+        )
+        # And the one call it does make is present, so this cannot pass by
+        # finding no calls at all.
+        self.assertIn("get_json", verbs)
+
+    def test_no_call_targets_a_binding_or_delete_route(self) -> None:
+        client, transport, _ = make_client()
+        client.login_or_restore_session()
+        client.get_my_tools()
+        for path, _ in transport.calls:
             self.assertNotIn("accountBinding", path)
             self.assertNotIn("delete", path.lower())
 
