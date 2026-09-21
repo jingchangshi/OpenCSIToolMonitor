@@ -325,6 +325,55 @@ f"{key[:10]}****"     # sk-bM4LUSm****
 理由：openCsiTool 的 `token` 由**它自己的 OAuth 回调**签发，那一步需要浏览器会话。
 扫码能拿到 GitCode 会话，但拿不到 openCsiTool 的 Cookie。两条路解决的是不同问题。
 
+### 自动续期（托盘常驻路径）
+
+`opencsi login --renew` 是**手动**路径：它强制续期一次，用来验证机制本身。
+
+用户真正依赖的是**自动**路径 —— 托盘自己按计划续期，没人去点它。
+这是**两条不同的代码路径**，手动那条通过并不代表自动那条也对：
+
+| 路径 | 入口 | 触发方式 |
+| --- | --- | --- |
+| 手动 | `opencsi login --renew` | `session.renew(force=True)`，一条直线 |
+| **自动** | `MonitorService._maybe_renew` | 由 `needs_renewal(margin=...)` 把关，从计划 tick 进入 |
+
+自动路径曾经坏过两次，而手动路径一直是绿的 —— 这正是"只测强制路径"的风险：
+
+1. **续期成功后图标卡在 "Renewing session"。**
+   `_tick_once` 在尝试续期后就提前返回，而 `_maybe_renew` 发布了 `RENEWING`
+   却没发布结果。一个两秒就完成的续期，会让托盘显示"进行中"直到下一次
+   计划刷新 —— 最多 5 分钟。
+
+2. **`tick()` 根本不存在**，尽管类文档一直声称可以用它同步驱动。
+   只有私有的 `_tick_once`。这不只是不整洁：它意味着自动路径**只能靠等真实定时器**
+   才能被跑到，而这正是问题 1 得以存活的原因。现在 `tick()` 是公开的。
+
+两个可复现的验证脚本：
+
+```bash
+# 证明自动路径会触发并成功（不需要等一小时）
+python tools/probe_autonomous_renewal.py
+
+# 跨真实过期观察（默认 70 分钟，观察若干次续期）
+python tools/probe_renewal_soak.py --minutes 75 --renewals 2
+```
+
+`probe_autonomous_renewal.py` 构建**真实对象图**（真的 CDP provider、真的
+OAuth renewer、真的 monitor），用真实调度驱动，**不强制**任何东西 ——
+如果策略不决定续期，它就报失败。
+
+实测结果：
+
+```text
+renewal margin set to   : 3629s (lifetime is 3569s)
+state                   : OK
+renewal status          : RENEWED
+token changed           : True
+lifetime after          : 3598s
+server accepted it      : yes (shijingchang)
+business data           : 3,634,063,175 tokens
+```
+
 ---
 
 ## 为什么不自动启动浏览器
