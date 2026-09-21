@@ -682,6 +682,133 @@ class TrayAppLogicTest(unittest.TestCase):
         app, _service = self._app()
         self.assertIn("TrayApp", repr(app))
 
+
+class NotificationTest(unittest.TestCase):
+    """§55: tell the user once when the session needs them, and only then.
+
+    Tested at the tray level as well as the service level, because the wiring
+    between them is where a real defect lived: the service could fire the
+    transition perfectly and the tray could still ignore it, which is exactly
+    what happened to the "Sign in..." menu item.
+    """
+
+    def _app(self):
+        from opencsi.tray.app import TrayApp
+
+        class _Icon:
+            def __init__(self):
+                self.calls = []
+
+            def notify(self, message, title=None):
+                self.calls.append((title, message))
+
+        app = TrayApp.__new__(TrayApp)
+        app._icon = _Icon()
+        app._lock = threading.RLock()
+        return app
+
+    def test_login_required_produces_one_notification(self) -> None:
+        app = self._app()
+        app._notify_attention(MonitorSnapshot(state=MonitorState.LOGIN_REQUIRED))
+        self.assertEqual(len(app._icon.calls), 1)
+        _title, message = app._icon.calls[0]
+        self.assertIn("Sign in", message)
+
+    def test_auth_error_produces_a_notification(self) -> None:
+        app = self._app()
+        app._notify_attention(MonitorSnapshot(state=MonitorState.AUTH_ERROR))
+        self.assertEqual(len(app._icon.calls), 1)
+
+    def test_offline_and_server_errors_do_not_notify(self) -> None:
+        """A flaky network is not worth interrupting someone over."""
+        for state in (MonitorState.OFFLINE, MonitorState.SERVER_ERROR):
+            with self.subTest(state=state.value):
+                app = self._app()
+                app._notify_attention(MonitorSnapshot(state=state))
+                self.assertEqual(app._icon.calls, [])
+
+    def test_healthy_states_do_not_notify(self) -> None:
+        for state in (MonitorState.OK, MonitorState.REFRESHING, MonitorState.RENEWING):
+            with self.subTest(state=state.value):
+                app = self._app()
+                app._notify_attention(MonitorSnapshot(state=state))
+                self.assertEqual(app._icon.calls, [])
+
+    def test_a_backend_without_notify_does_not_break_the_tray(self) -> None:
+        """pystray exposes notify on some backends only; a missing balloon must
+        not take down the icon, because the tooltip already says the same thing.
+        """
+        from opencsi.tray.app import TrayApp
+
+        class _NoNotify:
+            pass
+
+        app = TrayApp.__new__(TrayApp)
+        app._icon = _NoNotify()
+        app._lock = threading.RLock()
+        app._notify_attention(MonitorSnapshot(state=MonitorState.LOGIN_REQUIRED))
+
+    def test_a_raising_notify_does_not_break_the_tray(self) -> None:
+        from opencsi.tray.app import TrayApp
+
+        class _Angry:
+            def notify(self, message, title=None):
+                raise OSError("no shell notification area")
+
+        app = TrayApp.__new__(TrayApp)
+        app._icon = _Angry()
+        app._lock = threading.RLock()
+        app._notify_attention(MonitorSnapshot(state=MonitorState.LOGIN_REQUIRED))
+
+    def test_no_notification_before_the_icon_exists(self) -> None:
+        """A refresh can land before pystray has built the icon."""
+        from opencsi.tray.app import TrayApp
+
+        app = TrayApp.__new__(TrayApp)
+        app._icon = None
+        app._lock = threading.RLock()
+        app._notify_attention(MonitorSnapshot(state=MonitorState.LOGIN_REQUIRED))
+
+    def test_the_notification_never_contains_an_identity_field(self) -> None:
+        """§56: no employeeId / accountId / userId / virtualKey in any UI text."""
+        app = self._app()
+        for state in (MonitorState.LOGIN_REQUIRED, MonitorState.AUTH_ERROR):
+            app._notify_attention(MonitorSnapshot(state=state))
+        blob = repr(app._icon.calls).lower()
+        for banned in ("employeeid", "employee_id", "accountid", "userid", "virtualkey", "token="):
+            self.assertNotIn(banned, blob)
+
+
+class SignInActionTest(unittest.TestCase):
+    """The "Sign in..." menu item must actually sign the user in."""
+
+    def _app(self):
+        from opencsi.monitor import MonitorConfig, MonitorService
+        from opencsi.tray.app import TrayApp
+
+        class _Client:
+            def get_my_tools(self, *a, **k):
+                return _make_my_tools()
+
+        class _Session:
+            credentials = object()
+
+            def status(self):
+                from opencsi.auth.session import CredentialStatus
+
+                return CredentialStatus(True, "cdp", None, 1800.0)
+
+            def needs_renewal(self, margin=None):
+                return False
+
+            def renew(self, **k):
+                from opencsi.auth.session import RenewalResult, RenewalStatus
+
+                return RenewalResult(RenewalStatus.ALREADY_VALID)
+
+        service = MonitorService(_Client(), session=_Session(), config=MonitorConfig())
+        return TrayApp(service), service
+
     def test_sign_in_without_a_callback_still_does_something(self) -> None:
         """A menu item that only writes a log line is a dead menu item.
 
