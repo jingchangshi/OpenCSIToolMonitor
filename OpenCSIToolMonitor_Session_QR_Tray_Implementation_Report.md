@@ -22,7 +22,7 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | 目标 | 状态 | 证据 |
 | --- | --- | --- |
 | 拆分 *credential reload* 与 *session renewal* | **完成** | `SessionManager` + 三个协议；提交 `cf34c1b` |
-| 过期会话的静默自动续期 | **完成，实测证明（本轮再次复核）** | 浸泡探针两次观测到真实余量跨越：旧记录 `02:13:34`，本轮 `16:26:51` 从 312s 回到 3600s，`token_changed=True`，服务端接受新会话（`shijingchang`） |
+| 过期会话的静默自动续期 | **完成，实测证明（本轮第三次复核）** | 浸泡探针三次观测到真实余量跨越：`02:13:34`、`16:26:51`（312s→3600s），以及本轮 `17:22:37`（**272s**→3598s，`token_changed=True`，服务端接受 `shijingchang`）。三次都无人触碰、无交互登录 |
 | 续期触发策略，且不存在无限循环 | **完成** | `expires_in > margin` → 不动作；`<= margin` → 静默续期；401 → 先 reload，再续期一次 |
 | 静默续期不抢占用户焦点 | **完成** | `Target.createTarget` 创建**后台** target，完成后 `Target.closeTarget`；绝不导航用户当前页面 |
 | GitCode 纯 CLI / 扫码登录可行性调研 | **完成** | `docs/gitcode-qr-protocol.md` —— 结论 `QR_FLOW_REPRODUCIBLE` |
@@ -33,7 +33,7 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | 测试 | **完成** | **751 项测试**（750 通过、1 跳过、125 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
-| 规范提交 | **完成** | 46 个触碰源码/测试的提交（§11 完整列出） |
+| 规范提交 | **完成** | 49 个触碰源码/测试/探针的提交（§11 完整列出） |
 | 实测发现并修复的缺陷 | **完成** | 19 个（§10 完整列出），通过两种方式发现：**运行真实产物**，以及修好一个缺陷后追问**"还有哪里会这样"**。缺陷 9–19 各自带一行显式的「发现方式」；缺陷 1–8 在正文里说明来源 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
@@ -47,25 +47,25 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 最后一个修改**源码、测试或探针**的提交：
 
 ```
-72562a3  fix(tools): stop the soak counting one renewal as two
+8946ebc  fix(tray): stop a second launch failing in total silence
 ```
 
-最后一个修改 `src/` 的提交是：
+最后一个修改 `src/` 的提交也是它：
 
 ```
-8ee38e0  test(cli): guard the QR exit-code map the way the renewal one is guarded
+8946ebc  fix(tray): stop a second launch failing in total silence
 ```
 
 其后都是纯文档提交，包括承载本报告的提交。在这里写出那些提交是循环的——一个提交
 无法包含它自己的 SHA——所以锚点取最后一个行为变更，这才是读者真正需要检出的东西。
 
-> **这两个锚点是本轮修正过的。** 原文写的是 `a48bce8` / `71e7e54`，在后续多个提交之后
-> 已经过期；而"最后一个修改源码的提交"这种锚点**每落一个 commit 就会过期一次**，
-> 手工维护必然滞后。这里改为两条命令即可复核的形式：
+> **这两个锚点已经修正过两次。** 原文写的是 `a48bce8` / `71e7e54`，之后又写成
+> `72562a3` / `8ee38e0`，每次都随新提交过期。这正说明**手工维护"最新提交"这类锚点必然滞后**，
+> 所以这里改为给出可复核的命令，而不是要求读者相信这两个 SHA：
 >
 > ```bash
-> git log --oneline -1 -- src tests tools packaging   # 72562a3
-> git log --oneline -1 -- src                          # 8ee38e0
+> git log --oneline -1 -- src tests tools packaging   # 8946ebc
+> git log --oneline -1 -- src                          # 8946ebc
 > ```
 
 本阶段的基线是 `cf34c1b~1`（`4739898`）。工作区干净；无未跟踪的临时文件；无残留进程；
