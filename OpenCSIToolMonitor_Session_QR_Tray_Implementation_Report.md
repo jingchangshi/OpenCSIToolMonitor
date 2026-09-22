@@ -1,5 +1,11 @@
 # OpenCSIToolMonitor 会话续期 + 扫码登录 + 系统托盘 实施报告
 
+> **后续进展提示。** 本报告记录的是第三阶段。此后又有一轮工作完成了**第二段认证的
+> 纯 HTTP 闭环**，并修正了本报告原第 1 节中"浏览器无法被完全移除"的结论——该结论
+> 已被推翻，本报告正文保留了原文与错因分析。
+> 最新结论见 [`OpenCSIToolMonitor_Final_Auth_Closure_Report.md`](OpenCSIToolMonitor_Final_Auth_Closure_Report.md)
+> 与 [`docs/oauth-spa-investigation.md`](docs/oauth-spa-investigation.md)。
+
 本报告覆盖 `jingchangshi/OpenCSIToolMonitor`（`master` 分支）第三阶段的工作：
 把一个"可以用浏览器登录"的只读 CLI，演进为**能让自己保持登录**、**可以完全不用
 浏览器登录**、并且**常驻 Windows 11 桌面**的工具。
