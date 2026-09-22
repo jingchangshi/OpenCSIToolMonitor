@@ -333,6 +333,22 @@ opencsi status --no-proxy
 
 > 如果你**确实需要**代理才能上网，请不要用 `--no-proxy`。
 
+**两个地方的默认值刻意相反，这是有意的：**
+
+| 场景 | 默认 | 为什么 |
+| --- | --- | --- |
+| **静默续期**（`HttpOAuthRenewer`） | **绕过代理** | 无人值守、有兜底路径；一个会切断 TLS 的代理不该被信任 |
+| **打开浏览器登录**（`launch_debug_browser`） | **使用代理** | 首次登录没有兜底，且人在看着页面；企业代理常常是唯一出口 |
+
+所以浏览器登录**不会**自动绕过代理。如果登录页打不开，命令会提示你加 `--no-proxy`
+（此时浏览器会带 `--no-proxy-server` 启动）。
+
+这个默认值不是猜的：实测过一台机器上 `127.0.0.1:7890` 的代理**放行 `gitcode.com`
+但切断 `opencsitool.com` 的 TLS 握手**，而且是**只在 opencsitool.com 上**失败。
+Chrome 报 `net::ERR_CONNECTION_CLOSED`，看起来就像网站挂了。
+另外 `--proxy-bypass-list=opencsitool.com` **单独用无效** —— 它只在同时显式给出
+`--proxy-server` 时才生效，对"从系统继承的代理"不起作用。所以用的是 `--no-proxy-server`。
+
 ---
 
 ## 命令详解
@@ -563,13 +579,41 @@ opencsi login --manual        # 从 stdin 读 Cookie（getpass）
 续期成功的判据不是"页面加载完了"，而是 **旧 token ≠ 新 token 且新过期时间更晚**，
 并且服务端确实接受了它。
 
-#### `--qr`：无浏览器登录（重要限制）
+#### `--qr`：完全无浏览器登录
 
 `opencsi login --qr` 走的是 GitCode 的微信扫码协议，**纯 HTTP + JSON 轮询**，
 不需要 DevTools、不需要浏览器、不做任何 DOM 抓取。协议已实测复现，
 细节见 [`docs/gitcode-qr-protocol.md`](docs/gitcode-qr-protocol.md)。
 
-**但必须说清楚一个实测结论：GitCode 返回的 `qrcode` 字段不是二维码（QR code），
+**而且整条链路都不需要浏览器 —— 包括 openCsiTool 那一半。**
+
+GitCode 扫码拿到凭据后，用它换 openCsiTool `token` cookie 的那一段，
+也**是纯 HTTP**（三个请求）：
+
+```text
+GET  /opencsitool/rest/v1/oauth2/authorization/gitcode?redirect=%2FmyTools
+     -> 302 gitcode.com/oauth/authorize?client_id=..&state=..&redirect_uri=..
+POST https://web-api.gitcode.com/uc/api/v1/oauth/checkOrAuthorize
+     multipart: client_id, state, redirect_uri, response_type=code
+     -> 200 {"redirect_uri": "<callback>?code=..&state=.."}
+GET  <that callback>   -> 200 + Set-Cookie: token
+```
+
+复现：`python tools/probe_oauth_browserless.py`（真实已登录会话上跑通，`getUserInfo` 返回 `200`）。
+凭据形态的证明：`python tools/probe_qr_browserless_login.py`。
+
+> **这里此前写错过，记录在此以免重犯。** 早先的结论是"第二段是 browser-bound"，
+> 依据是 `/oauth/authorize` 返回一个 JS 渲染的 SPA 外壳。观测属实，**推论错了**：
+> 那个探针跟随重定向，所以必然停在外壳上，而"过不去这一页"被读成了"没有别的路"。
+> 真正的判断在外壳**背后的一个后端调用**里，补上它就通了。
+> **页面需要 JS 渲染 ≠ 它的后端 API 不能直接调用。**
+> 错因分析见 [`docs/gitcode-qr-protocol.md`](docs/gitcode-qr-protocol.md) §9.1。
+
+唯一需要人的一步是：**账号从未批准过这个应用**时，GitCode 会要求点一次批准页。
+这时命令会报 `CONSENT_REQUIRED` 并打开页面让你确认 —— 批准第三方授权是你的决定，
+不是本工具的决定，所以提交授权的接口在本项目中**从未被调用**。
+
+**另一个硬约束：GitCode 返回的 `qrcode` 字段不是二维码（QR code），
 而是微信小程序码。** 依据（三重独立证据，可用
 `python tools/verify_qr_render.py` 复现）：
 
@@ -581,21 +625,10 @@ opencsi login --manual        # 从 stdin 读 Cookie（getpass）
 把 430 px 缩下去会摧毁亚像素细节。所以：
 
 - **能扫的是文件**：命令会把原始 PNG 写到
-  `%LOCALAPPDATA%\OpenCSI\login-code\`，你在屏幕上打开它再用微信扫。
+  `%LOCALAPPDATA%\OpenCSI\login-code\`，并**自动用系统图片查看器打开**它，
+  你用微信扫屏幕上的图即可。
 - **终端里的图只是预览**：用灰度字符画出形状，方便你确认它加载出来了。
   它被明确标注为不可扫 —— 不会让你拿着手机对着一个永远读不出的图发呆。
-
-还有一个诚实的边界：**openCsiTool 自己的 `token` Cookie 由它自己的 OAuth 回调签发，
-那一步需要浏览器会话。** 单靠 GitCode 会话拿不到它。所以 `--qr` 的成功判据是
-"GitCode 已登录"，命令会明确告诉你后面还需要什么。
-
-这个边界是**实测**的，不是推断：把浏览器里的 Cookie（先是只有 3 个 GitCode SSO
-Cookie，后来是**全部 29 个**、唯独排除 openCsiTool 自己的 `token`）装进 `CookieJar`
-后用纯 HTTP 跟随 OAuth 入口，两次都**拿不到** `token`，且响应完全相同 ——
-`/oauth/authorize` 返回的是一个 5793 字节、含 11 个 `<script>` 的**客户端渲染外壳**，
-"是否自动批准"这个判断发生在 JavaScript 里。所以这不是"缺某个 Cookie"，也不是 CAPTCHA，
-而是**浏览器无法被完全移除**。复现：`python tools/probe_oauth_pure_http.py`，
-细节见 [`docs/gitcode-qr-protocol.md`](docs/gitcode-qr-protocol.md) §9.1。
 
 ### `opencsi tray`
 

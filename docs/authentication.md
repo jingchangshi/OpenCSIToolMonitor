@@ -321,9 +321,30 @@ f"{key[:10]}****"     # sk-bM4LUSm****
 
 ### 为什么保留两条路
 
-即使 `login --qr` 可用，`CdpCookieProvider` + `BrowserOAuthRenewer` 也**不删除**。
-理由：openCsiTool 的 `token` 由**它自己的 OAuth 回调**签发，那一步需要浏览器会话。
-扫码能拿到 GitCode 会话，但拿不到 openCsiTool 的 Cookie。两条路解决的是不同问题。
+`CdpCookieProvider` + `BrowserOAuthRenewer` 在 `login --qr` 可用之后**仍然不删除**，
+但保留的**理由变了**，这一点值得写清楚，因为旧理由已经站不住：
+
+~~理由：openCsiTool 的 `token` 由它自己的 OAuth 回调签发，那一步需要浏览器会话。~~
+
+**这个理由是错的。** OAuth 回调那一步是纯 HTTP：`checkOrAuthorize` 返回授权码，
+`GET` 回调即签发 `token` cookie。`getUserInfo` 会接受它，全程无需浏览器引擎。
+详见 [`oauth-spa-investigation.md`](oauth-spa-investigation.md) 与
+[`gitcode-qr-protocol.md`](gitcode-qr-protocol.md) §9.1 的错因分析。
+
+现在的理由有两条，都是具体的：
+
+1. **首次授权需要人点一次。** `checkOrAuthorize` 只在授权**已存在**时返回授权码；
+   从未批准过的账号会拿到 `401`，SPA 随后加载批准页。此时报 `CONSENT_REQUIRED`，
+   由浏览器把页面呈现给人 —— 批准第三方授权是用户的决定，不是本工具的决定。
+   提交授权的接口（`POST /uc/api/v1/oauth/authorize`）在本项目中**从未被调用**。
+2. **凭据只能从浏览器读到的环境。** 有些部署里 GitCode 会话只存在于某个浏览器 profile 中，
+   `CdpCookieProvider` 是唯一能拿到它的途径。
+
+默认顺序由 `FallbackRenewer` 决定，且**纯 HTTP 优先**：
+HTTP 路径无人值守、不需要装浏览器；浏览器路径是它覆盖不到时的兜底。
+`FallbackRenewer` 在 `CONSENT_REQUIRED` / `LOGIN_REQUIRED` 上**立即停止**，
+不再尝试下一个 —— 这两种情况都需要人，换一个机制解决不了，
+继续尝试只会拖慢一条用户本来就需要看到的消息。
 
 ### 自动续期（托盘常驻路径）
 

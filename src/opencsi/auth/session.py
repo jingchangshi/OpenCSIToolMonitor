@@ -547,11 +547,44 @@ class SessionManager:
         result = self._invoke_renewer()
         self._last_renew_at = time.time()
         self.last_renewal = result
-        if result.renewed:
-            # The new value is a different secret; make sure the client cannot
-            # keep using the old one from its own transport state.
+        if result.renewed and not self._provider_holds_new_value():
+            # The new secret landed somewhere the provider has not seen, which
+            # means the browser has it. Dropping the cache is what forces the next
+            # read to go and fetch it.
+            #
+            # This guard is load-bearing, and its absence was a real bug. The
+            # browserless renewer obtains the session over plain HTTP and hands
+            # the value straight to the provider, so the *browser* it read the
+            # GitCode credential from never learns the new cookie. Unconditionally
+            # invalidating threw away the only copy that existed: the renewal had
+            # genuinely succeeded, and the very next ``get_token()`` went to the
+            # browser, found nothing, and reported "the new cookie was rejected".
+            # The source run passed only because it happened to reuse the
+            # provider; the frozen build exposed it.
             self.credentials.invalidate()
         return result
+
+    def _provider_holds_new_value(self) -> bool:
+        """Whether the provider already holds what the renewer just produced.
+
+        Asks the provider directly when it can answer exactly
+        (``holds_remembered_token``), because a value comparison is only usually
+        right: a browserless renewal returning the *same* value the cache already
+        held looks identical to a browser-driven one by value alone, and that is
+        precisely the case where dropping the cache would be wrong.
+
+        Falls back to a before/after identity comparison for providers that
+        cannot answer -- a manual provider, or a future one. There the comparison
+        is safe: those providers do not read from a browser, so invalidating them
+        cannot lose a value that only the renewer knows about.
+        """
+        try:
+            exact = getattr(self.credentials, "holds_remembered_token", None)
+            if callable(exact):
+                return bool(exact())
+        except Exception:  # noqa: BLE001 - introspection must not break renewal
+            pass
+        return self._current_token_identity() is not None
 
     def _invoke_renewer(self) -> RenewalResult:
         """Call the renewer, tolerating both the narrow and wide signatures.

@@ -894,10 +894,32 @@ def _renew(ctx: CliContext) -> int:
 
     # A renewal that reports success is only credible if the server agrees, so
     # verify with a real request rather than trusting the cookie's presence.
+    #
+    # The *same* provider is reused, and that is load-bearing. The browserless
+    # renewer obtains the session over HTTP, so the browser it read the GitCode
+    # credential from has never heard of the new cookie -- it handed the token to
+    # the provider through ``remember_token``. Building a fresh provider here
+    # would re-read the browser, find no ``token``, and report a renewal that
+    # demonstrably worked as "the new cookie was rejected". That is exactly what
+    # it did before this line was changed, and it made the browserless path look
+    # broken in the frozen build while the source run passed, because the source
+    # run happened to reuse the provider.
+    # A renewal that reports success is only credible if the server agrees, so
+    # verify with a real request rather than trusting the cookie's presence.
+    #
+    # The *same* provider is reused, and that is load-bearing. The browserless
+    # renewer obtains the session over HTTP, so the browser it read the GitCode
+    # credential from has never heard of the new cookie -- it handed the token to
+    # the provider through ``remember_token``. A fresh provider here would
+    # re-read the browser, find no ``token``, and report a renewal that
+    # demonstrably worked as "the new cookie was rejected". That is exactly what
+    # happened before this line was changed. The source run passed only because
+    # it happened to reuse the provider; the frozen build exposed it, which is
+    # the argument for running the artifacts and not just the tree.
     verified = False
     verify_error: OpenCsiError | None = None
     if result.renewed:
-        client = ctx.make_client(provider=ctx.make_provider(), renew=False)
+        client = ctx.make_client(provider=provider, renew=False)
         try:
             client.login_or_restore_session(refresh=True)
             verified = True

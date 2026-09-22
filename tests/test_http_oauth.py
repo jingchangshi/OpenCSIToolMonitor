@@ -488,6 +488,143 @@ class SecretSafetyTest(unittest.TestCase):
         )
 
 
+class RenewalSurvivesInvalidationTest(unittest.TestCase):
+    """The new session must still be there after ``SessionManager`` is done.
+
+    Two bugs lived here, in different halves of the same hand-off, and both made
+    a *successful* browserless renewal report "the new cookie was rejected":
+
+    1. ``SessionManager.renew`` called ``invalidate()`` unconditionally on
+       success. For a browser-driven renewal that is right -- the cookie went
+       into the browser, so the cache is stale. For a browserless one it destroys
+       the only copy that exists, because the browser never learned the cookie.
+    2. ``opencsi login --renew`` built a *fresh* provider to verify with, which
+       re-read the browser and found nothing.
+
+    Neither was caught by the source run, which happened to reuse the provider;
+    running the frozen binary is what exposed them. Both are pinned here.
+    """
+
+    def _provider(self):
+        from opencsi.auth.cdp import CdpCookieProvider
+
+        provider = CdpCookieProvider("http://127.0.0.1:9222", discover=False)
+        provider.remember_token(FAKE_OPENCSITOOL_TOKEN, expires_in=3599)
+        return provider
+
+    def test_a_remembered_token_is_not_discarded_by_a_successful_renewal(
+        self,
+    ) -> None:
+        """Bug 1. The provider already holds the new value, so keep it."""
+        from opencsi.auth.session import RenewalResult, RenewalStatus, SessionManager
+
+        provider = self._provider()
+        self.assertTrue(provider.holds_remembered_token())
+        self.assertIsNotNone(provider.peek_token())
+
+        class _Renewer:
+            name = "stub-http"
+
+            def can_renew(self):
+                return True
+
+            def renew(self, *, timeout=None, before=None):
+                return RenewalResult(RenewalStatus.RENEWED, renewed=True)
+
+        session = SessionManager(provider, renewer=_Renewer())
+        result = session.renew(force=True)
+
+        self.assertTrue(result.renewed)
+        self.assertIsNotNone(
+            provider.peek_token(),
+            "the renewed token was thrown away, so the next read goes to the "
+            "browser -- which never learned it -- and reports a rejection",
+        )
+
+    def test_a_browser_read_token_is_still_discarded(self) -> None:
+        """The original behaviour must survive the fix.
+
+        A browser-driven renewal writes into the browser, so the cached value is
+        stale and the next read *must* go and fetch the new one.
+        """
+        from opencsi.auth.cdp import CdpCookieProvider
+        from opencsi.auth.session import RenewalResult, RenewalStatus, SessionManager
+
+        provider = CdpCookieProvider("http://127.0.0.1:9222", discover=False)
+        # Not remembered: this is what a browser read looks like.
+        provider._token = "OLD" * 40
+        provider._read_at = 0.0
+        self.assertFalse(provider.holds_remembered_token())
+
+        class _Renewer:
+            name = "stub-browser"
+
+            def can_renew(self):
+                return True
+
+            def renew(self, *, timeout=None, before=None):
+                return RenewalResult(RenewalStatus.RENEWED, renewed=True)
+
+        session = SessionManager(provider, renewer=_Renewer())
+        session.renew(force=True)
+
+        self.assertIsNone(
+            provider.peek_token(),
+            "a browser-driven renewal must force the next read back to the browser",
+        )
+
+    def test_a_provider_that_cannot_answer_falls_back_safely(self) -> None:
+        """Providers without the exact signal must not crash the renewal.
+
+        ``_StubProvider`` deliberately has no ``holds_remembered_token``, so this
+        exercises the introspection fallback rather than mocking it.
+        """
+        from opencsi.auth.session import RenewalResult, RenewalStatus, SessionManager
+
+        provider = _StubProvider(token=FAKE_OPENCSITOOL_TOKEN)
+        self.assertFalse(hasattr(provider, "holds_remembered_token"))
+
+        class _Renewer:
+            name = "stub-http"
+
+            def can_renew(self):
+                return True
+
+            def renew(self, *, timeout=None, before=None):
+                return RenewalResult(RenewalStatus.RENEWED, renewed=True)
+
+        session = SessionManager(provider, renewer=_Renewer())
+        result = session.renew(force=True)
+
+        # The renewal is still reported honestly; only the cache decision differs.
+        self.assertTrue(result.renewed)
+        self.assertIsNotNone(provider.get_token())
+
+    def test_the_verification_step_reuses_the_provider(self) -> None:
+        """Bug 2, asserted at the source: the verify call must not re-read.
+
+        A fresh provider would go to the browser. This pins the *shape* of the
+        fix rather than its effect, because the effect needs a live browser --
+        and the shape is what a future edit would break.
+        """
+        import inspect
+
+        from opencsi.cli import login as login_module
+
+        source = inspect.getsource(login_module._renew)
+        self.assertIn(
+            "provider=provider",
+            source,
+            "the verify client must reuse the renewing provider; building a new "
+            "one re-reads the browser and rejects a working browserless renewal",
+        )
+        self.assertNotIn(
+            "provider=ctx.make_provider()",
+            source,
+            "a fresh provider discards the token the renewer just installed",
+        )
+
+
 class _FakeRenewer:
     """A renewer with a scripted answer, for chain tests."""
 

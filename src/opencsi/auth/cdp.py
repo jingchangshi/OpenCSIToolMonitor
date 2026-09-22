@@ -499,6 +499,9 @@ class CdpCookieProvider:
         self._token: str | None = None
         self._expires_at: float | None = None
         self._read_at: float = 0.0
+        #: Whether ``_token`` was handed over by a renewer rather than read from
+        #: the browser. See :meth:`holds_remembered_token`.
+        self._remembered: bool = False
         self._endpoint: CdpEndpoint | None = None
         self._last_error: str | None = None
         self._last_detail: str | None = None
@@ -533,6 +536,7 @@ class CdpCookieProvider:
         self._token = None
         self._expires_at = None
         self._read_at = 0.0
+        self._remembered = False
 
     def peek_token(self) -> str | None:
         """The currently cached value, **without** re-reading the browser.
@@ -546,6 +550,28 @@ class CdpCookieProvider:
         browser, because it never touches one.
         """
         return self._token
+
+    def holds_remembered_token(self) -> bool:
+        """Whether the cached value came from something other than the browser.
+
+        This is what lets :class:`~opencsi.auth.session.SessionManager` tell the
+        two renewal mechanisms apart. After a successful renewal it must drop the
+        cached value *only* when the browser is the place the new secret landed
+        -- a browser-driven renewal writes the cookie into the browser, so the
+        cache is stale and the next read must go and fetch it. A browserless
+        renewal has already handed the value over, so dropping it destroys the
+        only copy that exists.
+
+        Comparing the token before and after would almost always give the right
+        answer, but not always: a browserless renewal that returns the *same*
+        value the cache already held is indistinguishable from a browser-driven
+        one by value alone, and that is exactly the case where dropping the cache
+        would be wrong. Recording the origin is exact where a comparison is only
+        usually right.
+
+        Cleared by :meth:`refresh`, because a browser read supersedes it.
+        """
+        return self._remembered
 
     def remember_token(self, token: str, *, expires_in: float | None = None) -> None:
         """Cache a token obtained by something other than the browser.
@@ -566,6 +592,7 @@ class CdpCookieProvider:
             return
         register_secret(token)
         self._token = token
+        self._remembered = True
         self._read_at = time.time()
         self._expires_at = (
             self._read_at + float(expires_in)
@@ -707,6 +734,9 @@ class CdpCookieProvider:
 
         register_secret(value)
         self._token = value
+        # A browser read supersedes any value handed over by a renewer: the
+        # browser is the source of truth, so this is no longer "remembered".
+        self._remembered = False
         expires = cookie.get("expires")
         try:
             expires_f = float(expires) if expires not in (None, "", 0) else 0.0
