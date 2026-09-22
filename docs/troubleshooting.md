@@ -31,6 +31,7 @@ opencsi doctor
 | `tray: unavailable` | 2 | 没装 `opencsi[tray]` | [§13](#13-托盘问题) |
 | 扫码登录卡住 / 扫不出来 | — | 扫的是终端图，不是文件 | [§14](#14-扫码登录-login---qr) |
 | 续期报 `LOGIN_REQUIRED` | 13 | GitCode SSO 也过期了 | [§15](#15-续期失败) |
+| 托盘显示 `浏览器未运行` | 10 | 没有带调试端口的浏览器在跑 | [§16](#16-浏览器未运行) |
 | 托盘图标不出现 | — | 被折叠进溢出区 | [§13](#13-托盘问题) |
 
 ---
@@ -757,7 +758,7 @@ opencsi login --qr --qr-wait 300
 | `RENEWED` | 换到了新 token | 无需操作 |
 | `ALREADY_VALID` | 剩余寿命还够，没动 | 无需操作 |
 | `LOGIN_REQUIRED` | GitCode SSO 也过期了 | 跑 `opencsi login`（要浏览器） |
-| `CDP_UNAVAILABLE` | 连不上调试端点 | 见 [§1](#1-websocket-could-not-be-used) |
+| `CDP_UNAVAILABLE` | 连不上调试端点 | 见 [§16](#16-浏览器未运行) |
 | `OAUTH_FAILED` | OAuth 流程被拒 | 先确认浏览器里 GitCode 还是登录态 |
 | `TIMEOUT` | 超时且**没**拿到新 token | 重试；仍失败就跑 `opencsi login` |
 | `UNSUPPORTED` | 当前 provider 不支持续期 | 用 `opencsi login` |
@@ -772,6 +773,72 @@ opencsi login --qr --qr-wait 300
 它依赖浏览器里**仍然有效的 GitCode SSO 会话**。如果那个也过期了
 （比如很久没开过浏览器、或者手动登出了 GitCode），就只能交互登录。
 这是设计使然 —— 本工具不会替你保存 GitCode 的长期凭据。
+
+---
+
+## 16. 浏览器未运行
+
+```
+state: BROWSER_UNAVAILABLE
+note: no Chrome/Edge DevTools endpoint found. Tried: 127.0.0.1:9222, ...
+```
+
+退出码 **10**。托盘上显示 `浏览器未运行`（黄色图标 + 缺口）。
+
+### 这是什么
+
+**持有你登录态的那个浏览器没有在运行**，或者它没有开调试端口。
+这和"需要登录"是两件事：
+
+| 状态 | 真正的问题 | 修复方式 |
+| --- | --- | --- |
+| `需要登录` | GitCode 登录态没了 | 重新认证 |
+| `浏览器未运行` | 持有登录态的浏览器没跑 | **把浏览器启动起来** |
+
+### 为什么会这样
+
+最常见的是**刚开机**：Windows 启动了托盘，但 Chrome 还没有运行。
+这不是故障，是顺序问题。
+
+### 怎么修
+
+**直接点托盘菜单的第一项 `启动浏览器并登录`**，或者：
+
+```powershell
+opencsi login
+```
+
+两者现在都会用**专用配置目录 + `--remote-debugging-port`** 启动 Chrome/Edge，
+并把登录页开在那里。这个专用配置目录里通常还留着你的 GitCode SSO 登录态，
+所以多数情况下**连扫码都不需要**，直接就恢复了。
+
+> **这个坑曾经是个死循环。** 早先"浏览器未运行"被当成"需要登录"报出来，
+> 而登录动作调用的是系统默认浏览器（**没有**调试端口）。你登录成功，Cookie
+> 却写进了本工具读不到的地方，下一次轮询又是"需要登录"。**点多少次都回到原点。**
+> 现在菜单和 `opencsi login` 都会启动一个本工具能读的浏览器。
+
+### 手动启动（等价做法）
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+  --remote-debugging-port=9222 `
+  --user-data-dir="$env:LOCALAPPDATA\opencsi-cdp-profile" `
+  https://opencsitool.com/myTools
+```
+
+### 怎么确认修好了
+
+```powershell
+opencsi doctor --no-proxy
+```
+
+`devtools endpoint` 一行应该变成 `[ok] http://127.0.0.1:9222`。
+
+### 如果启动失败
+
+报 `FAILED` 且提示 "already open" 时，说明**同一个专用配置目录已经被另一个
+窗口占用**了。Chromium 会把新启动请求转发给那个进程，而那个进程没有调试端口，
+所以端口永远不会出现。**把所有使用该配置目录的窗口关掉再重试。**
 
 ---
 

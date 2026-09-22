@@ -283,6 +283,7 @@ display_width("使用中")  # → 6，不是 3
 | `client.py` | 大 | `OpenCsiToolClient`：端点编排 |
 | `auth/base.py` | 小 | `CredentialProvider` 协议 |
 | `auth/cdp.py` | 大 | 从浏览器读 Cookie |
+| `auth/browser_launch.py` | 中 | 启动一个**本工具能读**的浏览器（专用配置 + 调试端口） |
 | `auth/manual.py` | 小 | 手工凭据 |
 | `auth/session.py` | 大 | `SessionManager`：重载 / 续期 / 登录三种语义 |
 | `auth/oauth_browser.py` | 大 | `BrowserOAuthRenewer`：后台标签页静默续期 |
@@ -321,4 +322,4 @@ Windows 消息循环。所以业务逻辑全部被推到 `monitor/` 和 `tray/pr
 它们都是纯的、可测的；`tray/app.py` 只剩下"把已经算好的东西交给 pystray"，
 这部分用真机验证（见 README 的托盘一节）。
 
-这就是为什么整个测试套件能在**离线环境**下跑完 656 个测试。
+这就是为什么整个测试套件能在**离线环境**下跑完 684 个测试。
