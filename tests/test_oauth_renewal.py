@@ -222,6 +222,54 @@ class SilentRenewalTest(unittest.TestCase):
             self.assertNotIn("innerText=", expression)
             self.assertNotIn("location.href", expression)
 
+    def test_the_probe_matches_the_labels_the_real_page_actually_shows(self) -> None:
+        """Anchor the word list to observed reality, not to a guess.
+
+        The live GitCode authorize page was read directly while diagnosing this
+        defect, and its buttons were exactly ``['取消', '授权']``. If someone trims
+        the approval words and drops 授权, the probe silently stops matching the
+        real page and the fix becomes decorative -- every test would still pass,
+        because the fake answers the probe without consulting the words at all.
+
+        ``取消`` is asserted *absent* on purpose: it is the cancel button, and
+        treating it as approval would mean the probe reports "waiting for the
+        user" as soon as the user declines.
+        """
+        from opencsi.auth.oauth_browser import BrowserOAuthRenewer
+
+        seen: list[str] = []
+        server = FakeDevToolsServer(
+            cookies=[opencsitool_cookie(FAKE_COOKIE, expires_in=60.0)],
+            oauth=OAuthScenario(outcome="consent"),
+        )
+        self.addCleanup(server.close)
+        original = server.on_call
+
+        def spy(method, params):
+            if method == "Runtime.evaluate":
+                seen.append(str(params.get("expression") or ""))
+            return original(method, params) if original else None
+
+        server.on_call = spy
+        provider = CdpCookieProvider(server.base_url, discover=False, ttl=0.0)
+        provider.refresh()
+        BrowserOAuthRenewer(
+            server.base_url,
+            timeout=6.0,
+            connect_timeout=5.0,
+            poll_interval=0.05,
+            settle_delay=0.05,
+        ).renew(before=provider)
+
+        probes = [e for e in seen if "querySelectorAll" in e]
+        self.assertTrue(probes, "the consent probe was never sent")
+        expression = probes[0]
+
+        # 授权, as it appears on the real page.
+        self.assertIn("\\u6388\\u6743", expression)
+        # 取消 must NOT be among the approval words.
+        self.assertNotIn("\\u53d6\\u6d88", expression)
+
     def test_an_unanswered_consent_page_does_not_leave_a_tab_open(self) -> None:
         """Cleanup must not depend on the outcome being a success."""
         self.scenario.outcome = "consent"
