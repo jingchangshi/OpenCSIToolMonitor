@@ -949,6 +949,37 @@ class NotificationTest(unittest.TestCase):
         app._notify_attention(MonitorSnapshot(state=MonitorState.AUTH_ERROR))
         self.assertEqual(len(app._icon.calls), 1)
 
+    def test_every_attention_state_has_something_to_say(self) -> None:
+        """A state the service flags for attention must actually notify.
+
+        ``_ATTENTION_STATES`` decides *when* to fire and ``_notify_attention``
+        decides *what* to say. Adding a state to the first without the second
+        silently produces no balloon at all -- the latch is set, the user is
+        never told, and the state is effectively muted. That is how
+        ``BROWSER_UNAVAILABLE`` first shipped.
+        """
+        from opencsi.monitor.service import _ATTENTION_STATES
+
+        for state in _ATTENTION_STATES:
+            with self.subTest(state=state.value):
+                app = self._app()
+                app._notify_attention(MonitorSnapshot(state=state))
+                self.assertEqual(
+                    len(app._icon.calls),
+                    1,
+                    f"{state.value} is an attention state but notifies nothing",
+                )
+                _title, message = app._icon.calls[0]
+                self.assertTrue(message.strip())
+
+    def test_the_browser_notification_names_the_action_not_the_symptom(self) -> None:
+        """"Browser not running" is not something a user can act on by itself."""
+        app = self._app()
+        app._notify_attention(MonitorSnapshot(state=MonitorState.BROWSER_UNAVAILABLE))
+        self.assertEqual(len(app._icon.calls), 1)
+        _title, message = app._icon.calls[0]
+        self.assertIn("启动浏览器", message)
+
     def test_offline_and_server_errors_do_not_notify(self) -> None:
         """A flaky network is not worth interrupting someone over."""
         for state in (MonitorState.OFFLINE, MonitorState.SERVER_ERROR):

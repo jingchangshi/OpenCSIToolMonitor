@@ -282,6 +282,13 @@ class TrayApp:
         message = {
             MonitorState.LOGIN_REQUIRED: "会话已过期，点击「登录」重新认证。",
             MonitorState.AUTH_ERROR: "会话被拒绝，点击「立即续期」或「登录」。",
+            # The state a user lands in right after a reboot, which is exactly
+            # when they have not yet noticed the tray is collecting nothing. The
+            # message names the fix rather than the symptom, because "browser not
+            # running" is not something a user knows how to act on.
+            MonitorState.BROWSER_UNAVAILABLE: (
+                "浏览器未运行，点击「启动浏览器并登录」即可恢复。"
+            ),
         }.get(snapshot.state)
         if message is None:
             return
