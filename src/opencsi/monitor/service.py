@@ -664,11 +664,44 @@ class MonitorService:
         self._publish(published)
         return published
 
+    def _classify_failure(self, exc: BaseException) -> MonitorState:
+        """The state for a failure, preferring what renewal actually said.
+
+        The reactive 401 path is the reason this exists. A 401 makes the client
+        reload the credential and then re-run OAuth, and *that* round-trip can
+        land on GitCode's approval page -- the same one the scheduled path
+        detects. The error the client finally raises is a plain
+        ``SESSION_EXPIRED``, which :func:`state_for_error` maps to ``AUTH_ERROR``:
+        "session expired, renew it".
+
+        That is wrong in the same way defect 10 was wrong. The user is still
+        authenticated and the credential is still being refused for a reason
+        renewal can name, so reporting the generic state both loses the remedy and
+        offers one ("renew") that cannot work -- the renewal will park on the same
+        form every time.
+
+        The client records the renewal outcome, so ask it. This is deliberately
+        narrow: only the two states whose remedy differs from "retry" are
+        upgraded, and only when the failure really was an auth failure. A network
+        blip during a renewal must still be reported as a network problem.
+        """
+        state = state_for_error(exc)
+        if state is not MonitorState.AUTH_ERROR:
+            return state
+
+        renewal = getattr(self._client, "last_renewal", None)
+        status = getattr(renewal, "status", None)
+        if status is RenewalStatus.CONSENT_REQUIRED:
+            return MonitorState.CONSENT_REQUIRED
+        if status is RenewalStatus.LOGIN_REQUIRED:
+            return MonitorState.LOGIN_REQUIRED
+        return state
+
     def _handle_failure(
         self, exc: BaseException, *, recovered: bool = False
     ) -> MonitorSnapshot:
         """Classify a failure, apply backoff, and keep the last good data."""
-        state = state_for_error(exc)
+        state = self._classify_failure(exc)
         failures = self.snapshot.consecutive_failures + 1
 
         # Exponential backoff, capped. A tray must not amplify a network

@@ -120,10 +120,19 @@ def _snapshot(
 class _Client:
     """A client stand-in that returns a snapshot or raises a scripted error."""
 
-    def __init__(self, *, snapshot=None, error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        snapshot=None,
+        error: BaseException | None = None,
+        last_renewal=None,
+    ) -> None:
         self._snapshot = snapshot if snapshot is not None else _snapshot()
         self._error = error
         self.calls = 0
+        # Mirrors OpenCsiClient.last_renewal, which the monitor consults to
+        # classify a 401 that a renewal attempt could explain.
+        self.last_renewal = last_renewal
 
     def get_my_tools(self, *args, **kwargs):
         self.calls += 1
@@ -687,6 +696,70 @@ class RenewalPolicyTest(unittest.TestCase):
         service = _service(_Client(), session=session)
         service.renew_now(block=True)
         self.assertIs(service.snapshot.state, MonitorState.CONSENT_REQUIRED)
+
+
+class ReactiveFailureClassificationTest(unittest.TestCase):
+    """A 401 that a renewal attempt explains must not report a generic state.
+
+    The scheduled path is not the only one that can meet GitCode's approval page.
+    A 401 makes the client reload the credential and then re-run OAuth, and that
+    round-trip lands on the same form. The error the client finally raises is a
+    plain ``SESSION_EXPIRED``, which maps to ``AUTH_ERROR`` -- "session expired,
+    renew it" -- and the offered remedy cannot work, because the renewal parks on
+    the same form every time.
+    """
+
+    def _expired(self):
+        from opencsi.errors import SessionExpiredError
+
+        return SessionExpiredError("openCsiTool rejected the session cookie (HTTP 401)")
+
+    def test_a_401_whose_renewal_hit_consent_reports_consent(self) -> None:
+        client = _Client(
+            error=self._expired(),
+            last_renewal=RenewalResult(
+                RenewalStatus.CONSENT_REQUIRED, requires_interaction=True
+            ),
+        )
+        service = _service(client)
+        service._refresh_once(force=True)
+        self.assertIs(service.snapshot.state, MonitorState.CONSENT_REQUIRED)
+
+    def test_a_401_whose_renewal_needed_a_login_reports_login(self) -> None:
+        client = _Client(
+            error=self._expired(),
+            last_renewal=RenewalResult(
+                RenewalStatus.LOGIN_REQUIRED, requires_interaction=True
+            ),
+        )
+        service = _service(client)
+        service._refresh_once(force=True)
+        self.assertIs(service.snapshot.state, MonitorState.LOGIN_REQUIRED)
+
+    def test_a_401_with_no_renewal_outcome_stays_auth_error(self) -> None:
+        """The upgrade must be evidence-based, not a blanket relabel."""
+        service = _service(_Client(error=self._expired()))
+        service._refresh_once(force=True)
+        self.assertIs(service.snapshot.state, MonitorState.AUTH_ERROR)
+
+    def test_a_network_failure_is_not_upgraded_by_a_stale_renewal(self) -> None:
+        """A renewal result must not recolour an unrelated failure.
+
+        Otherwise a network blip arriving after a consent attempt would be
+        reported as "approval required", sending the user to click a button that
+        has nothing to do with the problem.
+        """
+        from opencsi.errors import NetworkError
+
+        client = _Client(
+            error=NetworkError("connection reset by peer"),
+            last_renewal=RenewalResult(
+                RenewalStatus.CONSENT_REQUIRED, requires_interaction=True
+            ),
+        )
+        service = _service(client)
+        state = service._classify_failure(NetworkError("connection reset by peer"))
+        self.assertIsNot(state, MonitorState.CONSENT_REQUIRED)
 
     def test_cdp_unavailable_becomes_an_auth_error_not_a_login_prompt(self) -> None:
         """No browser is a different problem from 'your SSO session is gone'."""
