@@ -23,6 +23,7 @@ GitCode 的微信小程序扫码登录是一个**纯 HTTP + JSON 的轮询式流
 保留意见（不改变判定，但必须诚实记录）：
 - ~~按约束要求，**未对创建二维码的 POST 做线上实测**~~ —— **该限制已解除**：`opencsi login --qr` 实现后已对创建接口做过 wire-level 实测（详见 §9.0），`X-Source` 未被服务端强制校验。
 - 扫码动作本身必须由真实微信客户端完成，但这属于"用户拿着手机扫码"的物理步骤，不属于"浏览器 JS 强制执行"，因此不构成 `QR_FLOW_BROWSER_BOUND`。
+- **本判定只覆盖"第一段"（GitCode 扫码 → 拿到 GitCode 凭据）。** 完整的 openCsiTool 登录是**两段**的；第二段（用 GitCode 凭据换 openCsiTool `token` cookie）**实测是 browser-bound**，因为 `/oauth/authorize` 是客户端渲染的 SPA 外壳。详见 §9.1。这不推翻上面的判定，但意味着**浏览器无法被完全移除**，只能退化为"可选认证后端"。
 - **`qrcode` 字段不是 QR 码，而是微信小程序码（微信小程序二维码）**。这是渲染环节的硬约束，详见 §9.0；它不改变协议判定，但改变了终端展示方式。
 - 详见 §9 未解问题。
 
@@ -826,6 +827,48 @@ return l(e.qr_code_url || e.url || e.qr_code || e.image || "")
 
 ---
 
+### §9.1 实测：流程是**两段**的，第二段是 browser-bound
+
+上面回答的是**第一段**（GitCode 扫码 → 拿到 GitCode 凭据）。但 `opencsi login --qr` 成功后
+openCsiTool 的 `token` cookie **并没有**建立，这一点此前只被当作"下一步提示"写进输出，未被
+当成一个需要定性的结论。本轮用一个探针把它测清楚了。
+
+**方法**（`tools/probe_oauth_pure_http.py`，可重复运行，GET only）：
+
+1. 用浏览器级 `Storage.getCookies` 读出专用 profile 里的 cookie（不触碰任何页面）；
+2. 把 cookie 装进 `http.cookiejar.CookieJar`，分两种场景：
+   - `sso`：只装 3 个 GitCode SSO cookie（`GITCODE_ACCESS_TOKEN` / `GITCODE_REFRESH_TOKEN` /
+     `GitCodeUserName`）—— 这正是"纯 CLI 扫码能拿到的东西"；
+   - `all`：装浏览器里**全部 29 个** cookie，**唯独排除** openCsiTool 的 `token` —— 决定性对照；
+3. 用 `urllib` 跟随重定向 `GET` openCsiTool 的 OAuth 入口；
+4. 检查 CookieJar 里是否出现新的 `token`。
+
+**结果**：
+
+| 场景 | 装入 cookie | 最终落点 | 响应 | 是否拿到 token |
+| --- | --- | --- | --- | --- |
+| `sso` | 3 | `gitcode.com/oauth/authorize` | `200` | **否** |
+| `all` | 29 | `gitcode.com/oauth/authorize` | `200` | **否** |
+
+两种场景的响应**完全相同**：`5793` 字节、`11` 个 `<script>` 标签、`spa-shell=True`，
+没有重定向，也没有 `Set-Cookie`。
+
+**结论：第二段是 browser-bound，原因是 `/oauth/authorize` 是一个客户端渲染的 SPA 外壳。**
+"是否自动批准"这个判断（SSO 有效则直接回调，无效则渲染授权页）发生在 JavaScript 里，
+非 JS 的 HTTP 客户端只会拿到外壳。这**不是**缺 cookie（29 个全带上也一样），也**不是**
+CAPTCHA。因此 `QR_FLOW_REPRODUCIBLE` 只覆盖第一段；**把浏览器完全去掉在第二段被阻断**。
+
+> **一个我差点写错的地方，记录在此以免重犯。**
+> 探针最初只在响应体里 `grep` 关键字，看到 `captcha` 就倾向于把它当成阻断原因。加上
+> "这个关键字出现在 `<script>` 内部还是页面标记里"的判定后发现：它在 script bundle **内部**，
+> 是某个库的名字，不是挑战。仅凭"关键字出现过"就宣布阻断原因，和本项目此前几次
+> "断言自己没有观测过的事实"是同一类错误。探针现在会打印该出处，而不是只打印命中。
+
+这同时回答了本文档**未解问题 7**（openCsiTool 的 OAuth `redirect` 最终落到哪个路由）：
+落到 `/oauth/authorize`，且该路由需要 JS 才能继续。
+
+---
+
 ## 未解问题
 
 > **§9.0 更新（实现阶段的 wire-level 实测结果）**
@@ -860,7 +903,6 @@ return l(e.qr_code_url || e.url || e.qr_code || e.image || "")
 > - **终端绘制降级为预览**：用灰度字符渐变（` .:-=+*#%@`）而非黑白二值化 —— 二值化会把细密点阵变成无法辨认的散点。预览明确标注为"不可扫"。
 >
 > 这一点**不改变协议判定**（`QR_FLOW_REPRODUCIBLE` 仍然成立：协议本身确实是纯 HTTP 轮询），但改变了"如何在终端展示"的实现方式。回归测试见 `tests/test_gitcode_qr.py::MiniProgramCodeTest`。
-
 1. ~~**创建二维码的 POST 未经线上实测。**~~ **已解决，见 §9.0。**
    该调用会在服务端创建二维码场景（状态变更），按本次调查的 READ-ONLY 约束**主动跳过**。因此以下两点只有静态证据：
    - 响应体的确切 JSON 包裹层级（推断为 `{"data":{"scene_id":...,"qrcode":...}}`，依据 `a.data.data` 的双层解构）；
@@ -900,6 +942,7 @@ return l(e.qr_code_url || e.url || e.qr_code || e.image || "")
 | `tools/probe_gitcode_qr_live4.py` | 登录完成路径的完整响应头、WAF `418` 观测 | 否 |
 | `tools/probe_gitcode_qr_live5.py` | `/uc` 前缀改写线上确证（`405` vs `401`） | 否 |
 | `tools/probe_gitcode_bundle.py` | （已有）主 bundle 端点抽取 | 否 |
+| `tools/probe_oauth_pure_http.py` | §9.1：把浏览器 cookie 装进 `CookieJar`，验证第二段 OAuth 能否脱离浏览器完成 | 否 |
 
 所有脚本均使用 `urllib.request.ProxyHandler({})` 绕过 `127.0.0.1:7890` 代理，并对所有形如
 `state= / code= / ticket= / token= / scene_id= / client_id= / captcha_id=` 的值做 mask 后才输出。
