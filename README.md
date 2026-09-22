@@ -247,7 +247,9 @@ google-chrome \
 
 > **注意**：这个专用配置目录是一个**全新的浏览器配置**，里面**还没有登录状态**。
 > 请在弹出的窗口里**登录一次 openCsiTool**。
-> 之后 Cookie 会保存在这个目录里，后续使用就不用再登录了。
+> 登录状态（GitCode SSO）会保存在这个目录里，因此之后 openCsiTool 应用 Cookie
+> 每小时到期时，工具可以静默重走 OAuth 换新的，**通常不需要你再登录**。
+> 只有当 GitCode 自己的登录态失效时才需要重新登录。
 
 Edge 和 Brave 同理，把可执行文件换成对应的即可（`msedge.exe` / `brave.exe`）。
 
@@ -609,6 +611,13 @@ opencsi tray --auto-recover-browser  # 浏览器没在跑时自动启动它（�
 也没有第二份认证逻辑。菜单里的操作只是把请求入队，阻塞工作都在工作线程里做 ——
 否则取一次数据就会把图标卡住。
 
+`opencsi-monitor` 与 `opencsi tray` 是**同一个程序的两个入口**。打包版（见下）
+提供无控制台窗口的 `opencsi-tray.exe`，双击即可常驻：
+
+```bash
+opencsi-monitor                # 等价于 opencsi tray
+```
+
 **`--auto-recover-browser` 为什么默认关闭。** 开机自启的场景下，Windows 会先把托盘拉起来，
 而 Chrome 往往还没运行，于是托盘停在 `浏览器未运行`。打开这个开关后，服务会自己用专用
 配置目录 + 调试端口启动浏览器，并**在同一轮内重试取数**，所以用户什么都不用做。
@@ -840,8 +849,18 @@ python -c "import urllib.request; print(urllib.request.getproxies())"
 
 ### 会话过期了怎么办
 
-Cookie 有效期约 **0.97 小时**。过期后重新登录即可。
-本工具会在 Cookie 快过期时主动重新读取一次。
+openCsiTool 的应用 Cookie 有效期约 **0.97 小时**（实测 3472–3598 秒）。到期时**通常不需要
+你做任何事**：只要专用浏览器配置里的 GitCode 登录态还在，工具会静默重走一次 OAuth 换回
+新的 Cookie。
+
+需要你介入的只有一种情况：**GitCode 自己的登录态失效了**。此时状态会变成
+`Login required`，用 `opencsi login` 重新登录一次即可。
+
+> **不要指望"重新读取 Cookie"能救活过期的会话。** 这是本工具早期的一个真实误解：
+> `refresh()` 只是把浏览器里的 Cookie 重新读一遍。Cookie 过期时浏览器里那个也过期了，
+> 重读自然还是拿不到有效的。**重载 ≠ 续期** —— 续期必须重新走一次 OAuth，这也是
+> `opencsi login --renew` 存在的理由。详见
+> [docs/authentication.md](docs/authentication.md)。
 
 ### Windows 控制台显示乱码
 
