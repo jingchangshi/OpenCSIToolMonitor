@@ -898,6 +898,12 @@ opencsi doctor --no-proxy
 
 看到 `silent renewal: GitCode SSO available` 即表示恢复。
 
+如果那一行说的是 `the browser can run the OAuth round-trip, but it holds no
+GitCode SSO cookie`，说明**浏览器本身可以续期，但它里面没有 GitCode 的登录态**——
+按提示登录一次即可。这一行曾经无论如何都写 "GitCode SSO available"：它当时只确认了
+调试端口能连上，却没有去看那个 Cookie 是否真的存在。一个把坏的报成好的状态检查，
+比不报更糟，因为用户会照着它行动。
+
 ---
 
 ## 还是解决不了？

@@ -30,10 +30,10 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | Windows 11 托盘 v1 | **完成，实测验证** | `opencsi tray --once` 打印真实快照；`--check` 报告 `tray: ok`，7 个菜单项（含「开机自启动」） |
 | 浏览器缺失时用户可自救 | **完成，实测验证** | 杀掉 Chrome 后单条命令即恢复：`state: OK`，`EXIT=0`（见 §10 缺陷 8） |
 | GitCode 授权页未确认时的正确报告 | **完成，实测（见 §10 缺陷 10 的边界说明）** | 真实站点确认了授权页会让旧代码报 `TIMEOUT`、且点「授权」即签发新 token；新状态的判定逻辑由离线脚本验证（真实站点无法按需复现该页面） |
-| 测试 | **完成** | **732 项测试**（731 通过、1 跳过、119 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
+| 测试 | **完成** | **737 项测试**（736 通过、1 跳过、121 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
-| 规范提交 | **完成** | 35 个修改源码/测试的提交（§11 完整列出）；其中 12 个修复了通过**运行真实产物**才发现的缺陷 |
+| 规范提交 | **完成** | 40 个修改源码/测试的提交（§11 完整列出）；其中 13 个修复了通过**运行真实产物**才发现的缺陷 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
@@ -52,7 +52,7 @@ a48bce8  test: cover the consent state end to end, and the tray menu it produces
 上一个行为变更提交是：
 
 ```
-9bae2be  fix(auth): report an unanswered GitCode consent page instead of a timeout
+848faaa  fix(auth): stop claiming "GitCode SSO available" without looking for it
 ```
 
 其后都是纯文档提交，包括承载本报告的提交。在这里写出那些提交是循环的——一个提交
@@ -83,7 +83,7 @@ a48bce8  test: cover the consent state end to end, and the tray menu it produces
 本阶段由三个真实缺陷驱动。三个缺陷都在修复前被复现，且每个修复都有能在旧代码上
 失败的测试。
 
-后续在真机运行中又发现并修复了九个（缺陷 4–12，见 §10）。其中缺陷 8 与本节的三个不同：
+后续在真机运行中又发现并修复了十个（缺陷 4–13，见 §10）。其中缺陷 8 与本节的三个不同：
 它不是"缺少能力"，而是**已有的提示把用户引向了一个不可能完成的动作**。缺陷 10 则更
 进一步——它报出的**分类本身就是错的**：把"等一次点击"说成了"超时，可能网络有问题"。
 
@@ -319,7 +319,7 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 
 **分层。** 一切不需要 Windows 消息循环就能测试的东西都被下沉到 `monitor/` 与
 `tray/presenter.py`，它们是纯的。`app.py` 只负责把已经算好的值交给 pystray。这就是为什么
-732 项测试可以离线运行，而托盘本身在真机上验证。
+737 项测试可以离线运行，而托盘本身在真机上验证。
 
 **状态**（`MonitorState`）：`STARTING`、`OK`、`REFRESHING`、`RENEWING`、
 `LOGIN_REQUIRED`、`CONSENT_REQUIRED`、`BROWSER_UNAVAILABLE`、`OFFLINE`、
@@ -389,14 +389,14 @@ EXIT=0
 
 ## 9. 测试
 
-**732 项测试：731 通过，1 跳过，119 个 subtest 通过。**
+**737 项测试：736 通过，1 跳过，121 个 subtest 通过。**
 
 ```
 $ pytest
-731 passed, 1 skipped, 119 subtests passed in 39.11s
+736 passed, 1 skipped, 121 subtests passed in 39.15s
 
 $ python -m unittest discover -s tests -q
-Ran 732 tests in 38.332s
+Ran 737 tests in 39.166s
 OK (skipped=1)
 ```
 
@@ -420,6 +420,8 @@ OK (skipped=1)
 | `tests/test_oauth_renewal.py` | 授权页不被误报为 `TIMEOUT`、detail 不含旧有的"slow/unreachable"措辞、检测**提前**结束等待（而不只是在截止时改标签）、探针只返回布尔值不读页面文本、非成功路径同样关闭 target |
 | `tests/test_oauth_renewal.py` | 探针的批准词表必须真的包含真实页面上的 `授权`，且**不含** `取消`（否则"用户点了取消"会被当成"正在等待用户"） |
 | `tests/test_cli_session.py` | `CONSENT_REQUIRED` 的退出码是会话码而非网络码，且消息不再说"SSO 会话没了"；`_RENEWAL_EXIT` 对 `RenewalStatus` **穷尽** |
+| `tests/test_cli_session.py` | `SsoPresenceTest`（4 项）：没有 GitCode Cookie 时不得声称 "SSO available"、读不到时不得断言用户已登出、Cookie 值绝不进入报告 |
+| `tests/test_tray.py` | `CONSENT_REQUIRED` 的退出码不是 `EXIT_SERVER_ERROR`（服务器没坏，用户有一个按钮要按） |
 | `tests/test_tray.py` | `ChineseUnitTest`、`NotificationTest`、`SignInActionTest`、图标颜色/形状语义 |
 | `tests/test_tray.py` | 每个 `_ATTENTION_STATES` 成员都必须**真的有话可说**（见 §10 缺陷八） |
 | `tests/test_tray.py` | `CONSENT_REQUIRED` 的菜单与 `LOGIN_REQUIRED` **不同**，且提供批准动作而非纯登录 |
@@ -456,7 +458,7 @@ total 2
 `install_logging_redaction` 都已应用在续期/扫码路径上。`scene_id` 与扫码载荷在 `repr` 中
 被脱敏。verbose 日志只打印请求**路径**——绝不打印 query string，绝不打印 cookie。
 
-### 本轮发现并修复的十二个真实缺陷
+### 本轮发现并修复的十三个真实缺陷
 
 1. **图标卡在"续期中"。** `_maybe_renew` 在成功时直接返回，没有离开 `RENEWING`，导致托盘
    在一次已经成功的续期之后仍显示续期状态长达 5 分钟。由一个实测探针发现：在一个已经续期
@@ -693,14 +695,47 @@ SSO 会话显然还活着。照着这句提示去做，就是让用户在自己�
 `'approval' not found in 'error: the gitcode sso session is gone...'` 失败——正是用户此前
 会看到的那句错话。
 
-### 缺陷 1–12 的共同形态
+### 缺陷 13：状态检查声称"GitCode SSO 可用"，却从未去看过
+
+`renewal_capability` 确认了浏览器级 DevTools WebSocket 能连上，然后返回这样一句理由：
+
+```
+GitCode SSO available; OAuth can be re-run in a background tab
+```
+
+后半句确实由前半句推出。但前半句推不出来：**WebSocket 能连上，并不说明浏览器里还有
+GitCode 的登录态。** 这与本轮已经修过的那些错误属于同一类，而且出现在**报告健康状况**
+的那个地方——`doctor` 打印 "GitCode SSO available"，`login --status` 打印 "available"，
+而本轮新增的排查文档还告诉用户"看到这一行就表示恢复了"。
+
+在**下一次续期就会停在授权页**的机器上，这三个地方会一起说"一切正常"。一个把坏的报成
+好的状态检查，比不报更糟，因为用户会照着它行动。
+
+SSO 登录态存在一个长期 Cookie 里，因此可以廉价检查，且不需要真的跑一次 OAuth 交换——
+这正是 *capability* 检查被允许做的事。`_has_gitcode_sso` 从浏览器级 Cookie 存储里读取
+Cookie **名字**，返回三态：
+
+* `True` —— 存在 GitCode SSO Cookie；
+* `False` —— Cookie 存储读到了，但里面没有，于是理由改为指出真正的阻塞点和修复方式；
+* `None` —— 存储读不到，此时保留原来偏乐观的措辞。
+
+三态是必要的。"我读不到"绝不能被报成"它不存在"，否则一次短暂的 DevTools 抖动就会变成
+一条斩钉截铁的"你已登出"——与"没看就说正常"属于同一类错误。检查只看 Cookie 的名字，
+有一个测试断言任何值都不可能进入理由字符串或 `as_dict()`。
+
+实测：真实浏览器下 `doctor` 仍报 "GitCode SSO available"（Cookie 确实在），
+`login --status` 报 "available"。把检查绕开则测试以
+`'GitCode SSO available' unexpectedly found in ...` 失败。
+
+### 缺陷 1–13 的共同形态
 
 缺陷 4、5、6 是"测试检查声明而非产物"；缺陷 7 与 9 是"测试只覆盖了其中一个入口点"；
 缺陷 8 是"测试只覆盖了状态映射，没覆盖该状态下**动作能否达成目的**"；缺陷 10、11、12 是
 "测试只覆盖了错误**分类**，没覆盖该分类是否**描述事实**，以及是否覆盖了**所有**能产生
-该错误的路径与**所有**会消费它的调用方"。
+该错误的路径与**所有**会消费它的调用方"；缺陷 13 是"状态检查断言了一个**它从未观测过的
+事实**"。
 
-六者其实是同一件事：**测试断言的是代码写了什么，而不是用户能否得到他要的东西。**
+七者其实是同一件事：**测试断言的是代码写了什么，而不是用户能否得到他要的东西。**
 缺陷 8 的每一个子缺陷都在既有测试的射程之外——`_CODE_STATE` 的映射有测试、退出码的
 *唯一性*有测试、`_ATTENTION_STATES` 的*内容*有测试，但没有任何测试问过
 "被报成 `LOGIN_REQUIRED` 之后，用户照着做能不能恢复"。缺陷 10 同样：`TIMEOUT` 这个
@@ -729,21 +764,30 @@ SSO 会话显然还活着。照着这句提示去做，就是让用户在自己�
 
 ## 11. 提交
 
-自 `cf34c1b` 起，**修改了源码或测试的提交共 35 个**，下表完整列出（最旧在前，覆盖
-`cf34c1b` 到 `430148e`）。全部以 `opencsi contributors <contributors@opencsi.invalid>`
-署名。
+自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 40 个**，下表完整列出（最旧在前，
+覆盖 `cf34c1b` 到 `848faaa`）。全部以
+`opencsi contributors <contributors@opencsi.invalid>` 署名。
+
+判定标准是机械的，共四个目录：
+
+```bash
+git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 40 行，即下表
+```
+
+`tools/` 之所以算在内，是因为 `tests/test_packaging.py` 的 `LiveProbeTest` 会断言
+**每一个** `tools/probe_*.py` 的 docstring 都声明了自身的安全姿态——它们是被测试断言的
+源码，不是随手脚本。此前的标准漏掉了 `tools/`，于是"声明的数量"和"列出的行"对不上：
+表里有一个只碰 `tools/` 的提交，却漏掉另外两个。现在两处都由上表统一给出。
 
 表中没有、也不可能有的是**纯文档提交**：它们撰写、修订本报告，修正本报告对自身 SHA 的
 引用，并把报告改写为中文。一个提交无法列出自己的 SHA，所以它们不可能出现在表里；
-`430148e` —— 最后一个修改源码或测试的提交 —— 是 §2 中命名的锚点。
+`848faaa` —— 最后一个触碰这四个目录的提交 —— 是 §2 中命名的锚点。
+
+有两个条目（`ad18b1d`、`1213836`）同时改了 `docs/`，但它们各自还带进了 `tools/` 下的
+探针，因此按上面的标准属于本表；这一点写出来，免得读者以为标准被临时放宽过。
 
 这里刻意**不写"总提交数"**：那个数字每写一次文档提交就会失效，而写它的正是文档提交
-本身。35 则是稳定的——文档提交不碰 `src/`、`tests/`、`packaging/`，所以这个数字不会
-被本节自身的修订改变。判定标准同样是机械的：
-
-```bash
-git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 35 行，即下表
-```
+本身。40 则是稳定的——纯文档提交不碰这四个目录，所以这个数字不会被本节自身的修订改变。
 
 因此上表可以被独立复核，而不必相信这段文字。
 
@@ -752,6 +796,7 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 35 行，即下表
 | `cf34c1b` | refactor: separate credential reload from session renewal |
 | `48f05a4` | feat: add silent browser OAuth session renewal |
 | `5197a67` | feat: add login --status and login --renew, and teach doctor about renewal |
+| `ad18b1d` | research: document the GitCode QR login protocol |
 | `5ee2200` | feat: add a pure-HTTP GitCode QR login and terminal QR rendering |
 | `faaf8c0` | feat: add the Windows 11 notification-area tray |
 | `ad61bfb` | fix: report a cold-start renewal as renewed, not as already-valid or timed out |
@@ -762,6 +807,7 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 35 行，即下表
 | `addcaa0` | fix(tray): make the "Sign in..." menu item actually sign you in |
 | `3c9926d` | fix(tray): keep the sign-in poll off the monitor's worker thread |
 | `22733e3` | fix(monitor): stop stranding the icon on "Renewing", and notify once |
+| `1213836` | docs: document the autonomous renewal path and the notification policy |
 | `23c1d10` | test(tray): cover the notification path and split a mis-nested test class |
 | `033b5d4` | feat(tray): show usage in Chinese units, and keep the menu exact |
 | `6344683` | fix(packaging): stop the frozen EXE mangling Chinese output |
@@ -777,13 +823,16 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 35 行，即下表
 | `5253d3f` | fix(tray): give the browser-unavailable state something to say |
 | `442d904` | feat(monitor): opt-in automatic recovery from a missing browser |
 | `2730aed` | test(tools): prove the renewal gate stays shut, not just that it opens |
-| `a4b6de1` | feat(tray): add the "Start with Windows" menu item |
+| `a4b6de1` | feat(tray): add the "Start with Windows" menu item (搂28) |
 | `9b6c6d7` | fix(tray): stop discarding argv in two of the three tray entry points |
 | `9bae2be` | fix(auth): report an unanswered GitCode consent page instead of a timeout |
 | `a48bce8` | test: cover the consent state end to end, and the tray menu it produces |
 | `27528e8` | fix(monitor): classify a 401 by what renewal said, not just by the HTTP status |
 | `9115237` | fix(cli): stop telling a signed-in user that their SSO session is gone |
 | `430148e` | test(auth): anchor the consent probe to the labels the real page shows |
+| `2d5f2ad` | test(auth): run the consent probe's JavaScript in a real browser |
+| `57ced08` | test(tray): pin the consent state's exit code to the session code |
+| `848faaa` | fix(auth): stop claiming "GitCode SSO available" without looking for it |
 
 ---
 
