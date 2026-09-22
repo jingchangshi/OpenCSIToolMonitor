@@ -468,13 +468,22 @@ def _complete_qr_login(ctx: CliContext, result) -> "_Completion":
 
     if renewal.status is RenewalStatus.CONSENT_REQUIRED:
         # HTTP reached the authorization step and found no existing grant. The
-        # approval page has to be confirmed by a human, so hand off to the
-        # browser route rather than reporting a failure.
-        completion.reason = renewal.detail or (
-            "GitCode has no existing authorization for this application, so the "
+        # approval page has to be confirmed by a human. This is the one case the
+        # browser route exists for, so rather than reporting a dead end, the
+        # engine is brought up and the user is asked to approve it -- and if that
+        # cannot be done either, the reason says which of the two failed.
+        ctx.err("")
+        ctx.err(
+            "GitCode has no existing authorisation for this application, so the "
             "approval page has to be confirmed once."
         )
-        completion.next_step = "run 'opencsi login' to approve it in a browser"
+        _run_oauth_completion(ctx, completion)
+        if completion.identity is None and completion.reason is None:
+            completion.reason = renewal.detail or (
+                "the authorisation still needs to be approved"
+            )
+        if completion.identity is None and completion.next_step is None:
+            completion.next_step = f"open {LOGIN_URL} and approve it once"
         return completion
 
     if renewal.status is RenewalStatus.LOGIN_REQUIRED:
@@ -543,7 +552,23 @@ def _gitcode_verification_enabled() -> bool:
 
 
 def _run_oauth_completion(ctx: CliContext, completion: "_Completion") -> None:
-    """Start the hidden engine and run one OAuth round-trip into ``completion``."""
+    """Complete the OAuth leg through a browser, for the one case HTTP cannot.
+
+    Reached only when the browserless flow reported ``CONSENT_REQUIRED``: the
+    credential was accepted and the OAuth leg ran, but the account has no existing
+    application grant, so the approval page has to be confirmed by a human. That
+    is a decision this tool must not make on the user's behalf, so the browser is
+    brought up and the user answers it.
+
+    The engine is started hidden when the browser build supports it, because a
+    window that appears unbidden during a CLI command is a surprise. It reports
+    ``visible=True`` when headless is unavailable rather than claiming a window
+    was never shown -- the ``--headless=new`` flag is silently ignored by some
+    builds, and a caller that asked for hidden must not be told it got hidden.
+
+    Everything here is reported, never raised: this runs inside a command whose
+    whole contract is that it says what happened.
+    """
     from ..auth.auth_host import AuthBrowserHost
 
     # Prefer the endpoint the user configured; otherwise bring up the hidden one.
@@ -556,21 +581,21 @@ def _run_oauth_completion(ctx: CliContext, completion: "_Completion") -> None:
         if not host_result.ok:
             completion.reason = (
                 host_result.detail
-                or "the hidden authentication engine could not be started"
+                or "the browser engine needed to confirm the approval could not be started"
             )
             completion.next_step = (
-                "install Chrome or Edge, or run 'opencsi login' with a browser "
-                "started with --remote-debugging-port"
+                "open " + LOGIN_URL + " in a browser and approve the authorisation once"
             )
             return
         if host_result.visible:
             # Say it plainly. A caller that asked for a hidden engine and got a
             # window must not be told the browser is invisible.
             ctx.err(
-                "note: this browser build has no headless mode, so the "
-                "authentication engine was started in a visible window."
+                "note: this browser build has no headless mode, so the approval "
+                "window was opened visibly."
             )
         endpoint_url = f"http://127.0.0.1:{host_result.port}"
+        completion.bridged = True
 
     try:
         provider = CdpCookieProvider(cdp_url=endpoint_url)
@@ -586,6 +611,7 @@ def _run_oauth_completion(ctx: CliContext, completion: "_Completion") -> None:
         return
 
     completion.renewal = renewal
+    completion.mechanism = "browser-oauth"
 
     if not renewal.ok:
         completion.reason = _renewal_reason(renewal)
@@ -596,7 +622,9 @@ def _run_oauth_completion(ctx: CliContext, completion: "_Completion") -> None:
     # working, so it is confirmed with a real request -- the same standard the
     # rest of the project holds itself to.
     try:
-        client = ctx.make_client(provider=CdpCookieProvider(cdp_url=endpoint_url), renew=False)
+        client = ctx.make_client(
+            provider=CdpCookieProvider(cdp_url=endpoint_url), renew=False
+        )
         completion.identity = client.login_or_restore_session(refresh=True)
     except OpenCsiError as exc:
         completion.reason = (
