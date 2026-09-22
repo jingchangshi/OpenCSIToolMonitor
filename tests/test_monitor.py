@@ -638,6 +638,56 @@ class RenewalPolicyTest(unittest.TestCase):
         service._maybe_renew()
         self.assertIs(service.snapshot.state, MonitorState.LOGIN_REQUIRED)
 
+    def test_an_unanswered_consent_page_becomes_consent_required(self) -> None:
+        """Not LOGIN_REQUIRED: the user is still signed in.
+
+        The remedy is one approval click, so the tray must offer that rather than
+        sending an authenticated user to sign in again.
+        """
+        session = _Session(
+            expires_in=10.0,
+            renew_result=RenewalResult(
+                RenewalStatus.CONSENT_REQUIRED, requires_interaction=True
+            ),
+        )
+        service = _service(_Client(), session=session)
+        service._maybe_renew()
+        self.assertIs(service.snapshot.state, MonitorState.CONSENT_REQUIRED)
+
+    def test_the_consent_state_raises_an_attention_notification(self) -> None:
+        """The fastest-to-fix state must not be the one the tray stays silent about.
+
+        It will never resolve on its own, so a user who is not told will simply
+        see a tray that has quietly stopped collecting.
+        """
+        session = _Session(
+            expires_in=10.0,
+            renew_result=RenewalResult(
+                RenewalStatus.CONSENT_REQUIRED, requires_interaction=True
+            ),
+        )
+        service = _service(_Client(), session=session)
+        seen: list = []
+        service.subscribe_attention(seen.append)
+        service._maybe_renew()
+
+        self.assertIs(service.snapshot.state, MonitorState.CONSENT_REQUIRED)
+        self.assertEqual(
+            len(seen), 1, "the consent state did not raise an attention callback"
+        )
+        self.assertIs(seen[0].state, MonitorState.CONSENT_REQUIRED)
+
+    def test_a_manual_renew_reports_consent_distinctly(self) -> None:
+        session = _Session(
+            expires_in=10.0,
+            renew_result=RenewalResult(
+                RenewalStatus.CONSENT_REQUIRED, requires_interaction=True
+            ),
+        )
+        service = _service(_Client(), session=session)
+        service.renew_now(block=True)
+        self.assertIs(service.snapshot.state, MonitorState.CONSENT_REQUIRED)
+
     def test_cdp_unavailable_becomes_an_auth_error_not_a_login_prompt(self) -> None:
         """No browser is a different problem from 'your SSO session is gone'."""
         session = _Session(

@@ -334,6 +334,50 @@ class ActionsTest(unittest.TestCase):
             ids = self._ids(_snap(state=state))
             self.assertEqual(ids[-1], "quit", f"for {state}")
 
+    def test_the_consent_state_offers_approval_not_a_plain_sign_in(self) -> None:
+        """The whole reason CONSENT_REQUIRED exists as its own state.
+
+        The user is still authenticated -- GitCode rendered "授权 OpenCsitool S
+        <user>" -- so "sign in again" is an action that cannot fix anything. The
+        menu must offer the approval step and the renewal retry instead.
+        """
+        actions = actions_for(_snap(state=MonitorState.CONSENT_REQUIRED))
+        labels = {a.id: a.label for a in actions}
+        self.assertIn("renew", labels, "consent must offer a renewal retry")
+        self.assertIn("打开页面", labels.get("login", ""), "the login action must say what to do")
+
+    def test_the_consent_state_is_distinct_from_login_required(self) -> None:
+        consent = self._ids(_snap(state=MonitorState.CONSENT_REQUIRED))
+        login = self._ids(_snap(state=MonitorState.LOGIN_REQUIRED))
+        self.assertNotEqual(
+            consent, login, "consent and login must not present the same menu"
+        )
+
+    def test_the_consent_state_has_a_chinese_label(self) -> None:
+        self.assertEqual(label_cn(_snap(state=MonitorState.CONSENT_REQUIRED)), "需要授权确认")
+
+    def test_every_state_has_a_label_and_a_colour(self) -> None:
+        """A state with no label would render as a blank menu headline.
+
+        The colour check asserts *membership*, not distinctness. Several states
+        legitimately share the neutral grey -- STARTING and OFFLINE both mean
+        "nothing is wrong, but nothing is happening" -- so comparing against the
+        unknown-state fallback would fail on a correct map. What matters is that
+        each state has an explicit entry, because an absent one silently inherits
+        the grey used for "state I do not recognise", which would make a new
+        state look like a bug rather than a state.
+        """
+        from opencsi.tray.icons import _COLOURS
+
+        for state in MonitorState:
+            with self.subTest(state=state):
+                self.assertTrue(label_cn(_snap(state=state)).strip())
+                self.assertIn(
+                    state.value,
+                    _COLOURS,
+                    f"{state} has no explicit colour and would render as unknown",
+                )
+
     def test_auto_refresh_is_a_checked_toggle(self) -> None:
         actions = actions_for(_snap(), auto_refresh=True)
         toggle = [a for a in actions if a.id == "autorefresh"]
