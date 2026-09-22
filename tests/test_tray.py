@@ -818,10 +818,24 @@ class TrayCliTest(unittest.TestCase):
         for state in (
             MonitorState.BROWSER_UNAVAILABLE,
             MonitorState.LOGIN_REQUIRED,
+            MonitorState.CONSENT_REQUIRED,
             MonitorState.OFFLINE,
             MonitorState.SERVER_ERROR,
         ):
             self.assertNotEqual(codes[state], 0, f"{state} reported success")
+
+    def test_the_consent_state_reports_a_session_problem_not_a_server_one(self) -> None:
+        """A page waiting for a click is not the server's fault.
+
+        Falling through to the ``EXIT_SERVER_ERROR`` tail would tell a script that
+        openCsiTool is broken when in fact the user has one button to press.
+        """
+        from opencsi.cli.tray import _once_exit_code
+        from opencsi.errors import EXIT_SERVER_ERROR
+
+        code = _once_exit_code(MonitorState.CONSENT_REQUIRED)
+        self.assertNotEqual(code, EXIT_SERVER_ERROR)
+        self.assertEqual(code, _once_exit_code(MonitorState.LOGIN_REQUIRED))
 
     def test_sign_in_never_fetches_on_its_own_thread(self) -> None:
         """All fetching belongs to the monitor's worker thread.
