@@ -147,6 +147,105 @@ class GracefulCloseTest(unittest.TestCase):
             self.assertFalse(auth_host._graceful_close(9224))
 
 
+class ProbeCleanupTest(unittest.TestCase):
+    """The capability probe must not leave browsers behind.
+
+    It asks ``chrome --headless=new --version``, which on Chrome 153 hangs. The
+    original implementation used ``subprocess.run(timeout=...)``, which kills the
+    process it started and nothing else -- and the process it started is only a
+    launcher. Chromium hands the real work to a child and exits, so the timeout
+    fired, the launcher was killed, and a dozen orphaned processes per call kept
+    running with ``HeadlessChrome*`` profiles in ``%TEMP%``. Measured at eleven
+    survivors per call before the fix and zero after.
+
+    These tests pin the two mechanisms, neither of which is sufficient alone.
+    """
+
+    def test_the_launcher_tree_is_killed_by_pid(self) -> None:
+        with (
+            mock.patch.object(auth_host.os, "name", "nt"),
+            mock.patch.object(auth_host.subprocess, "Popen") as popen,
+            mock.patch.object(auth_host.subprocess, "run") as run,
+        ):
+            popen.return_value.pid = 4321
+            popen.return_value.communicate.return_value = (b"", b"")
+            popen.return_value.returncode = 0
+            auth_host._kill_probe_tree(4321)
+
+        calls = [c.args[0] for c in run.call_args_list if c.args]
+        self.assertTrue(
+            any("taskkill" in " ".join(map(str, argv)) for argv in calls),
+            "the launcher's tree was not walked",
+        )
+
+    def test_orphans_are_found_by_the_profile_name_not_the_parent(self) -> None:
+        """The parent link is already gone, so the profile name is the only handle.
+
+        This is the part that a ``taskkill /T`` alone cannot do: by the time
+        cleanup runs, the launcher has exited and its children have been
+        reparented, so nothing links them to the PID we know.
+        """
+        with (
+            mock.patch.object(auth_host.os, "name", "nt"),
+            mock.patch.object(auth_host.subprocess, "Popen") as popen,
+            mock.patch.object(auth_host.subprocess, "run") as run,
+        ):
+            popen.return_value.pid = 4321
+            popen.return_value.communicate.return_value = (b"", b"")
+            popen.return_value.returncode = 0
+            auth_host._kill_probe_tree(4321)
+
+        blob = " ".join(
+            " ".join(map(str, c.args[0])) for c in run.call_args_list if c.args
+        )
+        self.assertIn("HeadlessChrome4321", blob)
+
+    def test_the_orphan_sweep_does_not_use_wmic(self) -> None:
+        """``wmic`` is removed on Windows 11, and its absence was silent.
+
+        The first version of this cleanup called ``wmic`` inside a
+        ``except OSError`` block. On this machine that raised
+        ``FileNotFoundError``, the handler swallowed it, and the sweep reported
+        success while killing nothing -- which is exactly how a cleanup path
+        becomes a no-op nobody notices.
+        """
+        with (
+            mock.patch.object(auth_host.os, "name", "nt"),
+            mock.patch.object(auth_host.subprocess, "Popen") as popen,
+            mock.patch.object(auth_host.subprocess, "run") as run,
+        ):
+            popen.return_value.pid = 4321
+            popen.return_value.communicate.return_value = (b"", b"")
+            popen.return_value.returncode = 0
+            auth_host._kill_probe_tree(4321)
+
+        blob = " ".join(
+            " ".join(map(str, c.args[0])) for c in run.call_args_list if c.args
+        )
+        self.assertNotIn("wmic", blob)
+        self.assertIn("powershell", blob.lower())
+
+    def test_cleanup_runs_even_when_the_probe_times_out(self) -> None:
+        """The timeout is the normal path on Chrome 153, not an edge case.
+
+        If cleanup lived after the ``try`` instead of in a ``finally``, the one
+        path that actually leaks -- the hang -- would be the one path that skips
+        it.
+        """
+        with (
+            mock.patch.object(auth_host, "_kill_probe_tree") as killer,
+            mock.patch.object(auth_host.subprocess, "Popen") as popen,
+        ):
+            popen.return_value.pid = 4321
+            popen.return_value.communicate.side_effect = auth_host.subprocess.TimeoutExpired(
+                "chrome", 15.0
+            )
+            result = auth_host._headless_supported(auth_host.Path("chrome.exe"))
+
+        self.assertFalse(result)
+        killer.assert_called_once_with(4321)
+
+
 class DescribeHonestyTest(unittest.TestCase):
     def test_describe_reports_the_observed_mode_not_the_request(self) -> None:
         """A description that contradicts the detected mode is worse than none.

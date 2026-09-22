@@ -228,24 +228,108 @@ def _headless_supported(executable: Path) -> bool:
        engine that is not there.
 
        The consequence is stated plainly in
-       ``OpenCSIToolMonitor_Final_Auth_Closure_Report.md`` §9b: on this machine
+       ``OpenCSIToolMonitor_Final_Auth_Closure_Report.md`` §9c: on this machine
        the unattended monitor cannot bring up a hidden auth host, and it reports
        ``BROWSER_UNAVAILABLE`` rather than opening a window unasked.
+
+    The timeout path used to leak, and so did the success path. Chromium's
+    launcher hands off to a child and exits immediately, so the process this
+    function holds is *not* the one running the browser: by the time cleanup
+    runs, the PID is already gone and ``taskkill /T`` on it finds nothing to
+    walk. Measured at eleven orphaned processes per call, each holding a
+    ``HeadlessChrome*`` profile in ``%TEMP%`` -- and a tray that retries would
+    accumulate them without bound.
+
+    Chromium names that profile after the launcher's PID, so the children can be
+    found by the profile path rather than by a parent link that no longer
+    exists. That is what the cleanup below does.
     """
+    process = None
     try:
-        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        creationflags = 0
+        if os.name == "nt":
+            # No DETACHED_PROCESS here, deliberately: this process is meant to be
+            # short-lived and killed, so it should stay in this job object rather
+            # than escape the cleanup below.
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
             [str(executable), "--headless=new", "--version"],
-            capture_output=True,
-            timeout=15.0,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
         )
+        try:
+            stdout, stderr = process.communicate(timeout=15.0)
+        except subprocess.TimeoutExpired:
+            # The measured Chrome 153 behaviour: no rejection, no version, no
+            # exit. Treat it as unsupported, which is the safe direction.
+            return False
     except (OSError, subprocess.SubprocessError):
         return False
-    if completed.returncode != 0:
+    finally:
+        # Runs on every path, including the timeout above. Without it the
+        # `return False` inside the except clause would leave the browser
+        # running, which is how the leak was found.
+        if process is not None:
+            _kill_probe_tree(process.pid)
+
+    if process.returncode != 0:
         return False
     # A build that understands the flag prints a Chrome/Chromium version line.
-    blob = (completed.stdout or b"") + (completed.stderr or b"")
+    blob = (stdout or b"") + (stderr or b"")
     return b"Chrom" in blob
+
+
+def _kill_probe_tree(launcher_pid: int) -> None:
+    """Kill a probe browser and its children. Never raises.
+
+    Two mechanisms, because neither is sufficient alone:
+
+    * ``taskkill /T`` on the launcher PID walks the tree while the launcher is
+      still alive. On a timeout it usually is.
+    * the launcher may already have exited, having handed the real work to a
+      child that is now orphaned. Chromium names that child's profile
+      ``HeadlessChrome<PID>`` after the launcher, so matching the profile path
+      finds the orphans that the parent link cannot.
+
+    Killing by profile path is deliberately narrow -- only the launcher's own PID
+    appears in the name -- so it cannot reach a browser the user is running.
+
+    The orphan sweep shells out to PowerShell rather than ``wmic``, because
+    ``wmic`` is no longer present on Windows 11: it was deprecated and then
+    removed, and calling it raises ``FileNotFoundError`` that a bare
+    ``except OSError`` swallows. That silent failure is why the first version of
+    this cleanup appeared to run and killed nothing.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["taskkill", "/PID", str(launcher_pid), "/T", "/F"],
+                capture_output=True,
+                timeout=20.0,
+                check=False,
+            )
+            marker = f"HeadlessChrome{launcher_pid}"
+            # -NoProfile keeps this fast and immune to a user's profile script;
+            # the filter matches the launcher's own PID only.
+            subprocess.run(  # noqa: S603 - fixed argv, no shell
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\""
+                    f" | Where-Object {{ $_.CommandLine -like '*{marker}*' }}"
+                    " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force"
+                    " -ErrorAction SilentlyContinue }",
+                ],
+                capture_output=True,
+                timeout=30.0,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _kill(pid: int) -> bool:
