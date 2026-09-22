@@ -44,20 +44,29 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 
 ## 2. 最终 HEAD
 
-最后一个修改**源码或测试**的提交：
+最后一个修改**源码、测试或探针**的提交：
 
 ```
-a48bce8  test: cover the consent state end to end, and the tray menu it produces
+72562a3  fix(tools): stop the soak counting one renewal as two
 ```
 
-上一个行为变更提交是：
+最后一个修改 `src/` 的提交是：
 
 ```
-71e7e54  fix(tools): make the soak see renewals it did not perform itself
+8ee38e0  test(cli): guard the QR exit-code map the way the renewal one is guarded
 ```
 
 其后都是纯文档提交，包括承载本报告的提交。在这里写出那些提交是循环的——一个提交
 无法包含它自己的 SHA——所以锚点取最后一个行为变更，这才是读者真正需要检出的东西。
+
+> **这两个锚点是本轮修正过的。** 原文写的是 `a48bce8` / `71e7e54`，在后续多个提交之后
+> 已经过期；而"最后一个修改源码的提交"这种锚点**每落一个 commit 就会过期一次**，
+> 手工维护必然滞后。这里改为两条命令即可复核的形式：
+>
+> ```bash
+> git log --oneline -1 -- src tests tools packaging   # 72562a3
+> git log --oneline -1 -- src                          # 8ee38e0
+> ```
 
 本阶段的基线是 `cf34c1b~1`（`4739898`）。工作区干净；无未跟踪的临时文件；无残留进程；
 注册表未留下 `Run` 项。
