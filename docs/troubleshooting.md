@@ -31,6 +31,7 @@ opencsi doctor
 | `tray: unavailable` | 2 | 没装 `opencsi[tray]` | [§13](#13-托盘问题) |
 | 扫码登录卡住 / 扫不出来 | — | 扫的是终端图，不是文件 | [§14](#14-扫码登录-login---qr) |
 | 续期报 `LOGIN_REQUIRED` | 13 | GitCode SSO 也过期了 | [§15](#15-续期失败) |
+| 续期报 `CONSENT_REQUIRED` / 托盘显示 `需要授权确认` | 13 | 登录态还在，只是授权没确认 | [§17](#17-需要授权确认) |
 | 托盘显示 `浏览器未运行` | 10 | 没有带调试端口的浏览器在跑 | [§16](#16-浏览器未运行) |
 | 托盘图标不出现 | — | 被折叠进溢出区 | [§13](#13-托盘问题) |
 
@@ -758,6 +759,7 @@ opencsi login --qr --qr-wait 300
 | `RENEWED` | 换到了新 token | 无需操作 |
 | `ALREADY_VALID` | 剩余寿命还够，没动 | 无需操作 |
 | `LOGIN_REQUIRED` | GitCode SSO 也过期了 | 跑 `opencsi login`（要浏览器） |
+| `CONSENT_REQUIRED` | GitCode 在等你**确认授权**（不是登录） | 见 [§17](#17-需要授权确认) |
 | `CDP_UNAVAILABLE` | 连不上调试端点 | 见 [§16](#16-浏览器未运行) |
 | `OAUTH_FAILED` | OAuth 流程被拒 | 先确认浏览器里 GitCode 还是登录态 |
 | `TIMEOUT` | 超时且**没**拿到新 token | 重试；仍失败就跑 `opencsi login` |
@@ -766,7 +768,7 @@ opencsi login --qr --qr-wait 300
 **关键区分**：续期失败**不等于**命令失败。如果当前 Cookie 仍然可用，
 命令会正常返回 —— 那是"这次没续上"，不是"你不能用了"。
 
-只有 `LOGIN_REQUIRED` 才真的需要你本人操作。
+只有 `LOGIN_REQUIRED` 与 `CONSENT_REQUIRED` 才真的需要你本人操作。
 
 ### 为什么静默续期有时会失败
 
@@ -839,6 +841,62 @@ opencsi doctor --no-proxy
 报 `FAILED` 且提示 "already open" 时，说明**同一个专用配置目录已经被另一个
 窗口占用**了。Chromium 会把新启动请求转发给那个进程，而那个进程没有调试端口，
 所以端口永远不会出现。**把所有使用该配置目录的窗口关掉再重试。**
+
+---
+
+## 17. 需要授权确认
+
+```
+state: CONSENT_REQUIRED
+note: GitCode is showing an approval page for the OpenCsitool application and
+      waiting for it to be confirmed; the SSO session is still valid, so
+      approving it is enough
+```
+
+托盘上显示 `需要授权确认`（黄色图标），菜单第一项是 `打开页面并批准授权`。
+
+### 这是什么
+
+GitCode 打开了一个**授权确认页**（页面上写着 `授权 OpenCsitool S <你的用户名>`，
+有一个「授权」按钮），然后一直等在那里。
+
+**你的登录态是好的。** 这和"需要登录"完全不同：
+
+| 状态 | 真正的问题 | 修复方式 |
+| --- | --- | --- |
+| `需要登录` | GitCode 登录态没了 | 重新登录 |
+| `需要授权确认` | 登录态**还在**，只是授权没确认 | **点一下「授权」** |
+| `浏览器未运行` | 持有登录态的浏览器没跑 | 把浏览器启动起来 |
+
+### 为什么会出现
+
+通常是这几种情况：换了新的浏览器 profile、之前撤销过授权、或者第一次在
+这台机器上跑。GitCode 需要你本人确认一次，之后静默续期就能自己走完。
+
+### 怎么修
+
+点托盘的 `打开页面并批准授权`，在打开的页面上点「授权」。然后点
+`重试静默续期`，或者等下一次自动续期。
+
+### 为什么工具不自己点
+
+**这是刻意的。** 代替你批准一个 OAuth 授权，是你的决定，不是工具的决定；
+一个后台监控程序悄悄扩大自己的权限，正是本项目绝不能有的行为。工具能做的是
+**准确告诉你卡在哪**，而不是替你继续下去。
+
+> **早先的版本会把它误报成超时。** 你会看到
+> `the browser may be slow or GitCode may be unreachable` —— 而这两句都不成立：
+> 浏览器在空闲，GitCode 也立刻答复了。实测确认：手工点一下「授权」，
+> 立刻签发新的 60 分钟 token。整条流程距离成功只差一次点击。
+> 现在它报 `CONSENT_REQUIRED` 并给出正确的下一步。
+
+### 怎么确认修好了
+
+```bash
+opencsi doctor --no-proxy
+```
+
+看到 `silent renewal: GitCode SSO available` 即表示恢复。
 
 ---
 

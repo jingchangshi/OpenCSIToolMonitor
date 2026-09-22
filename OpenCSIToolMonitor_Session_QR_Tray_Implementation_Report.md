@@ -27,12 +27,13 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | 静默续期不抢占用户焦点 | **完成** | `Target.createTarget` 创建**后台** target，完成后 `Target.closeTarget`；绝不导航用户当前页面 |
 | GitCode 纯 CLI / 扫码登录可行性调研 | **完成** | `docs/gitcode-qr-protocol.md` —— 结论 `QR_FLOW_REPRODUCIBLE` |
 | 实现 CLI 扫码登录 | **完成，实测验证** | `opencsi login --qr` 真实创建了 challenge、写出图片，未扫码时如实返回 `TIMEOUT`（退出码 13） |
-| Windows 11 托盘 v1 | **完成，实测验证** | `opencsi tray --once` 打印真实快照；`--check` 报告 `tray: ok`，6 个菜单项 |
+| Windows 11 托盘 v1 | **完成，实测验证** | `opencsi tray --once` 打印真实快照；`--check` 报告 `tray: ok`，7 个菜单项（含「开机自启动」） |
 | 浏览器缺失时用户可自救 | **完成，实测验证** | 杀掉 Chrome 后单条命令即恢复：`state: OK`，`EXIT=0`（见 §10 缺陷 8） |
-| 测试 | **完成** | **695 项测试**（694 通过、1 跳过），`pytest` 与 `unittest` 双跑全绿 |
+| GitCode 授权页未确认时的正确报告 | **完成，实测验证** | 新增 `CONSENT_REQUIRED` 状态；实测确认授权后静默续期返回 `RENEWED`（见 §10 缺陷 10） |
+| 测试 | **完成** | **725 项测试**（724 通过、1 跳过、119 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
-| 规范提交 | **完成** | 27 个修改源码/测试的提交（§11 完整列出）；其中 8 个修复了通过**运行真实产物**才发现的缺陷 |
+| 规范提交 | **完成** | 30 个修改源码/测试的提交（§11 完整列出）；其中 10 个修复了通过**运行真实产物**才发现的缺陷 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
@@ -45,7 +46,13 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 最后一个修改**源码或测试**的提交：
 
 ```
-442d904  feat(monitor): opt-in automatic recovery from a missing browser
+a48bce8  test: cover the consent state end to end, and the tray menu it produces
+```
+
+上一个行为变更提交是：
+
+```
+9bae2be  fix(auth): report an unanswered GitCode consent page instead of a timeout
 ```
 
 其后都是纯文档提交，包括承载本报告的提交。在这里写出那些提交是循环的——一个提交
@@ -76,8 +83,9 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 本阶段由三个真实缺陷驱动。三个缺陷都在修复前被复现，且每个修复都有能在旧代码上
 失败的测试。
 
-后续在真机运行中又发现并修复了五个（缺陷 4–8，见 §10）。其中缺陷 8 与本节的三个不同：
-它不是"缺少能力"，而是**已有的提示把用户引向了一个不可能完成的动作**。
+后续在真机运行中又发现并修复了七个（缺陷 4–10，见 §10）。其中缺陷 8 与本节的三个不同：
+它不是"缺少能力"，而是**已有的提示把用户引向了一个不可能完成的动作**。缺陷 10 则更
+进一步——它报出的**分类本身就是错的**：把"等一次点击"说成了"超时，可能网络有问题"。
 
 ### 3.1 会话约 58 分钟后失效，而没有任何机制续期
 
@@ -311,12 +319,13 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 
 **分层。** 一切不需要 Windows 消息循环就能测试的东西都被下沉到 `monitor/` 与
 `tray/presenter.py`，它们是纯的。`app.py` 只负责把已经算好的值交给 pystray。这就是为什么
-695 项测试可以离线运行，而托盘本身在真机上验证。
+725 项测试可以离线运行，而托盘本身在真机上验证。
 
 **状态**（`MonitorState`）：`STARTING`、`OK`、`REFRESHING`、`RENEWING`、
-`LOGIN_REQUIRED`、`BROWSER_UNAVAILABLE`、`OFFLINE`、`SERVER_ERROR`、`AUTH_ERROR`
+`LOGIN_REQUIRED`、`CONSENT_REQUIRED`、`BROWSER_UNAVAILABLE`、`OFFLINE`、
+`SERVER_ERROR`、`AUTH_ERROR`
 —— 对应中文标签
-`启动中 / 正常 / 刷新中 / 续期中 / 需要登录 / 浏览器未运行 / 离线 / 服务异常 / 会话失效`。
+`启动中 / 正常 / 刷新中 / 续期中 / 需要登录 / 需要授权确认 / 浏览器未运行 / 离线 / 服务异常 / 会话失效`。
 
 **`需要登录` 与 `浏览器未运行` 必须分开。** 前者是 GitCode 登录态没了，后者是持有登录态的
 那个浏览器没在运行；修复动作一个是"重新认证"，另一个是"把进程启动起来"。早先两者被合并，
@@ -324,8 +333,15 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 默认浏览器（没有调试端口）→ Cookie 写进本工具读不到的地方 → 下一次轮询又说"需要登录"。
 现在 `浏览器未运行` 的第一项菜单是 `启动浏览器并登录`，`opencsi login` 也走同一条路径。
 
+**`需要授权确认` 也必须独立存在。** 它与"需要登录"的区别是修复动作的大小：GitCode 的
+SSO 会话**仍然有效**，页面已经渲染出"授权 OpenCsitool S shijingchang"，只差一次点击。
+把一个已登录用户送去"重新登录"，是让他去做一件修不好任何事的工作——与上面那次合并属于
+同一类错误。因此该状态的菜单是 `打开页面并批准授权` + `重试静默续期`，而不是 `登录`。
+它同时被放进 `_ATTENTION_STATES`：这是全部状态里**最容易修好**的一个，而且它永远不会
+自行消失，所以恰恰最不该被托盘静默略过。
+
 **刻意为之的精度不对称。** tooltip 做压缩（`36.3亿 tokens`）；菜单显示精确数字
-（`3,634,063,175 tokens / 26,566 次请求`）。tooltip 受 Windows shell 限制为 127 个字符，
+（`3,634,408,185 tokens / 27,788 次请求`）。tooltip 受 Windows shell 限制为 127 个字符，
 菜单不受限，而精确数字才是用户真正需要的。两种行为都被测试锁定。
 
 **通知策略——用的是锁存，不是比较。** 在*进入* `LOGIN_REQUIRED` 或 `AUTH_ERROR` 时
@@ -343,8 +359,8 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 ```
 $ opencsi tray --once --no-proxy
 state: OK
-total tokens: 3,634,063,175
-requests:     26,566
+total tokens: 3,634,408,185
+requests:     27,788
 pull requests:  249
 generated:    3,150 lines
 adopted:      120 lines
@@ -355,7 +371,7 @@ EXIT=0
 $ opencsi tray --check --no-proxy
 tray: ok
 state: STARTING
-menu items: 6
+menu items: 7
 tooltip: OpenCSI | 启动中 / 等待首次更新
 EXIT=0
 
@@ -373,19 +389,25 @@ EXIT=0
 
 ## 9. 测试
 
-**695 项测试：694 通过，1 跳过，57 个 subtest 通过。**
+**725 项测试：724 通过，1 跳过，119 个 subtest 通过。**
 
 ```
 $ pytest
-694 passed, 1 skipped, 57 subtests passed in 37.70s
+724 passed, 1 skipped, 119 subtests passed in 41.06s
 
 $ python -m unittest discover -s tests -q
-Ran 695 tests in 37.547s
+Ran 725 tests in 39.114s
 OK (skipped=1)
 ```
 
 两个 runner 在同一棵代码树上都是绿的。整个测试套件完全**离线**运行——没有任何测试
 触碰网络；§5–§8 中的实测证据来自探针脚本与手动运行，而不是来自测试套件。
+
+> **两个 runner 都必须跑。** 这不是形式主义。本轮把 `opencsi.tray.__main__.main` 改成会
+> 转发参数之后，`pytest` 依然全绿，而 `python -m unittest discover` 报了 2 个失败——因为
+> 有两个旧测试调用 `entry.main()` 并依赖"环境里的 `sys.argv` 恰好是空的"。这在 pytest 下
+> 成立，在 `unittest discover` 下不成立（argv 里带着 `discover -s tests`）。那是测试对运行
+> 环境的假设，不是产品缺陷，但如果只跑 pytest，它会一直藏着。
 
 本阶段新增覆盖：
 
@@ -394,10 +416,15 @@ OK (skipped=1)
 | `tests/test_monitor.py` | `AttentionNotificationTest`（8 项）：每次状态转换一个气泡、重复不弹、恢复后重新武装、`tick()` 是公开的 |
 | `tests/test_monitor.py` | `RENEWING` 卡死回归、空操作续期、成功时 `RENEWING` → `OK` |
 | `tests/test_monitor.py` | `BrowserRecoveryTest`（8 项）：默认不启动浏览器、冷却期生效、同一轮只重试一次、网络故障不触发启动 |
+| `tests/test_monitor.py` | 授权页未确认 → `CONSENT_REQUIRED`（而非 `LOGIN_REQUIRED`），且**真的**触发 attention 回调 |
+| `tests/test_oauth_renewal.py` | 授权页不被误报为 `TIMEOUT`、detail 不含旧有的"slow/unreachable"措辞、检测**提前**结束等待（而不只是在截止时改标签）、探针只返回布尔值不读页面文本、非成功路径同样关闭 target |
 | `tests/test_tray.py` | `ChineseUnitTest`、`NotificationTest`、`SignInActionTest`、图标颜色/形状语义 |
 | `tests/test_tray.py` | 每个 `_ATTENTION_STATES` 成员都必须**真的有话可说**（见 §10 缺陷八） |
+| `tests/test_tray.py` | `CONSENT_REQUIRED` 的菜单与 `LOGIN_REQUIRED` **不同**，且提供批准动作而非纯登录 |
 | `tests/test_browser_launch.py` | 复用而非重复启动、失败不抛异常、`open_or_launch` 的三条分支 |
 | `tests/test_packaging.py` | `DeclaredScriptTest` —— 解析 `[project.scripts]` 并解析每个目标（见 §10） |
+| `tests/test_packaging.py` | `TrayEntryArgumentsTest`（7 项）—— 三种入口点都必须转发参数；**并且回归时快速失败而不是挂起** |
+| `tests/test_packaging.py` | `LiveProbeTest` —— 每个实测探针必须自我说明且声明其安全边界 |
 | `tests/test_client.py` | 基于 AST 的只读守卫：业务客户端只能到达 `GET` |
 | `tests/test_cli.py` | 输出流被重新配置为 UTF-8；不可表示的字符不会导致崩溃；**每个 `EXIT_*` 常量唯一** |
 
@@ -427,7 +454,7 @@ total 2
 `install_logging_redaction` 都已应用在续期/扫码路径上。`scene_id` 与扫码载荷在 `repr` 中
 被脱敏。verbose 日志只打印请求**路径**——绝不打印 query string，绝不打印 cookie。
 
-### 本轮发现并修复的八个真实缺陷
+### 本轮发现并修复的十个真实缺陷
 
 1. **图标卡在"续期中"。** `_maybe_renew` 在成功时直接返回，没有离开 `RENEWING`，导致托盘
    在一次已经成功的续期之后仍显示续期状态长达 5 分钟。由一个实测探针发现：在一个已经续期
@@ -531,18 +558,90 @@ total 2
    三个修复都先在旧代码上验证过会失败：`AssertionError: LOGIN_REQUIRED is not
    BROWSER_UNAVAILABLE`、`AssertionError: 20 != 10`、`AssertionError: 0 != 1`。
 
-### 缺陷 1–8 的共同形态
+### 缺陷 9：`opencsi-monitor --help` 永久挂起
 
-缺陷 4、5、6 是"测试检查声明而非产物"；缺陷 7 是"测试只覆盖了控制台入口，没覆盖窗口化
-入口"；缺陷 8 是"测试只覆盖了状态映射，没覆盖该状态下**动作能否达成目的**"。
+`opencsi-monitor --help` 什么都不打印，然后永久停在通知区域。`python -m
+opencsi.tray --help` 同样如此。两个入口点都丢弃 `sys.argv` 并直接启动常驻 GUI。
 
-三者其实是同一件事：**测试断言的是代码写了什么，而不是用户能否得到他要的东西。**
+**这是同一个缺陷的第二次出现。** 它此前被报告并修复过一次（缺陷 7），而修复被写进了
+`packaging/tray_entry.py`——错的地方。那里并不是共享逻辑，而是**复制**了一份逻辑，所以
+修好一个副本之后，另外两个仍然是坏的，而且没有任何测试覆盖它们：全部测试都在驱动
+`opencsi tray`，那条路径走 argparse，从来不受影响。
+
+修复方式是把逻辑收敛到唯一一处：`opencsi.tray.__main__.main` 接受一个可选的显式 argv，
+冻结入口脚本只调用它、自己不再做任何判断。有一个测试断言入口脚本**没有**重新实现那个
+分支，因此这种复制不会再回来。
+
+**在证明过程中发现了两个测试质量本身的问题**，都值得记录：
+
+其一：把缺陷重新放回去时，新测试**挂起**而不是失败——因为回退路径是一个真实的 pystray
+消息循环。一个在 bug 回来时挂起的测试，比没有测试更糟：它什么都不报告，还会卡住整个
+套件，而这正是该缺陷能存活两轮的原因。现在测试会把 `TrayApp` 替换成抛异常的桩，于是
+回归在 **0.7 秒**内失败，而不是超时。
+
+其二：两个旧测试调用 `entry.main()` 并依赖"环境里的 `sys.argv` 恰好是空的"。这在 pytest
+下成立，在 `unittest discover` 下不成立——于是 `python -m unittest discover` 会因为这个
+**并不存在的缺陷**而失败，而 pytest 全绿。现在它们显式传入空 argv，并新增一个测试覆盖
+真正读取 `sys.argv` 的模块调用路径。
+
+### 缺陷 10：GitCode 授权页未确认时，被误报为"超时"
+
+静默续期会以一个**每一条都不成立**的消息失败：
+
+```
+the OAuth round-trip did not finish inside the budget; the browser may be
+slow or GitCode may be unreachable
+```
+
+浏览器并不慢（它处于空闲），GitCode 也没有不可达（它立刻就答复了）——它答复的是一个
+OAuth **授权确认页**（`授权 OpenCsitool S shijingchang`），该页面会无限期等待一次点击。
+标签停在 `gitcode.com/oauth/authorize`，而这与"仍在跳转中"的标签是**同一个 URL**，所以
+续期器无法区分"还在重定向"与"在等人"，只能一直轮询到预算耗尽。
+
+用诊断探针直接测量：手工批准该页面后**立刻**签发了新的 60 分钟 token。整条流程距离成功
+只差一次点击，而工具坚持说自己超时了。
+
+这个状态在结果里也与真正的超时无法区分，于是每一个调用方都继承了这个误诊：`doctor`
+责怪网络，托盘不提供任何动作，`login --renew` 退出码 30（`EXIT_NETWORK_ERROR`）——
+而这个状况与网络毫无关系。
+
+现在改为**询问文档**是否存在批准控件，而不是对 URL 做模式匹配，因为 URL 确实无法区分
+这两种情况。探针刻意保持通用（按钮与 submit 输入中标签为批准词的控件），因此不依赖
+GitCode 的前端改动；它只返回布尔值，所以任何页面文本都不会进入日志——授权页上显示着
+已登录的账号名，这一点很重要。
+
+**它绝不点击。** 代替用户批准一个 OAuth 授权，是用户自己的决定；一个后台监控程序悄悄
+扩大自己的权限，恰恰是本项目绝不能有的行为。探针存在的目的是让工具能**说出**卡在哪，
+而不是让它自己继续下去。补救动作以菜单项的形式交给用户。
+
+新增的 `CONSENT_REQUIRED` 状态与 `LOGIN_REQUIRED` **刻意分开**，因为补救动作小得多：
+SSO 会话仍然有效，没有任何东西需要重新登录。让一个已经通过认证的用户去"重新登录"，
+是让他做一件修不好任何事的工作——与前面 `BROWSER_UNAVAILABLE` / `LOGIN_REQUIRED` 那次
+合并属于同一类错误。它被放进 `_ATTENTION_STATES`，因为它是全部状态里最容易修好的一个，
+而且永远不会自行消失。
+
+检测在**连续第二次**看到该表单时就跳出轮询循环，因此 30 秒的预算大约 1 秒就返回。有一
+个测试直接断言这个提前退出，否则"只是在截止时改了标签"的实现也会通过。
+
+实测验证：同一个此前报 `TIMEOUT` 的续期，现在报 `CONSENT_REQUIRED` 并给出正确补救；
+批准之后静默续期返回 `RENEWED`，token 有效期 3598 秒且服务端接受。把检测逻辑改回去会
+让 3 个新测试失败。
+
+### 缺陷 1–10 的共同形态
+
+缺陷 4、5、6 是"测试检查声明而非产物"；缺陷 7 与 9 是"测试只覆盖了其中一个入口点"；
+缺陷 8 是"测试只覆盖了状态映射，没覆盖该状态下**动作能否达成目的**"；缺陷 10 是
+"测试只覆盖了错误**分类**，没覆盖该分类是否**描述事实**"。
+
+四者其实是同一件事：**测试断言的是代码写了什么，而不是用户能否得到他要的东西。**
 缺陷 8 的每一个子缺陷都在既有测试的射程之外——`_CODE_STATE` 的映射有测试、退出码的
 *唯一性*有测试、`_ATTENTION_STATES` 的*内容*有测试，但没有任何测试问过
-"被报成 `LOGIN_REQUIRED` 之后，用户照着做能不能恢复"。
+"被报成 `LOGIN_REQUIRED` 之后，用户照着做能不能恢复"。缺陷 10 同样：`TIMEOUT` 这个
+状态有测试、它的退出码有测试，但没有任何测试问过"这一次真的是超时吗"。
 
-这也是为什么它只能靠真机运行发现：整条路径（点菜单 → 启动浏览器 → 读 Cookie → 再轮询）
-跨越了进程边界，离线测试套件在构造上就到不了那里。
+这也是为什么它们只能靠真机运行发现：整条路径（点菜单 → 启动浏览器 → 读 Cookie → 再轮询）
+跨越了进程边界，离线测试套件在构造上就到不了那里。缺陷 9 更极端——它甚至不需要真机，
+只需要**换一个入口点**运行一次。
 
 ### 已处理的打包陷阱
 
@@ -558,20 +657,20 @@ total 2
 
 ## 11. 提交
 
-自 `cf34c1b` 起，**修改了源码或测试的提交共 27 个**，下表完整列出（最旧在前，覆盖
-`cf34c1b` 到 `442d904`）。全部以 `opencsi contributors <contributors@opencsi.invalid>`
+自 `cf34c1b` 起，**修改了源码或测试的提交共 32 个**，下表完整列出（最旧在前，覆盖
+`cf34c1b` 到 `a48bce8`）。全部以 `opencsi contributors <contributors@opencsi.invalid>`
 署名。
 
 表中没有、也不可能有的是**纯文档提交**：它们撰写、修订本报告，修正本报告对自身 SHA 的
 引用，并把报告改写为中文。一个提交无法列出自己的 SHA，所以它们不可能出现在表里；
-`442d904` —— 最后一个修改源码或测试的提交 —— 是 §2 中命名的锚点。
+`a48bce8` —— 最后一个修改源码或测试的提交 —— 是 §2 中命名的锚点。
 
 这里刻意**不写"总提交数"**：那个数字每写一次文档提交就会失效，而写它的正是文档提交
-本身。27 则是稳定的——文档提交不碰 `src/`、`tests/`、`packaging/`，所以这个数字不会
+本身。32 则是稳定的——文档提交不碰 `src/`、`tests/`、`packaging/`，所以这个数字不会
 被本节自身的修订改变。判定标准同样是机械的：
 
 ```bash
-git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 27 行，即下表
+git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 32 行，即下表
 ```
 
 因此上表可以被独立复核，而不必相信这段文字。
@@ -605,6 +704,11 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 27 行，即下表
 | `64f7a97` | fix(tray): make the tray's sign-in open a browser it can read too |
 | `5253d3f` | fix(tray): give the browser-unavailable state something to say |
 | `442d904` | feat(monitor): opt-in automatic recovery from a missing browser |
+| `2730aed` | test(tools): prove the renewal gate stays shut, not just that it opens |
+| `a4b6de1` | feat(tray): add the "Start with Windows" menu item |
+| `9b6c6d7` | fix(tray): stop discarding argv in two of the three tray entry points |
+| `9bae2be` | fix(auth): report an unanswered GitCode consent page instead of a timeout |
+| `a48bce8` | test: cover the consent state end to end, and the tray menu it produces |
 
 ---
 
