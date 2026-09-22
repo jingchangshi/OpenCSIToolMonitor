@@ -11,19 +11,32 @@ Every claim in this report is either (a) reproduced by a command named here, or
 
 ## 1. Verdict
 
-Seven independent verdicts. No single overall PASS — several items are genuinely
-incomplete, and collapsing them would hide exactly what this report exists to say.
+Eight independent verdicts, one per item §73 names. No single overall PASS —
+several items are genuinely incomplete, and collapsing them would hide exactly
+what this report exists to say.
 
 | # | Item | Verdict | Basis |
 | --- | --- | --- | --- |
 | 1 | **QR GitCode auth** | `PROTOCOL_VERIFIED` / **scan not executed** | Protocol reproduced end-to-end over plain HTTP. No real WeChat scan was performed in this session. |
 | 2 | **QR → openCsiTool auth** | `BROWSERLESS_LOGIN_ACHIEVABLE` | Credential of exactly the shape a scan returns established and verified a session. **No browser engine at any point.** |
-| 3 | **Silent renewal** | `WORKING` — verified live, both binaries | `RENEWED`, `Server accepted it : yes`, exit 0. Persists across processes. |
+| 3 | **Silent renewal** | `WORKING` — measured live on both binaries; **not reproducible in this session** | `RENEWED`, `Server accepted it : yes`, exit 0. Persists across processes. See the reproducibility note below. |
 | 4 | **Browserless OAuth** | `PURE_HTTP_OAUTH_FEASIBLE` | Independently reproduced three times (twice by me, once by a separate investigation). |
 | 5 | **Hidden auth runtime** | **`WORKING`** — hidden engine verified on screen, wired into the monitor | `STARTED` / `HEADLESS` / **zero visible windows**, `describe()` reports "no user-visible window". §61's condition is met. Profile persistence proven; the full renew cycle is **not** — see below. |
 | 6 | **Windows tray** | `WORKING` | `--once` returns real data; `--check` builds a 7-item menu; QR login wired. |
 | 7 | **Startup** | `WORKING` — full round-trip verified | Frozen binary resolves its own sibling, and reports `frozen-cli-tray` rather than claiming to be the tray. Registry install/remove verified and reverted. |
 | 8 | **CI** | `WRITTEN` / **never run on a CI runner** | Workflow is complete and every step was rehearsed locally; no GitHub runner executed it. |
+
+**Reproducibility note on row 3.** The renewal measurement is real and was taken
+on both binaries, but it cannot be re-run in this session, and the reason is a
+mistake of mine rather than anything about the product: an over-broad cleanup
+filter killed the debug Chrome on port 9222 that every live renewal check
+depended on (recorded in full in §9c). Re-running `login --renew` today reports
+`OAUTH_FAILED`, because neither mechanism has a credential source — `http-oauth`
+needs a readable GitCode session cookie and the browser holds none, and
+`browser-oauth` resolves to a stale marker on the user's default profile whose
+WebSocket never upgrades. Both failures are *source* failures, not mechanism
+failures, so the verdict stands; but a reader cannot confirm it from this
+workspace, and saying so is the difference between a measurement and a claim.
 
 ### What is *not* claimed
 
@@ -73,8 +86,7 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 
 ```text
 starting HEAD   0637051  docs: make §12 usable, since that is the section a user actually reads
-ending HEAD     407752e  docs(auth-host): the old probe did not hang -- it started a browser
-baa1f3a  fix(auth): say why renewal is available and still will not work
+ending HEAD     baa1f3a  fix(auth): say why renewal is available and still will not work
 ```
 
 `ending HEAD` names the last commit that changed **source, tests or tools**, not
@@ -112,6 +124,7 @@ b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 a
 5a092e7  fix(auth-host): stop the headless probe leaking a browser per call
 0a58e44  fix(auth-host): two probes that were wrong in opposite directions
 407752e  docs(auth-host): the old probe did not hang -- it started a browser
+baa1f3a  fix(auth): say why renewal is available and still will not work
 ```
 
 ```text
