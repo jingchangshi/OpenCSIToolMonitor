@@ -100,6 +100,17 @@ def main() -> int:
 
     problems: list[str] = []
     samples = 0
+    #: Renewals this process performed, and renewals observed by any means.
+    #:
+    #: The counter alone is not enough. A renewal that happens through another
+    #: `opencsi` invocation -- a concurrent `doctor`, or a human running
+    #: `login --renew` -- is invisible to the wrapper, and an earlier 78-minute
+    #: run reported "INCONCLUSIVE: 0 renewals" while its own log showed the
+    #: lifetime jumping 2418s -> 3557s twice. That is a renewal, whoever did it.
+    #: A cookie's lifetime only ever falls on its own, so an increase is proof
+    #: that a new cookie was issued.
+    jumps = 0
+    previous_lifetime: float | None = None
 
     while time.monotonic() < deadline:
         service.tick()
@@ -107,10 +118,24 @@ def main() -> int:
         status = session.status()
         samples += 1
 
-        if renewals >= args.renewals:
+        lifetime_now = status.expires_in
+        if (
+            previous_lifetime is not None
+            and lifetime_now is not None
+            and lifetime_now > previous_lifetime + 30.0
+        ):
+            jumps += 1
+            print(
+                f"[{time.strftime('%H:%M:%S')}] LIFETIME JUMPED "
+                f"{previous_lifetime:.0f}s -> {lifetime_now:.0f}s "
+                f"(a new cookie was issued)"
+            )
+        previous_lifetime = lifetime_now
+
+        if renewals + jumps >= args.renewals:
             break
 
-        lifetime = f"{status.expires_in:6.0f}s" if status.expires_in else " unknown"
+        lifetime = f"{lifetime_now:6.0f}s" if lifetime_now else " unknown"
         if samples % 4 == 1:  # keep the log readable over a long run
             print(f"[{time.strftime('%H:%M:%S')}] {snapshot.state.value:<16} lifetime {lifetime}")
 
@@ -125,7 +150,8 @@ def main() -> int:
         time.sleep(args.interval)
 
     print()
-    print(f"renewals observed: {renewals}")
+    print(f"renewals performed by this process: {renewals}")
+    print(f"lifetime jumps seen (any renewer) : {jumps}")
 
     if problems:
         print("SOAK FAILED:")
@@ -133,11 +159,11 @@ def main() -> int:
             print(f"  - {item}")
         return 1
 
-    if renewals < args.renewals:
+    if renewals + jumps < args.renewals:
         print(
-            f"INCONCLUSIVE: only {renewals} of {args.renewals} renewals observed "
-            f"within {args.minutes:.0f} minutes. The session is still healthy, so "
-            "this is not a failure -- run it longer to see more."
+            f"INCONCLUSIVE: only {renewals + jumps} of {args.renewals} renewals "
+            f"observed within {args.minutes:.0f} minutes. The session is still "
+            "healthy, so this is not a failure -- run it longer to see more."
         )
         return 2
 
@@ -150,8 +176,11 @@ def main() -> int:
         return 1
 
     print()
-    print(f"VERIFIED: {renewals} silent renewals across real expiries, with no")
-    print("user interaction and no interactive login required.")
+    print(
+        f"VERIFIED: {renewals + jumps} silent renewal(s) across real expiries "
+        f"({renewals} performed by this process, {jumps} observed as lifetime "
+        "jumps), with no user interaction and no interactive login required."
+    )
     return 0
 
 
