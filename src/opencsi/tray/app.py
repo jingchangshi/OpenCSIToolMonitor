@@ -100,12 +100,69 @@ class TrayApp:
         self._unsubscribe_attention: Callable[[], None] | None = None
         self._lock = threading.RLock()
 
+        #: Whether "start with Windows" is supported here, and if so whether it
+        #: is currently on. ``None`` means not applicable, and the menu item is
+        #: then omitted rather than shown doing nothing.
+        self._startup = self._read_startup()
+
+    # ── start with Windows ────────────────────────────────────────────────
+    def _read_startup(self):
+        """Read the startup registration, or ``None`` where it does not apply.
+
+        Imported lazily and guarded: this runs on non-Windows hosts too, where
+        the Run key does not exist, and a tray that refused to start because a
+        Windows-only feature was unavailable would be a worse bug than the
+        missing menu item.
+        """
+        try:
+            from .startup import StartupManager
+
+            status = StartupManager().status()
+        except Exception as exc:  # noqa: BLE001 - never fatal
+            log.debug("startup status unavailable: %s", type(exc).__name__)
+            return None
+        if not status.supported:
+            return None
+        return status.enabled
+
+    def _toggle_startup(self) -> None:
+        """Turn start-at-sign-in on or off, and reflect the *real* result.
+
+        The state is re-read from the registry afterwards rather than assumed
+        from the request. A toggle that failed would otherwise show itself as
+        having succeeded, and the user would find out at the next reboot -- the
+        worst possible moment to discover it.
+        """
+        try:
+            from .startup import StartupManager
+
+            manager = StartupManager()
+            wanted = not bool(self._startup)
+            status = manager.enable() if wanted else manager.disable()
+        except Exception as exc:  # noqa: BLE001 - a failed toggle must not crash
+            log.warning("could not change the startup setting: %s", type(exc).__name__)
+            return
+
+        with self._lock:
+            self._startup = status.enabled if status.supported else None
+        if status.supported and status.enabled != wanted:
+            log.warning(
+                "the startup setting did not take effect (asked for %s, got %s)",
+                wanted,
+                status.enabled,
+            )
+        self._refresh_view()
+
     # ── rendering ─────────────────────────────────────────────────────────
     def tooltip(self, snapshot: MonitorSnapshot) -> str:
         return tooltip_for(snapshot)
 
     def build_menu(self) -> list[Action]:
-        return actions_for(self._service.snapshot, auto_refresh=self._auto_refresh)
+        return actions_for(
+            self._service.snapshot,
+            auto_refresh=self._auto_refresh,
+            startup_enabled=self._startup,
+        )
 
     def _pystray_menu(self):
         """Build the pystray menu from the pure-data action list."""
@@ -123,13 +180,24 @@ class TrayApp:
                     enabled=action.enabled,
                     default=action.default,
                     checked=(
-                        (lambda item: self._auto_refresh)
+                        (lambda item, aid=action.id: self._checked_state(aid))
                         if action.checked is not None
                         else None
                     ),
                 )
             )
         return pystray.Menu(*items)
+
+    def _checked_state(self, action_id: str) -> bool:
+        """Read a ticked menu item's state at render time, not build time.
+
+        pystray calls this on every menu display, so it must reflect the current
+        value -- a closure over the value at build time would freeze the tick
+        and make the toggle look broken.
+        """
+        if action_id == "startup":
+            return bool(self._startup)
+        return bool(self._auto_refresh)
 
     def _make_handler(self, action_id: str):
         """Wrap an action id in a pystray callback.
@@ -160,6 +228,8 @@ class TrayApp:
             if self._auto_refresh:
                 self._service.refresh_now()
             self._refresh_view()
+        elif action_id == "startup":
+            self._toggle_startup()
         elif action_id == "login":
             self._trigger_login()
         elif action_id == "launch_browser":

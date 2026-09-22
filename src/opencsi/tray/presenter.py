@@ -186,13 +186,26 @@ class Action:
     checked: bool | None = None
 
 
-def actions_for(snapshot: MonitorSnapshot, *, auto_refresh: bool = True) -> list[Action]:
+def actions_for(
+    snapshot: MonitorSnapshot,
+    *,
+    auto_refresh: bool = True,
+    startup_enabled: bool | None = None,
+) -> list[Action]:
     """The menu, in order, for the current state.
 
     The list is state-dependent on purpose. Offering "Renew session now" while
     the session is healthy invites a pointless OAuth round trip; offering
     nothing but "Sign in" when the *network* is down sends the user to fix the
     wrong thing.
+
+    ``startup_enabled`` is three-valued, and the third value is the important
+    one. ``True``/``False`` mean start-at-sign-in is supported and currently on
+    or off, so the item is shown with a tick. ``None`` means it is *not
+    applicable* -- a non-Windows host, or a Run key that cannot be read -- and
+    the item is omitted entirely. Showing an unchecked "start with Windows" on a
+    machine where it cannot work would be a control that silently does nothing,
+    which is worse than not offering it.
     """
     items: list[Action] = [
         Action("headline", headline_for(snapshot), enabled=False, default=True)
@@ -226,6 +239,8 @@ def actions_for(snapshot: MonitorSnapshot, *, auto_refresh: bool = True) -> list
     items.append(
         Action("autorefresh", "自动刷新", checked=auto_refresh)
     )
+    if startup_enabled is not None:
+        items.append(Action("startup", "开机自启动", checked=startup_enabled))
     items.append(Action("copy", "复制状态到剪贴板"))
     items.append(Action("sep2", "-", enabled=False))
     items.append(Action("quit", "退出"))

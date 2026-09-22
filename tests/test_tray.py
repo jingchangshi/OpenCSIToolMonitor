@@ -213,6 +213,38 @@ class ActionsTest(unittest.TestCase):
         ids = self._ids(_snap(credential_expires_in=600.0))
         self.assertIn("renew", ids)
 
+    def test_the_start_menu_item_is_omitted_where_it_cannot_work(self) -> None:
+        """§28 requires "Start with Windows"; §34 makes it Windows-only.
+
+        The three-valued parameter exists so a non-Windows host (or an unreadable
+        Run key) omits the item rather than showing a checkbox that silently
+        does nothing. A control that cannot act is worse than no control.
+        """
+        self.assertNotIn("startup", self._ids(_snap(), startup_enabled=None))
+
+    def test_the_start_menu_item_appears_with_its_real_state(self) -> None:
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                actions = actions_for(_snap(), startup_enabled=enabled)
+                item = next(a for a in actions if a.id == "startup")
+                self.assertEqual(item.checked, enabled)
+                self.assertTrue(item.enabled, "the item must be clickable")
+
+    def test_the_start_item_reflects_state_rather_than_offering_a_fixed_action(
+        self,
+    ) -> None:
+        """One item that toggles, not two items whose availability changes.
+
+        A menu whose entries appear and disappear is harder to use than one whose
+        tick moves, and the tick is what Windows' own Startup tab shows.
+        """
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                ids = self._ids(_snap(), startup_enabled=enabled)
+                self.assertEqual(ids.count("startup"), 1)
+                self.assertNotIn("startup_on", ids)
+                self.assertNotIn("startup_off", ids)
+
     def test_login_required_offers_sign_in(self) -> None:
         ids = self._ids(_snap(state=MonitorState.LOGIN_REQUIRED))
         self.assertIn("login", ids)
@@ -921,6 +953,114 @@ class TrayAppLogicTest(unittest.TestCase):
     def test_repr_is_secret_free(self) -> None:
         app, _service = self._app()
         self.assertIn("TrayApp", repr(app))
+
+    def test_the_startup_toggle_reads_back_the_real_registry_state(self) -> None:
+        """A toggle must report what happened, not what was requested.
+
+        Assuming success is how a failed write stays invisible until the next
+        reboot -- the worst possible moment to find out the tray does not start.
+        Here the write is scripted to *not* take effect, and the app must show
+        the true state rather than the intended one.
+        """
+        from unittest import mock
+
+        from opencsi.tray.startup import StartupStatus
+
+        app, _service = self._app()
+        app._startup = False
+
+        # enable() claims success but the registry still says disabled.
+        with mock.patch(
+            "opencsi.tray.startup.StartupManager.enable",
+            return_value=StartupStatus(supported=True, enabled=False),
+        ):
+            app._toggle_startup()
+
+        self.assertFalse(
+            app._startup, "the app trusted the request instead of the read-back"
+        )
+
+    def test_the_startup_toggle_reflects_a_successful_write(self) -> None:
+        from unittest import mock
+
+        from opencsi.tray.startup import StartupStatus
+
+        app, _service = self._app()
+        app._startup = False
+
+        with mock.patch(
+            "opencsi.tray.startup.StartupManager.enable",
+            return_value=StartupStatus(supported=True, enabled=True),
+        ):
+            app._toggle_startup()
+
+        self.assertTrue(app._startup)
+
+    def test_the_startup_toggle_turns_it_off_when_already_on(self) -> None:
+        from unittest import mock
+
+        from opencsi.tray.startup import StartupStatus
+
+        app, _service = self._app()
+        app._startup = True
+
+        with mock.patch(
+            "opencsi.tray.startup.StartupManager.disable",
+            return_value=StartupStatus(supported=True, enabled=False),
+        ) as disable:
+            app._toggle_startup()
+
+        disable.assert_called_once()
+        self.assertFalse(app._startup)
+
+    def test_a_failing_startup_toggle_does_not_break_the_tray(self) -> None:
+        """The Run key can be unreadable; that must not kill the message loop."""
+        from unittest import mock
+
+        app, _service = self._app()
+        app._startup = False
+
+        with mock.patch(
+            "opencsi.tray.startup.StartupManager.enable",
+            side_effect=OSError("registry unavailable"),
+        ):
+            app._toggle_startup()  # must not raise
+
+        self.assertFalse(app._startup, "the state changed without a successful write")
+
+    def test_a_checked_menu_item_reads_its_state_at_render_time(self) -> None:
+        """pystray calls the checked callback on every display.
+
+        A closure over the value at build time would freeze the tick, so the
+        toggle would look broken even though the registry had changed.
+        """
+        app, _service = self._app()
+        app._auto_refresh = True
+        app._startup = False
+
+        self.assertTrue(app._checked_state("autorefresh"))
+        self.assertFalse(app._checked_state("startup"))
+
+        app._auto_refresh = False
+        app._startup = True
+
+        self.assertFalse(app._checked_state("autorefresh"))
+        self.assertTrue(app._checked_state("startup"))
+
+    def test_an_unreadable_registry_omits_the_item_rather_than_guessing(self) -> None:
+        """No startup support -> no menu item, not a checkbox that does nothing."""
+        from unittest import mock
+
+        from opencsi.tray.startup import StartupStatus
+
+        with mock.patch(
+            "opencsi.tray.startup.StartupManager.status",
+            return_value=StartupStatus(supported=False, detail="only on Windows"),
+        ):
+            app, _service = self._app()
+
+        ids = [a.id for a in app.build_menu()]
+        self.assertNotIn("startup", ids)
 
 
 class NotificationTest(unittest.TestCase):
