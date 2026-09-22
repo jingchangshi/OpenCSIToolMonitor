@@ -270,7 +270,7 @@ def open_tab_in_debug_browser(
 
 
 def open_or_launch(
-    url: str, *, port: int = DEFAULT_DEBUG_PORT
+    url: str, *, port: int = DEFAULT_DEBUG_PORT, no_proxy: bool = False
 ) -> BrowserLaunch:
     """Open ``url`` in a readable browser, starting one if necessary.
 
@@ -278,8 +278,11 @@ def open_or_launch(
     caller has to remember the ordering, and so the "open a tab" and "start a
     browser" paths cannot drift apart -- the bug this whole module fixes was
     precisely a caller reaching for the wrong one.
+
+    ``no_proxy`` is forwarded to :func:`launch_debug_browser`; see there for why
+    it is off by default.
     """
-    result = launch_debug_browser(url, port=port)
+    result = launch_debug_browser(url, port=port, no_proxy=no_proxy)
     if result.status is BrowserLaunchStatus.ALREADY_RUNNING:
         # A browser is up but the page is not necessarily shown: launching is a
         # no-op in that case, so the tab has to be requested explicitly.
@@ -304,6 +307,7 @@ def launch_debug_browser(
     profile: Path | None = None,
     timeout: float = DEFAULT_LAUNCH_TIMEOUT,
     wait: bool = True,
+    no_proxy: bool = False,
 ) -> BrowserLaunch:
     """Start (or reuse) a browser whose DevTools endpoint this tool can use.
 
@@ -314,6 +318,22 @@ def launch_debug_browser(
 
     ``wait=False`` returns as soon as the process is spawned, for callers that
     would rather poll themselves.
+
+    ``no_proxy`` adds ``--no-proxy-server`` so Chrome ignores the system proxy.
+
+    **It defaults to off, and that is deliberate.** A system proxy is often the
+    only route out of a corporate network, so forcing a bypass would break the
+    browser for those users to fix it for others. But the failure it addresses is
+    real and was measured on this project's own machine: a proxy at
+    ``127.0.0.1:7890`` passed ``gitcode.com`` and failed TLS for
+    ``opencsitool.com``, so the login page could not load at all. Because that is
+    indistinguishable from "the site is down", the caller is expected to surface
+    ``--no-proxy`` as the remedy rather than the user having to guess.
+
+    The same reasoning applies to :class:`~opencsi.auth.http_oauth.HttpOAuthRenewer`,
+    which bypasses the proxy by default -- the two differ because a *renewal* has
+    a working fallback and a *first sign-in* does not, so the safe default is
+    opposite in each case.
     """
     profile_dir = profile or dedicated_profile_dir()
 
@@ -363,8 +383,10 @@ def launch_debug_browser(
         # shutdown, which sits on top of the login page the user was sent to.
         "--no-first-run",
         "--no-default-browser-check",
-        url,
     ]
+    if no_proxy:
+        argv.append("--no-proxy-server")
+    argv.append(url)
 
     try:
         # Detached on purpose: the browser must outlive this process, which for

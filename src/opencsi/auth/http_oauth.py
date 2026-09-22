@@ -481,6 +481,41 @@ class HttpOAuthRenewer:
             "Referer": "https://gitcode.com/" if gitcode else f"{self._base_url}/myTools",
         }
 
+    def _proxy_for(self, url: str) -> str | None:
+        """The proxy that would be used for ``url``, if any (never with credentials).
+
+        Mirrors :meth:`opencsi.transport.HttpTransport.proxy_for`, and for the
+        same reason: an SSL failure through a local proxy looks exactly like a
+        server fault and says nothing about the proxy, which sends people off to
+        investigate the wrong thing.
+
+        This is not hypothetical. On the machine this was developed on, a system
+        proxy at ``127.0.0.1:7890`` passed ``gitcode.com`` and failed TLS for
+        ``opencsitool.com``, so *silent renewal was broken by the proxy setting
+        alone*, independent of anything in the auth code. Naming the proxy in the
+        message is what turns that from an unexplained TLS error into a one-flag
+        fix.
+        """
+        if not self._use_proxy:
+            return None
+        raw = urllib.request.getproxies().get("https") or urllib.request.getproxies().get("http")
+        if not raw:
+            return None
+        try:
+            if urllib.request.proxy_bypass(urllib.parse.urlsplit(url).hostname or ""):
+                return None
+        except (OSError, ValueError):
+            pass
+        # Strip any ``user:password@``: this string reaches logs and bug reports.
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+        except ValueError:
+            return raw
+        if not parsed.hostname:
+            return raw
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{parsed.hostname}{port}"
+
     def _request(
         self,
         opener: urllib.request.OpenerDirector,
@@ -510,9 +545,20 @@ class HttpOAuthRenewer:
             return status, head, body
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)
-            raise NetworkError(f"could not reach {_host_path(url)} ({type(reason).__name__})") from exc
+            raise NetworkError(self._transport_message(url, type(reason).__name__)) from exc
         except (TimeoutError, OSError) as exc:
-            raise NetworkError(f"the request to {_host_path(url)} timed out") from exc
+            raise NetworkError(self._transport_message(url, type(exc).__name__)) from exc
+
+    def _transport_message(self, url: str, kind: str) -> str:
+        """A transport failure that names the proxy when one was involved."""
+        message = f"could not reach {_host_path(url)} ({kind})"
+        proxy = self._proxy_for(url)
+        if proxy:
+            message += (
+                f" (via proxy {proxy}). If that proxy cannot reach opencsitool.com, "
+                "retry with --no-proxy."
+            )
+        return message
 
     def _run_flow(
         self,

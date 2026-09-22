@@ -26,17 +26,24 @@ import argparse
 import getpass
 import os
 import time
+from dataclasses import dataclass
+from typing import Any
 
 from ..auth import (
     BrowserOAuthRenewer,
     CdpCookieProvider,
     ManualCookieProvider,
+    RenewalResult,
     RenewalStatus,
     SessionManager,
 )
+from ..auth.gitcode_bridge import BridgeResult, BridgeStatus
+from ..auth.session import LoginStage
+from ..client import BASE_URL
 from ..errors import (
     EXIT_INTERRUPTED,
     EXIT_NETWORK_ERROR,
+    EXIT_OPENCSITOOL_PENDING,
     EXIT_QR_PROTOCOL,
     EXIT_SESSION_EXPIRED,
     EXIT_USAGE,
@@ -45,8 +52,8 @@ from ..errors import (
     exit_code_for,
 )
 from ..formatting import format_relative_seconds, render_kv, section
-from ..redaction import register_secret
-from .context import CliContext, add_common_options
+from ..redaction import register_secret, scrub_text
+from .context import ENV_CDP_URL, CliContext, add_common_options
 
 LOGIN_URL = "https://opencsitool.com/myTools"
 POLL_INTERVAL = 2.0
@@ -75,8 +82,12 @@ def _qr_exit_codes() -> dict:
     mapping is still a single named source of truth, so a test can assert it is
     exhaustive the same way ``_RENEWAL_EXIT`` is.
 
-    ``SUCCEEDED`` is deliberately absent: the success path returns 0 before
-    consulting the map.
+    ``SUCCEEDED`` is deliberately absent. A successful QR login does not get its
+    exit code from this map at all: it gets 0 only if the *second* half -- the
+    openCsiTool session -- also completed, and
+    :data:`~opencsi.errors.EXIT_OPENCSITOOL_PENDING` if it did not. Mapping
+    ``SUCCEEDED`` here would re-introduce the defect this table was split to fix,
+    by giving "GitCode said yes" the same code as "the login is done".
     """
     from ..auth.gitcode_qr import QrLoginStatus
 
@@ -172,25 +183,54 @@ def run(ctx: CliContext) -> int:
 
 # ── QR mode ───────────────────────────────────────────────────────────────
 def _qr(ctx: CliContext) -> int:
-    """Sign in by scanning a WeChat code, without a browser.
+    """Sign in by scanning a WeChat code, then complete openCsiTool automatically.
 
-    This is the *interactive* half of the new authentication architecture. It
-    obtains a GitCode session over plain HTTP -- verified reproducible against
-    the real protocol (docs/gitcode-qr-protocol.md).
+    This command has two halves and it used to report only the first one.
 
-    Two honest limits, both established by decoding a real code rather than by
-    assuming:
+    .. code-block::
+
+        POST /qrcode/wechat_mini_program      ─┐
+        GET  /qrcode/wechat_mini_program       ├─ half one: plain HTTP, no browser
+        POST /oauth/login/qrcode/...          ─┘   -> GitCode credential
+                    │
+                    ▼
+        plant that credential in a dedicated profile,
+        then run openCsiTool's OAuth leg in a hidden engine
+                    │
+                    ▼
+        GET /opencsitool/rest/v1/user/getUserInfo -> 200   <- half two
+
+    Half one always worked. Half two is the part that decides whether
+    ``opencsi usage`` will work afterwards, and the old code did not attempt it
+    at all: it printed "run 'opencsi login' in a browser" and exited **0**. That
+    exit code was the defect. It told a script the login had succeeded when the
+    session it needs did not exist, and it told a human nothing was left to do
+    when something was.
+
+    Now half two is attempted, and the exit code says which half actually
+    finished:
+
+    ======  ==========================================================
+    Code    Meaning
+    ======  ==========================================================
+    0       ``getUserInfo`` answered -- the whole login is done
+    34      GitCode authenticated, openCsiTool did not (partial success)
+    13      the QR expired, timed out, or was cancelled
+    30/33   a network or protocol failure
+    ======  ==========================================================
+
+    Only code 0 is allowed to mean "try ``opencsi usage`` now".
+
+    Two limits are established by measurement rather than assumption, and both
+    are stated in the output rather than hidden:
 
     * GitCode's ``qrcode`` field is a **WeChat mini-program code**, not a QR
       code. Its dots are finer than a terminal cell, so a terminal rendering
-      cannot be scanned. The code is therefore written to a file at full
-      resolution and the user is pointed at it; the terminal drawing is a
-      preview so they can see it loaded.
-    * openCsiTool's own ``token`` cookie is issued by its OAuth callback, which
-      needs a browser session. A GitCode session alone does not mint it.
-
-    So this command's success criterion is "GitCode signed in", and it says
-    plainly what still needs the browser afterwards.
+      cannot be scanned; the full-resolution image is written to a file and the
+      user is pointed at it.
+    * the openCsiTool leg needs a browser *engine* (GitCode's authorize page is
+      a client-rendered SPA), but not a browser *window*. Half two therefore
+      runs in the hidden host from :mod:`opencsi.auth.auth_host`.
     """
     from ..auth.gitcode_qr import GitCodeQrAuthenticator, QrLoginStatus, QrStatus
     from ..auth.qr_render import decode_payload_image, render_payload, write_image
@@ -265,8 +305,268 @@ def _qr(ctx: CliContext) -> int:
     )
 
     cookies = authenticator.session_cookies()
-    payload = {
-        "ok": result.ok,
+
+    if not result.ok:
+        payload = {
+            "ok": False,
+            "stage": LoginStage.NONE.value,
+            "complete": False,
+            "qr_login": result.as_dict(),
+            "display": {
+                "mode": rendered.get("mode"),
+                "path": rendered.get("path"),
+                "scannable": rendered.get("scannable", False),
+                "note": rendered.get("detail"),
+            },
+        }
+
+        def render_failure() -> None:
+            ctx.err("")
+            ctx.err(f"error: QR sign-in did not complete ({result.status.value}).")
+            if result.detail:
+                ctx.err(f"       {result.detail}")
+
+        ctx.emit(payload, render_failure)
+        return qr_exit.get(result.status, 1)
+
+    # ── half two: turn the GitCode credential into an openCsiTool session ──
+    completion = _complete_qr_login(ctx, result)
+    payload = _qr_payload(ctx, result, rendered, cookies, completion)
+
+    def render_success() -> None:
+        ctx.err("")
+        ctx.err("GitCode sign-in complete.")
+        if result.username:
+            ctx.out(f"GitCode user: {result.username}")
+        if result.is_new_user is not None:
+            ctx.out(f"New GitCode account: {'yes' if result.is_new_user else 'no'}")
+        if cookies:
+            ctx.out("GitCode session cookies received: " + ", ".join(sorted(cookies)))
+        _render_completion(ctx, completion)
+
+    ctx.emit(payload, render_success)
+
+    if completion.identity is not None:
+        return 0
+    return EXIT_OPENCSITOOL_PENDING
+
+
+@dataclass
+class _Completion:
+    """How far the second half of a QR login got.
+
+    A plain data holder rather than a tuple so every field is named at the point
+    it is read: this is the structure the command's success semantics hang on,
+    and ``(a, b, c, d)`` would make it easy to read the wrong one.
+    """
+
+    #: The verified openCsiTool identity, when ``getUserInfo`` answered.
+    identity: Any = None
+    #: Whether the credential was planted into a browser profile.
+    bridged: bool = False
+    #: Why the second half stopped, in the user's words.
+    reason: str | None = None
+    #: An actionable next step, when there is one.
+    next_step: str | None = None
+    #: The bridge outcome, for ``--json``.
+    bridge: BridgeResult | None = None
+    #: The renewal outcome, for ``--json``.
+    renewal: RenewalResult | None = None
+
+
+def _complete_qr_login(ctx: CliContext, result) -> "_Completion":
+    """Attempt the openCsiTool half of a QR login. Never raises.
+
+    Three steps, each of which can stop the flow, and each of which is reported
+    for what it is rather than collapsed into "login failed":
+
+    1. **bridge** -- plant the GitCode credential in the dedicated profile and
+       verify it against a *known authenticated* endpoint, because a cookie
+       written into a jar is not the same thing as a session the server accepts.
+    2. **start the hidden engine** -- the openCsiTool leg needs something that
+       executes GitCode's SPA.
+    3. **renew** -- run the OAuth round-trip the tool already performs every
+       hour, then confirm the result with ``getUserInfo``.
+
+    Step 3's confirmation is the only thing that may set ``identity``. A renewal
+    that reports ``RENEWED`` without ``getUserInfo`` agreeing is not treated as
+    success anywhere in this project, and this path is no exception.
+    """
+    completion = _Completion()
+
+    credentials = dict(result.credentials())
+    if not credentials:
+        completion.reason = (
+            "GitCode signed in but returned no credential this tool can use to "
+            "establish the openCsiTool session."
+        )
+        completion.next_step = (
+            "run 'opencsi login' to sign in through a browser instead"
+        )
+        return completion
+
+    # ── step 1: bridge ────────────────────────────────────────────────────
+    from ..auth.gitcode_bridge import GitCodeBrowserSessionBridge
+
+    try:
+        bridge = GitCodeBrowserSessionBridge(cdp_url=ctx.args.cdp)
+    except Exception as exc:  # noqa: BLE001 - a construction failure must not abort
+        completion.reason = f"could not prepare the credential bridge ({type(exc).__name__})"
+        return completion
+
+    # The bridge needs a profile to plant into. If no browser is running at all,
+    # the hidden host below creates one -- so the bridge is attempted against
+    # whatever endpoint exists, and a missing one is not fatal here.
+    bridge_result = bridge.bridge(
+        credentials,
+        username=result.username,
+        verify=_gitcode_verification_enabled(),
+    )
+    completion.bridge = bridge_result
+    completion.bridged = bridge_result.status in (
+        BridgeStatus.BRIDGED,
+        BridgeStatus.UNVERIFIED,
+    )
+
+    if bridge_result.status is BridgeStatus.REJECTED:
+        completion.reason = (
+            "GitCode rejected the credential this QR login returned, so the "
+            "openCsiTool session cannot be established from it."
+        )
+        completion.next_step = "run 'opencsi login --qr' again to get a fresh code"
+        return completion
+
+    if not completion.bridged and bridge_result.status is not BridgeStatus.CDP_UNAVAILABLE:
+        completion.reason = bridge_result.detail or "the credential could not be bridged"
+        completion.next_step = "run 'opencsi login' to sign in through a browser"
+        return completion
+
+    # ── step 2 + 3: hidden engine, then the OAuth round-trip ──────────────
+    _run_oauth_completion(ctx, completion)
+    return completion
+
+
+def _gitcode_verification_enabled() -> bool:
+    """Whether the bridge may ask GitCode to confirm the session.
+
+    On by default, because an unverified bridge is exactly the kind of
+    unconfirmed claim this objective exists to remove. It can be switched off for
+    an offline environment, and doing so produces ``UNVERIFIED`` -- never
+    ``BRIDGED``.
+    """
+    return os.environ.get("OPENCSI_SKIP_GITCODE_VERIFY", "").strip() not in ("1", "true", "yes")
+
+
+def _run_oauth_completion(ctx: CliContext, completion: "_Completion") -> None:
+    """Start the hidden engine and run one OAuth round-trip into ``completion``."""
+    from ..auth.auth_host import AuthBrowserHost
+
+    # Prefer the endpoint the user configured; otherwise bring up the hidden one.
+    endpoint_url = ctx.args.cdp or os.environ.get(ENV_CDP_URL) or None
+    host: AuthBrowserHost | None = None
+
+    if endpoint_url is None:
+        host = AuthBrowserHost()
+        host_result = host.ensure_running()
+        if not host_result.ok:
+            completion.reason = (
+                host_result.detail
+                or "the hidden authentication engine could not be started"
+            )
+            completion.next_step = (
+                "install Chrome or Edge, or run 'opencsi login' with a browser "
+                "started with --remote-debugging-port"
+            )
+            return
+        if host_result.visible:
+            # Say it plainly. A caller that asked for a hidden engine and got a
+            # window must not be told the browser is invisible.
+            ctx.err(
+                "note: this browser build has no headless mode, so the "
+                "authentication engine was started in a visible window."
+            )
+        endpoint_url = f"http://127.0.0.1:{host_result.port}"
+
+    try:
+        provider = CdpCookieProvider(cdp_url=endpoint_url)
+        renewer = BrowserOAuthRenewer(provider, base_url=ctx.args.base_url or BASE_URL)
+        session = SessionManager(provider, renewer=renewer)
+        renewal = session.renew(force=True)
+    except OpenCsiError as exc:
+        completion.reason = scrub_text(str(exc))[:300]
+        completion.next_step = exc.hint
+        return
+    except Exception as exc:  # noqa: BLE001 - the flow must report, not crash
+        completion.reason = f"the OAuth round-trip failed ({type(exc).__name__})"
+        return
+
+    completion.renewal = renewal
+
+    if not renewal.ok:
+        completion.reason = _renewal_reason(renewal)
+        completion.next_step = _renewal_next_step(renewal)
+        return
+
+    # The renewal says a cookie landed. That is not the same as the *session*
+    # working, so it is confirmed with a real request -- the same standard the
+    # rest of the project holds itself to.
+    try:
+        client = ctx.make_client(provider=CdpCookieProvider(cdp_url=endpoint_url), renew=False)
+        completion.identity = client.login_or_restore_session(refresh=True)
+    except OpenCsiError as exc:
+        completion.reason = (
+            "a new cookie was issued but openCsiTool did not accept it: "
+            + scrub_text(str(exc))[:200]
+        )
+        completion.next_step = exc.hint or "run 'opencsi doctor' for the connection details"
+        return
+
+    if completion.identity is None:
+        completion.reason = "a new cookie was issued but the session could not be confirmed"
+
+
+def _renewal_reason(renewal: RenewalResult) -> str:
+    """The renewal outcome, in the user's words. Never a token."""
+    if renewal.status is RenewalStatus.CONSENT_REQUIRED:
+        return (
+            "GitCode is waiting for the OpenCsitool authorisation to be confirmed. "
+            "This is not a sign-in problem: the GitCode session is alive."
+        )
+    if renewal.status is RenewalStatus.LOGIN_REQUIRED:
+        return "the GitCode session did not carry over to the browser profile"
+    if renewal.status is RenewalStatus.CDP_UNAVAILABLE:
+        return "no browser engine was reachable to run the OAuth leg"
+    return f"the OAuth round-trip did not complete ({renewal.status.value})"
+
+
+def _renewal_next_step(renewal: RenewalResult) -> str | None:
+    if renewal.status is RenewalStatus.CONSENT_REQUIRED:
+        return f"open {LOGIN_URL} and approve it once; no sign-in is needed"
+    if renewal.status is RenewalStatus.LOGIN_REQUIRED:
+        return "run 'opencsi login' and sign in at " + LOGIN_URL
+    return None
+
+
+def _qr_payload(
+    ctx: CliContext,
+    result,
+    rendered: dict,
+    cookies: dict,
+    completion: "_Completion",
+) -> dict:
+    """The ``--json`` document for a QR login, at whichever stage it reached."""
+    established = completion.identity is not None
+    stage = (
+        LoginStage.OPENCSITOOL_AUTHENTICATED
+        if established
+        else LoginStage.OPENCSITOOL_PENDING
+        if completion.bridged
+        else LoginStage.GITCODE_AUTHENTICATED
+    )
+    payload: dict[str, object] = {
+        "ok": established,
+        "complete": established,
+        "stage": stage.value,
         "qr_login": result.as_dict(),
         "display": {
             "mode": rendered.get("mode"),
@@ -275,44 +575,53 @@ def _qr(ctx: CliContext) -> int:
             "note": rendered.get("detail"),
         },
         "gitcode_session_cookies": sorted(cookies),
+        "bridge": completion.bridge.as_dict() if completion.bridge else None,
+        "renewal": completion.renewal.as_dict() if completion.renewal else None,
         "openscitool_session": {
-            "established": False,
-            "next_step": (
-                "openCsiTool's token cookie is issued by its own OAuth callback, "
-                "which needs a browser session. Run 'opencsi login' (or "
-                "'opencsi login --renew') with a browser signed in to GitCode."
-            ),
+            "established": established,
+            "user_name": getattr(completion.identity, "user_name", None),
+            "employee_id": getattr(completion.identity, "employee_id", None),
+            "reason": completion.reason,
+            "next_step": completion.next_step,
         },
     }
+    if established:
+        payload["exit_code"] = 0
+    else:
+        payload["exit_code"] = EXIT_OPENCSITOOL_PENDING
+    return payload
 
-    def render() -> None:
-        if result.ok:
-            ctx.err("")
-            ctx.err("GitCode sign-in complete.")
-            if result.username:
-                ctx.out(f"GitCode user: {result.username}")
-            if result.is_new_user is not None:
-                ctx.out(f"New GitCode account: {'yes' if result.is_new_user else 'no'}")
-            if cookies:
-                ctx.out("GitCode session cookies received: " + ", ".join(sorted(cookies)))
-            ctx.blank()
-            ctx.out(
-                "Next: openCsiTool's session cookie comes from its own OAuth "
-                "callback, so run 'opencsi login' in a browser signed in to "
-                "GitCode. 'opencsi login --renew' will then keep it alive "
-                "without further prompts."
+
+def _render_completion(ctx: CliContext, completion: "_Completion") -> None:
+    """Say what the second half did, and what is left, without overclaiming."""
+    if completion.identity is not None:
+        ctx.blank()
+        ctx.out("openCsiTool session established and verified.")
+        ctx.out(
+            render_kv(
+                [
+                    ("User", completion.identity.display_name),
+                    ("Employee", completion.identity.employee_id),
+                ]
             )
-        else:
-            ctx.err("")
-            ctx.err(f"error: QR sign-in did not complete ({result.status.value}).")
-            if result.detail:
-                ctx.err(f"       {result.detail}")
+        )
+        ctx.blank()
+        ctx.out("Try: opencsi usage")
+        return
 
-    ctx.emit(payload, render)
-
-    if result.ok:
-        return 0
-    return qr_exit.get(result.status, 1)
+    ctx.err("")
+    ctx.err(
+        "warning: GitCode sign-in succeeded, but the openCsiTool session was not "
+        "established."
+    )
+    if completion.reason:
+        ctx.err(f"       {completion.reason}")
+    if completion.next_step:
+        ctx.err(f"       -> {completion.next_step}")
+    ctx.err(
+        "       'opencsi usage' will not work until that session exists; this "
+        f"command exits {EXIT_OPENCSITOOL_PENDING} rather than 0 to say so."
+    )
 
 
 # ── status mode ───────────────────────────────────────────────────────────
@@ -440,6 +749,11 @@ def _renew(ctx: CliContext) -> int:
     before = provider.status()
     result = session.renew(force=True)
     evidence = getattr(renewer, "last_evidence", None)
+    # Which mechanism actually ran. Reported because "renewal succeeded" is not
+    # the whole answer once there is more than one way to do it: whether the
+    # browser was needed is exactly the question this project spent a long time
+    # getting wrong, and a report that omits it cannot settle it.
+    mechanism = getattr(renewer, "last_mechanism", None) or getattr(renewer, "name", None)
 
     # A renewal that reports success is only credible if the server agrees, so
     # verify with a real request rather than trusting the cookie's presence.
@@ -458,6 +772,7 @@ def _renew(ctx: CliContext) -> int:
         "renewal": result.as_dict(),
         "before": before.as_dict(),
         "verified": verified,
+        "mechanism": mechanism,
         "evidence": evidence.as_dict() if evidence else None,
     }
     if verify_error is not None:
@@ -466,6 +781,8 @@ def _renew(ctx: CliContext) -> int:
     def render() -> None:
         ctx.out(section("Session renewal"))
         ctx.out(render_kv([("Outcome", result.status.value)]))
+        if mechanism:
+            ctx.out(render_kv([("Mechanism", mechanism)]))
         if result.detail:
             ctx.out(render_kv([("Detail", result.detail)]))
         rows = [("Cookie lifetime before", format_relative_seconds(before.expires_in))]
@@ -535,7 +852,9 @@ def _open_a_readable_browser(ctx: CliContext) -> None:
     """
     from ..auth.browser_launch import BrowserLaunchStatus, launch_debug_browser
 
-    result = launch_debug_browser(LOGIN_URL)
+    result = launch_debug_browser(
+        LOGIN_URL, no_proxy=bool(getattr(ctx.args, "no_proxy", False))
+    )
 
     if result.status is BrowserLaunchStatus.LAUNCHED:
         ctx.err(
@@ -557,6 +876,14 @@ def _open_a_readable_browser(ctx: CliContext) -> None:
         if result.detail:
             ctx.err(f"       {result.detail}")
         ctx.err(f"       {LOGIN_URL}")
+        # A system proxy that cannot reach opencsitool.com produces a page that
+        # simply never loads -- indistinguishable from the site being down. The
+        # flag that fixes it is not guessable, so it is named here.
+        if not getattr(ctx.args, "no_proxy", False):
+            ctx.err(
+                "       if the page will not load, a system proxy may be blocking "
+                "opencsitool.com; retry with --no-proxy."
+            )
 
 
 def _browser(ctx: CliContext) -> int:
