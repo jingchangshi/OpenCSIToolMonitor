@@ -20,7 +20,7 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 | 2 | **QR → openCsiTool auth** | `BROWSERLESS_LOGIN_ACHIEVABLE` | Credential of exactly the shape a scan returns established and verified a session. **No browser engine at any point.** |
 | 3 | **Silent renewal** | `WORKING` — verified live, both binaries | `RENEWED`, `Server accepted it : yes`, exit 0. Persists across processes. |
 | 4 | **Browserless OAuth** | `PURE_HTTP_OAUTH_FEASIBLE` | Independently reproduced three times (twice by me, once by a separate investigation). |
-| 5 | **Hidden auth runtime** | `IMPLEMENTED` + **now wired into the monitor**; **cannot start on this machine** | Headless works here (`HeadlessChrome/153.0.0.0`), but the capability *probe* misjudges this build, so the host is refused before launch. Profile persistence proven; the full renew cycle is **not** — see §9c and below. |
+| 5 | **Hidden auth runtime** | **`WORKING`** — hidden engine verified on screen, wired into the monitor | `STARTED` / `HEADLESS` / **zero visible windows**, `describe()` reports "no user-visible window". §61's condition is met. Profile persistence proven; the full renew cycle is **not** — see below. |
 | 6 | **Windows tray** | `WORKING` | `--once` returns real data; `--check` builds a 7-item menu; QR login wired. |
 | 7 | **Startup** | `WORKING` — full round-trip verified | Frozen binary resolves its own sibling, and reports `frozen-cli-tray` rather than claiming to be the tray. Registry install/remove verified and reverted. |
 | 8 | **CI** | `WRITTEN` / **never run on a CI runner** | Workflow is complete and every step was rehearsed locally; no GitHub runner executed it. |
@@ -42,12 +42,11 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
   cycle depends on — profile persistence — by a repeated A/B measurement
   (`tools/probe_auth_host_persistence.py`). The distinction matters: persistence
   is necessary for the cycle, not equivalent to it.
-- **§30's post-reboot flow was not observed end to end on this machine.** The
-  monitor now tries the hidden host first and refuses a visible fallback before
-  launching it — both verified — but on this machine the hidden host cannot start,
-  so the flow stops one step short. What is claimed is the wiring and the refusal;
-  what is not is that a hidden engine appears. The two are different, and §9c
-  separates them.
+- **§30's post-reboot flow was not observed across a real sign-out.** The hidden
+  engine itself is verified: the monitor brings it up with no browser started by
+  hand, it reports `HEADLESS`, and no window appears. What was not done is a
+  genuine Windows sign-out and sign-in, so the *scheduled* half of the flow rests
+  on §67's simulated registry round trip rather than on a real logon.
 
 ---
 
@@ -55,7 +54,7 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 
 ```text
 starting HEAD   0637051  docs: make §12 usable, since that is the section a user actually reads
-ending HEAD     5a092e7  fix(auth-host): stop the headless probe leaking a browser per call
+ending HEAD     0a58e44  fix(auth-host): two probes that were wrong in opposite directions
 ```
 
 `ending HEAD` names the last commit that changed **source, tests or tools**, not
@@ -63,7 +62,7 @@ the true tip. A report cannot contain its own SHA — writing it would change th
 hash — so the anchor is the last behavioural change, which is what a reader needs
 to check out.
 
-Twenty-four commits below, each a real work item; the commits that carry this
+Twenty-six commits below, each a real work item; the commits that carry this
 report are additional and are not listed, for the same reason:
 
 ```text
@@ -91,10 +90,11 @@ eb61b0a  report: record the auth-host defect, and correct three claims that were
 b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 asks
 3bfb3c7  report: section 9c, and correct a verdict row that was no longer true
 5a092e7  fix(auth-host): stop the headless probe leaking a browser per call
+0a58e44  fix(auth-host): two probes that were wrong in opposite directions
 ```
 
 ```text
-45 files changed, 10928 insertions(+), 143 deletions(-)   (excluding this report and docs/goal.md)
+45 files changed, 11187 insertions(+), 143 deletions(-)   (excluding this report and docs/goal.md)
 ```
 
 Code, tests, tools and docs — this report and `docs/goal.md` account for the
@@ -102,8 +102,8 @@ remaining lines of the 45-file total.
 
 | Metric | Before | After |
 | --- | --- | --- |
-| pytest | 750 passed, 1 skipped, 125 subtests | **852 passed, 1 skipped, 182 subtests** |
-| unittest | Ran 751, OK (skipped=1) | **Ran 853, OK (skipped=1)** |
+| pytest | 750 passed, 1 skipped, 125 subtests | **857 passed, 1 skipped, 182 subtests** |
+| unittest | Ran 751, OK (skipped=1) | **Ran 858, OK (skipped=1)** |
 
 The behavioural change, stated as the user experiences it:
 
@@ -443,11 +443,16 @@ From Windows sign-in to `OK`:
        |
        +-- no browser answering?
        |     -> recovery, hidden first (objective §30):
-       |          AuthBrowserHost(headless=True)   <-- no window; refused if it
-       |                                             would fall back to visible
+       |          AuthBrowserHost(headless=True)   <-- starts hidden, opens no
+       |                                             window; refused before launch
+       |                                             if it would fall back to visible
        |          launch_debug_browser()           <-- only with
        |                                             --auto-recover-browser
-       |     -> if neither, state BROWSER_UNAVAILABLE (its own label, not "sign in")
+       |     -> engine up but its profile has no token:
+       |          state LOGIN_REQUIRED              <-- the honest label: the
+       |                                             browser is no longer the problem
+       |     -> no engine at all:
+       |          state BROWSER_UNAVAILABLE
        |     -> menu offers, in order:
        |          "扫码登录（无需浏览器）"   <-- default; needs no browser
        |          "Sign in..."             (non-default)
@@ -631,7 +636,7 @@ kept.
 
 ---
 
-## 9c. The hidden auth host was never wired in
+## 9c. The hidden auth host: never wired in, then wired in and still broken
 
 §30 gives the flow a signed-in Windows user should get:
 
@@ -687,32 +692,97 @@ test fails; a live probe confirms the behaviour on this desktop — with the gua
 nothing starts and the state stays `BROWSER_UNAVAILABLE`; without it, a window
 appeared during the probe run.
 
-### What still does not work here, stated plainly
+### Why it *still* did not work after being wired in, and the two bugs behind that
 
-On this machine the hidden path still cannot complete, because
-`_headless_supported` answers "unsupported" for Chrome 153. The probe asks
-`chrome --headless=new --version`, and on that build the combination neither
-rejects the flag nor prints a version — it **hangs**, so the fifteen-second
-timeout fires. Headless itself is fine: the same binary launched with
-`--headless=new --remote-debugging-port=…` answers `/json/version` with
-`HeadlessChrome/153.0.0.0`.
+Wiring the host in was necessary but not sufficient, and the reason is worth
+recording because it is the most instructive pair of defects in this report: both
+were in code that asks the browser a question, and both were invisible to tests
+that checked the *answers* and never the *questions*.
 
-The probe was **left in place rather than replaced**, and that is a deliberate
-choice about evidence rather than a preference. A launch-based replacement could
-not be verified here: every Chromium started from a Python child process on this
-machine exits immediately with status 0 — a sandbox artefact, since the identical
-launch from a shell works — so a probe that depends on starting one cannot be
-shown to work. Shipping an unverified probe that spawns browsers is worse than
-keeping a slow one that is merely pessimistic, because the pessimistic answer
-fails *safe*: it falls back to a visible window instead of claiming a hidden
-engine that is not there.
+**The capability probe asked a question that hangs.** `_headless_supported` ran
+`chrome --headless=new --version`. On Chrome 153 that neither rejects the flag nor
+prints a version — it hangs, so the fifteen-second timeout fired and a build with
+working headless support was reported as having none. With
+`visible_fallback=False`, the host then refused to launch at all. The measurement
+that proved headless worked all along: the same binary with
+`--headless=new --remote-debugging-port=…` answers `HeadlessChrome/153.0.0.0`.
 
-So §30's flow is now **wired correctly and verified up to the point this machine
-allows**. What is claimed: the monitor tries the hidden host, refuses a visible
-fallback before launching it, rate-limits both, and reports honestly. What is not
-claimed: that a hidden host actually comes up on this machine — it does not, for
-the probe reason above, and the report says so instead of reporting the wiring as
-the outcome.
+**The mode probe read the field that does not carry the marker.** `_probe_mode`
+read `Browser.getVersion`'s `product` and searched it for `"Headless"`. On this
+build:
+
+```text
+product    Chrome/153.0.8010.53
+userAgent  Mozilla/5.0 (Windows NT 10.0; Win64; x64) … HeadlessChrome/153.0.0.0 …
+```
+
+So *every* headless browser was reported `VISIBLE`. That is the opposite error
+from the first and worse in effect: the host ran hidden while telling the user —
+and the tray — that a window was on their screen, and a caller that had asked for
+no window rejected its own perfectly good host.
+
+### The measurement error underneath both of them
+
+An earlier round concluded that launching a browser from Python was broken on this
+machine, because every launch exited `rc=0` in about a second with empty output.
+That conclusion was wrong, and the way it was wrong is the same mistake in a third
+costume: **the launcher is not the browser.** Chromium hands the work to a child
+and exits immediately. Watching the launcher's exit code measures the hand-off,
+not the browser.
+
+Re-measured with a control — the same binary with and without `--headless=new`:
+
+| launch | launcher exit | user agent | visible windows |
+| --- | --- | --- | --- |
+| `--headless=new` | `rc=0` in 0.1s | `HeadlessChrome/153.0.0.0` | **0** |
+| no flag (control) | `rc=0` in 0.1s | `Chrome/153.0.0.0` | 1 |
+
+The flag demonstrably works, the control proves the user agent can tell the two
+apart, and the browser answers its debug port 0.5s after the launcher has gone.
+
+The replacement probe asks the browser to *do* something headless and checks the
+artifact: `--screenshot` leaves a PNG, and a PNG has an eight-byte signature, so
+the check is exact rather than a substring search. The exit code is deliberately
+**not** the evidence — every candidate exits 0, including `--dump-dom`, which
+produced no output at all.
+
+| probe | artifact | visible windows | wall time |
+| --- | --- | --- | --- |
+| `--version` (old) | never | 0, but leaked 11 processes | 15s timeout |
+| `--dump-dom` | 0/3 | 0 | 0.12s |
+| `--screenshot` (new) | **3/3** | 0 | 0.12s |
+| `--print-to-pdf` | 3/3 | 0 | 0.12s |
+
+My first version of the replacement had the same bug in miniature, which is why it
+is worth stating: it called `process.wait()`, which returns in 0.1s when the
+launcher exits, and then killed the tree — destroying the browser *before* it could
+write the screenshot it was being asked for. It answered "unsupported" on a build
+where headless works. It now waits for the artifact, bounded by the same budget.
+
+### The result, verified on screen rather than inferred
+
+```text
+AuthBrowserHost(visible_fallback=False).ensure_running()
+    status   STARTED
+    mode     HEADLESS
+    headless True
+    describe() "hidden Chromium authentication engine (no user-visible window)"
+    visible windows on screen: 0
+
+MonitorService._try_auth_host()          -> True, 8 engine processes, 0 windows
+opencsi tray --once                      -> LOGIN_REQUIRED
+```
+
+`LOGIN_REQUIRED` is the correct and honest outcome: the engine is up and hidden,
+and its fresh profile holds no `token` cookie, because no first sign-in has ever
+been completed in it. That is a different statement from `BROWSER_UNAVAILABLE`,
+and the difference is exactly what §61 asked for — the browser is no longer the
+reason the tool cannot proceed.
+
+So §30's flow is **wired correctly and verified through the hidden engine coming
+up**. What is claimed: the monitor starts the host, gets a headless engine, opens
+no window, rate-limits both recovery paths, and reports its state truthfully. What
+is not claimed: that a real Windows sign-out and sign-in was performed — see §12.
 
 ### A process mistake worth recording
 
@@ -770,8 +840,8 @@ Every number below is from a run on this machine, with the binaries that exist i
 
 | Surface | Command | Result |
 | --- | --- | --- |
-| pytest | `python -m pytest` | **852 passed, 1 skipped, 182 subtests passed** |
-| unittest | `python -m unittest discover -s tests -t tests` | **Ran 853, OK (skipped=1)** |
+| pytest | `python -m pytest` | **857 passed, 1 skipped, 182 subtests passed** |
+| unittest | `python -m unittest discover -s tests -t tests` | **Ran 858, OK (skipped=1)** |
 | Windows (live) | the seven commands in §1 | all as recorded |
 | packaging | `python tools/build_exe.py` | both binaries built, **and executed** |
 | live probes | `tools/probe_*.py` | verdicts recorded below |
@@ -926,29 +996,49 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
 - **The `EMPTY_MOBILE` / `MFA_CHECK` branches were not explored.** Out of scope for
   the main path.
 - **CI has never run on a real runner.**
-- **The hidden auth host cannot actually start on this machine**, so §30's flow is
-  wired but not observed end to end here. The cause is `_headless_supported`, which
-  asks `chrome --headless=new --version`; on Chrome 153 that combination hangs
-  rather than answering, so the timeout fires and the build is judged unsupported.
-  Headless works — the same binary with a debug port answers
-  `HeadlessChrome/153.0.0.0`. The probe was left as-is rather than replaced because
-  a launch-based replacement is unverifiable here: Chromium started from a Python
-  child process on this machine exits immediately with status 0, while the same
-  launch from a shell works. See §9c.
+- **A real Windows sign-out and sign-in was not performed**, so §30's flow is
+  verified up to the hidden engine coming up but not through an actual logon. The
+  engine itself is measured, not inferred: `STARTED` / `HEADLESS`, zero visible
+  windows, and the monitor's own `_try_auth_host()` returns `True` with the
+  browser started by nothing but the tool. The scheduled half rests on §67's
+  simulated registry round trip. See §9c.
+
+### Two probes that answered the wrong question
+
+Both are fixed, and both are recorded because the *shape* of the mistake is the
+reusable part: a probe that asks a browser to describe itself can be wrong in
+either direction, and a test suite that checks the answer will never notice.
+
+- **The capability probe hung.** `_headless_supported` asked
+  `chrome --headless=new --version`; on Chrome 153 that hangs, so the timeout
+  fired and a build with working headless support was judged to have none. It now
+  asks the browser to take a screenshot and checks for a real PNG signature.
+- **The mode probe read the wrong field.** `_probe_mode` searched
+  `Browser.getVersion`'s `product` for `"Headless"`, but on this build the marker
+  is in `userAgent` (`product` is plain `Chrome/153…`). Every headless browser was
+  therefore reported `VISIBLE` — the host ran hidden while telling the user a
+  window was on their screen. Both fields are now checked.
+
+Underneath both: an earlier round concluded that launching a browser from Python
+was broken here, because every launch exited `rc=0` in about a second. That was a
+measurement error — Chromium's launcher hands off to a child and exits, so the
+exit code describes the hand-off and not the browser. A control experiment (same
+binary, flag present and absent) shows the flag works and the user agent
+distinguishes them.
 
 ### Environment-specific, measured here
 
-- **The headless capability probe misjudges Chrome 153 on this machine.** It asks
-  `chrome --headless=new --version`; that combination neither rejects the flag nor
-  prints a version, it **hangs**, so the fifteen-second timeout fires and a build
-  with working headless support is reported as having none. The capability is
-  present — the same binary with `--headless=new --remote-debugging-port=…`
-  answers `HeadlessChrome/153.0.0.0`. Consequence: the host is refused before
-  launch and a visible window is never opened, which is the safe direction to be
-  wrong in. The probe was not replaced because a launch-based replacement is
-  unverifiable on this machine (see §9c). Separately, the host's `describe()` now
-  reports the mode it *got* rather than the flag it *asked for* — previously it
-  claimed "no user-visible window" while showing one.
+- **Chromium's launcher exits before the browser is ready, on every launch.**
+  Measured at `rc=0` in 0.1s while the browser needs ~0.6s to do anything and
+  ~0.5s to answer its debug port. This is normal Chromium behaviour, not a fault,
+  but it invalidated an earlier conclusion in this project and it is the reason
+  the capability probe now waits for an artifact rather than for the process. Any
+  code here that launches a browser and then checks the process's exit status is
+  measuring the wrong thing.
+- **`describe()` reports the mode it got rather than the flag it asked for.**
+  Previously it claimed "no user-visible window" while showing one, which is the
+  same class of error as the two probes above — reporting the request as the
+  outcome.
 - **The system proxy at `127.0.0.1:7890` breaks `opencsitool.com` and only that
   host.** Measured across 3 hosts × 6 configurations × 3 repeats: `gitcode.com`
   and `web-api.gitcode.com` pass through; `opencsitool.com` fails with
