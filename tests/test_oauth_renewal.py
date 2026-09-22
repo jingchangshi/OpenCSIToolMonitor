@@ -114,6 +114,124 @@ class SilentRenewalTest(unittest.TestCase):
         self.assertIs(result.status, RenewalStatus.TIMEOUT)
         self.assertFalse(result.renewed)
 
+    def test_an_unanswered_consent_page_is_not_reported_as_a_timeout(self) -> None:
+        """The defect: a parked approval form was blamed on the browser.
+
+        ``timeout`` and ``consent`` park on the *same URL*, so the renewer cannot
+        tell them apart by path. It used to poll until the budget expired and
+        then say "the browser may be slow or GitCode may be unreachable" --
+        neither of which was true: the browser was idle and GitCode had answered
+        immediately with a form waiting for a click. Measured live, approving it
+        issued a fresh 60-minute token.
+        """
+        self.scenario.outcome = "consent"
+        provider = self._provider()
+        provider.refresh()
+        result = _renewer(self.server, timeout=6.0).renew(before=provider)
+
+        self.assertIs(result.status, RenewalStatus.CONSENT_REQUIRED)
+        self.assertIsNot(result.status, RenewalStatus.TIMEOUT)
+        self.assertIsNot(result.status, RenewalStatus.LOGIN_REQUIRED)
+        self.assertTrue(result.requires_interaction)
+        self.assertFalse(result.renewed)
+
+    def test_the_consent_outcome_does_not_blame_the_network(self) -> None:
+        """The detail must name the real blocker, since that is what a user reads."""
+        self.scenario.outcome = "consent"
+        provider = self._provider()
+        provider.refresh()
+        result = _renewer(self.server, timeout=6.0).renew(before=provider)
+
+        detail = (result.detail or "").lower()
+        self.assertIn("approval", detail)
+        # The old, misleading wording must be gone.
+        self.assertNotIn("slow", detail)
+        self.assertNotIn("unreachable", detail)
+
+    def test_consent_is_detected_faster_than_the_full_budget(self) -> None:
+        """Detection must end the wait, not merely relabel it at the end.
+
+        A generous budget with a fast result proves the loop broke out early. If
+        the fix only changed the label applied after the deadline, this would
+        take the whole 30 seconds.
+        """
+        import time as _time
+
+        self.scenario.outcome = "consent"
+        provider = self._provider()
+        provider.refresh()
+        started = _time.monotonic()
+        result = _renewer(self.server, timeout=30.0).renew(before=provider)
+        elapsed = _time.monotonic() - started
+
+        self.assertIs(result.status, RenewalStatus.CONSENT_REQUIRED)
+        self.assertLess(elapsed, 15.0, "the consent page was not detected early")
+
+    def test_a_consent_page_is_never_reported_as_success(self) -> None:
+        """A stale cookie in the jar must not be mistaken for a new one.
+
+        The jar still holds the previous token while the consent form is up, so
+        a renewer that checked "is there a cookie?" before "is a human needed?"
+        would report a dead session as healthy.
+        """
+        self.scenario.outcome = "consent"
+        provider = self._provider()
+        provider.refresh()
+        result = _renewer(self.server, timeout=6.0).renew(before=provider)
+
+        self.assertFalse(result.renewed)
+        self.assertFalse(result.token_changed)
+        self.assertIsNot(result.status, RenewalStatus.RENEWED)
+
+    def test_the_consent_probe_returns_a_boolean_not_page_content(self) -> None:
+        """The probe must not be able to leak what is on the page.
+
+        The consent page shows the signed-in account name, and an authorize URL
+        can carry a ticket. The probe therefore answers a yes/no question and the
+        expression returns nothing else, so no page text can reach a log.
+        """
+        from opencsi.auth.oauth_browser import BrowserOAuthRenewer as _R
+
+        seen: list[str] = []
+        original = self.server.on_call
+
+        def spy(method, params):
+            if method == "Runtime.evaluate":
+                seen.append(str(params.get("expression") or ""))
+            return original(method, params) if original else None
+
+        self.server.on_call = spy
+        self.addCleanup(lambda: setattr(self.server, "on_call", original))
+
+        self.scenario.outcome = "consent"
+        provider = self._provider()
+        provider.refresh()
+        _R(
+            self.server.base_url,
+            timeout=6.0,
+            connect_timeout=5.0,
+            poll_interval=0.05,
+            settle_delay=0.05,
+        ).renew(before=provider)
+
+        probes = [e for e in seen if "querySelectorAll" in e]
+        self.assertTrue(probes, "the consent probe was never sent")
+        for expression in probes:
+            # It returns a boolean; it never reads text out of the document.
+            self.assertIn("return true", expression)
+            self.assertNotIn("innerText=", expression)
+            self.assertNotIn("location.href", expression)
+
+    def test_an_unanswered_consent_page_does_not_leave_a_tab_open(self) -> None:
+        """Cleanup must not depend on the outcome being a success."""
+        self.scenario.outcome = "consent"
+        provider = self._provider()
+        provider.refresh()
+        _renewer(self.server, timeout=6.0).renew(before=provider)
+
+        self.assertEqual(self.scenario.created_targets, self.scenario.closed_targets)
+        self.assertTrue(self.scenario.created_targets, "no target was ever created")
+
     def test_unchanged_cookie_is_not_reported_as_renewed(self) -> None:
         """The exact mistake the module exists to prevent: load != authenticated."""
         self.scenario.outcome = "noop"

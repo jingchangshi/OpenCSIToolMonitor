@@ -79,6 +79,14 @@ class MonitorState(str, Enum):
     #: browser with no debugging port, and the next poll said "login required"
     #: again. Nothing the user could click would ever break the cycle.
     BROWSER_UNAVAILABLE = "BROWSER_UNAVAILABLE"
+    #: GitCode is showing an OAuth *approval* page and waiting for it.
+    #:
+    #: Distinct from ``LOGIN_REQUIRED`` because the remedy is much smaller: the
+    #: SSO session is alive, so nothing needs signing in -- one click on the
+    #: consent page completes it. Telling an already-authenticated user to "sign
+    #: in again" sends them to do work that does not fix anything, which is the
+    #: same class of mistake as the ``BROWSER_UNAVAILABLE`` conflation above.
+    CONSENT_REQUIRED = "CONSENT_REQUIRED"
     OFFLINE = "OFFLINE"
     SERVER_ERROR = "SERVER_ERROR"
     AUTH_ERROR = "AUTH_ERROR"
@@ -141,6 +149,7 @@ STATE_LABELS: dict[MonitorState, str] = {
     MonitorState.REFRESHING: "Refreshing",
     MonitorState.RENEWING: "Renewing session",
     MonitorState.LOGIN_REQUIRED: "Login required",
+    MonitorState.CONSENT_REQUIRED: "Approval required",
     MonitorState.BROWSER_UNAVAILABLE: "Browser not running",
     MonitorState.OFFLINE: "Offline",
     MonitorState.SERVER_ERROR: "Server error",
@@ -155,9 +164,15 @@ STATE_LABELS: dict[MonitorState, str] = {
 #: tool is not collecting anything, and no amount of waiting will change that.
 #: It is the state a user lands in right after a reboot, which is exactly when
 #: they have not yet noticed the tray is doing nothing.
+#:
+#: ``CONSENT_REQUIRED`` is included because it is the *most* actionable state of
+#: the set: it resolves with a single click and will never resolve on its own.
+#: Leaving it out would mean the one problem the user can fix fastest is the one
+#: the tray stays silent about.
 _ATTENTION_STATES = frozenset(
     {
         MonitorState.LOGIN_REQUIRED,
+        MonitorState.CONSENT_REQUIRED,
         MonitorState.AUTH_ERROR,
         MonitorState.BROWSER_UNAVAILABLE,
     }
@@ -575,6 +590,13 @@ class MonitorService:
                     error=result.detail or "GitCode sign-in is required",
                 )
             )
+        elif result.status is RenewalStatus.CONSENT_REQUIRED:
+            self._publish(
+                self.snapshot.with_state(
+                    MonitorState.CONSENT_REQUIRED,
+                    error=result.detail or "GitCode is waiting for approval",
+                )
+            )
         elif result.status in (RenewalStatus.CDP_UNAVAILABLE, RenewalStatus.OAUTH_FAILED):
             self._publish(
                 self.snapshot.with_state(
@@ -600,6 +622,8 @@ class MonitorService:
         state = (
             MonitorState.LOGIN_REQUIRED
             if result.status is RenewalStatus.LOGIN_REQUIRED
+            else MonitorState.CONSENT_REQUIRED
+            if result.status is RenewalStatus.CONSENT_REQUIRED
             else MonitorState.AUTH_ERROR
         )
         self._publish(

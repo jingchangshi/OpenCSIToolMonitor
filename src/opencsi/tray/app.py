@@ -359,6 +359,13 @@ class TrayApp:
             MonitorState.BROWSER_UNAVAILABLE: (
                 "浏览器未运行，点击「启动浏览器并登录」即可恢复。"
             ),
+            # Distinct from the login message on purpose. Telling someone who is
+            # still signed in to "sign in again" sends them to do work that
+            # cannot fix anything; the whole reason this state exists separately
+            # is that the remedy is one click and different.
+            MonitorState.CONSENT_REQUIRED: (
+                "GitCode 正在等待授权确认，点击「打开页面并批准授权」即可完成，无需重新登录。"
+            ),
         }.get(snapshot.state)
         if message is None:
             return

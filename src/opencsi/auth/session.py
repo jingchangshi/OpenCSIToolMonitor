@@ -101,6 +101,19 @@ class RenewalStatus(str, Enum):
     LOGIN_REQUIRED = "LOGIN_REQUIRED"
     """Renewal needs the user: the upstream SSO session is gone."""
 
+    CONSENT_REQUIRED = "CONSENT_REQUIRED"
+    """Renewal needs the user: GitCode is showing an approval form.
+
+    Distinct from :attr:`LOGIN_REQUIRED` because the user action is different
+    and much smaller. The SSO session is alive -- GitCode knows who they are and
+    has rendered "授权 OpenCsitool S <user>" -- so nothing needs signing in; one
+    click on the consent page completes the grant. Reporting that as a login
+    problem sends the user to re-authenticate when they are already
+    authenticated, and reporting it as a timeout (which is what the renewer used
+    to do) tells them the browser is slow when it is in fact idle and waiting
+    for them.
+    """
+
     CDP_UNAVAILABLE = "CDP_UNAVAILABLE"
     """The browser needed for silent renewal is not reachable."""
 

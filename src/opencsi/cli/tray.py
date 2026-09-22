@@ -174,7 +174,16 @@ def _once_exit_code(state) -> int:
 
     if state is MonitorState.OK:
         return 0
-    if state in (MonitorState.LOGIN_REQUIRED, MonitorState.AUTH_ERROR):
+    if state in (
+        MonitorState.LOGIN_REQUIRED,
+        MonitorState.AUTH_ERROR,
+        MonitorState.CONSENT_REQUIRED,
+    ):
+        # CONSENT_REQUIRED belongs here rather than with the server errors: from
+        # a caller's point of view nothing usable was produced and a human has to
+        # act, which is what EXIT_SESSION_EXPIRED means. Falling through to the
+        # EXIT_SERVER_ERROR tail would blame the server for a page waiting on a
+        # click.
         return EXIT_SESSION_EXPIRED
     if state is MonitorState.BROWSER_UNAVAILABLE:
         return EXIT_CDP_UNAVAILABLE

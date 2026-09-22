@@ -91,6 +91,13 @@ class OAuthScenario:
         be reported as success.
     ``"timeout"``
         The tab never leaves the OAuth URL; the caller's deadline expires.
+    ``"consent"``
+        The tab parks on ``gitcode.com/oauth/authorize`` with an unanswered
+        approval control. The SSO session is alive, so this is *not* a login
+        problem -- and it must not be reported as a timeout either, which is what
+        the renewer used to do: it polled until its budget expired and blamed the
+        browser. Measured live, approving the page issued a fresh 60-minute
+        token, so the flow was one click from working.
     ``"no_cookie"``
         Back on the app host, but the cookie jar is empty.
     """
@@ -381,6 +388,18 @@ class FakeDevToolsServer:
             return {"frameId": "FRAME-1"}, session_id
 
         if method == "Runtime.evaluate":
+            # Two different questions are asked through this one method, and the
+            # fake has to answer them differently. `location.href` drives the
+            # state machine; the consent probe asks the document whether an
+            # approval control exists. Telling them apart by the expression text
+            # is deliberate: it keeps the fake honest about which call the
+            # renewer actually made, so a renewer that stopped asking the consent
+            # question would get a location string back and fail the test rather
+            # than silently pass.
+            expression = str(params.get("expression") or "")
+            if "querySelectorAll" in expression:
+                pending = self.oauth is not None and self.oauth.outcome == "consent"
+                return {"result": {"type": "boolean", "value": pending}}, session_id
             return {"result": {"type": "string", "value": self._renewal_location()}}, session_id
 
         if method == "Page.enable":
@@ -399,6 +418,8 @@ class FakeDevToolsServer:
         * ``login``   -- settles on the GitCode login page.
         * ``noop``    -- back on the app host, cookie unchanged.
         * ``timeout`` -- never leaves the OAuth URL.
+        * ``consent`` -- parks on the authorize URL with an approval control
+          waiting; the page-level probe (not this method) reports the control.
         * ``timeout_then_renew`` -- never leaves the OAuth URL *within the
           budget*, but does install a fresh cookie. This models a cold start
           that outran its deadline yet genuinely renewed, which is a real
@@ -411,6 +432,11 @@ class FakeDevToolsServer:
         outcome = scenario.outcome
 
         if outcome == "timeout":
+            return "https://gitcode.com/oauth/authorize?client_id=fake"
+        if outcome == "consent":
+            # Same URL as `timeout`, on purpose: the *path* cannot tell them
+            # apart, which is the whole reason the renewer has to ask the page
+            # rather than pattern-match the URL.
             return "https://gitcode.com/oauth/authorize?client_id=fake"
 
         if outcome == "timeout_then_renew":

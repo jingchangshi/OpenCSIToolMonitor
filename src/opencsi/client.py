@@ -599,6 +599,13 @@ class OpenCsiToolClient:
                 "silent renewal cannot help. Sign in again at "
                 "https://opencsitool.com/myTools."
             )
+        if renewal.status is RenewalStatus.CONSENT_REQUIRED:
+            return (
+                "GitCode is showing an approval page for the OpenCsitool "
+                "application and waiting for it to be confirmed. You are still "
+                "signed in, so opening https://opencsitool.com/myTools and "
+                "approving it is enough -- no sign-in is needed."
+            )
         if renewal.status is RenewalStatus.CDP_UNAVAILABLE:
             return (
                 "silent renewal needs a browser with remote debugging enabled. "

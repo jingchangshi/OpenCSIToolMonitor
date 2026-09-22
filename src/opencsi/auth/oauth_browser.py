@@ -103,6 +103,7 @@ class RenewalEvidence:
     old_expires_in: float | None
     new_expires_in: float | None
     detail: str | None = None
+    consent_pending: bool = False
 
     def as_dict(self) -> dict[str, object]:
         out: dict[str, object] = {
@@ -112,6 +113,8 @@ class RenewalEvidence:
             "token_changed": self.token_changed,
             "expiry_extended": self.expiry_extended,
         }
+        if self.consent_pending:
+            out["consent_pending"] = True
         if self.old_expires_in is not None:
             out["old_expires_in_seconds"] = round(self.old_expires_in, 1)
         if self.new_expires_in is not None:
@@ -150,6 +153,27 @@ def _path_of(url: str) -> str:
 #: whereas ``gitcode.com/-/oauth/login`` and ``gitcode.com/login`` are the pages
 #: that only appear when the SSO session is gone.
 _LOGIN_PATH_PREFIXES = ("/login", "/-/oauth/login", "/-/login")
+
+#: The path where GitCode asks the human to *approve* the application.
+#:
+#: This is a third state, distinct from both "still redirecting" and "must sign
+#: in", and it was the cause of a real misdiagnosis. When the SSO session is
+#: alive but the grant has not been approved (a first run, a new browser
+#: profile, or a revoked grant), ``gitcode.com/oauth/authorize`` renders a
+#: consent page with an 授权 button and then waits -- indefinitely. Nothing
+#: redirects on its own.
+#:
+#: The renewer could not tell that apart from a slow redirect chain, so it polled
+#: until its budget expired and reported ``TIMEOUT`` ("the browser may be slow or
+#: GitCode may be unreachable"). Both of those were false: the browser was idle
+#: and GitCode had answered promptly. Measured directly -- approving the page by
+#: hand issued a fresh 60-minute token, so the flow was one click from working
+#: while the tool insisted it had timed out.
+#:
+#: The *path* alone cannot distinguish "consent page displayed" from "authorize
+#: in flight", because both are ``/oauth/authorize``. Detection therefore asks
+#: the page whether an approve control exists -- see :meth:`_consent_pending`.
+_CONSENT_PATH_PREFIX = "/oauth/authorize"
 
 
 class BrowserOAuthRenewer:
@@ -270,7 +294,7 @@ class BrowserOAuthRenewer:
             with CdpConnection(browser_ws, timeout=self._connect_timeout) as conn:
                 target_id = self._create_background_target(conn)
                 try:
-                    final_host, final_path, timed_out = self._drive_oauth(
+                    final_host, final_path, timed_out, consent_pending = self._drive_oauth(
                         conn, target_id, deadline
                     )
                     cookies = self._read_cookies(conn)
@@ -290,7 +314,13 @@ class BrowserOAuthRenewer:
         # and it was observed doing exactly that on a cold start, where the
         # round-trip outran the budget yet installed a fresh 3598-second token.
         return self._evaluate(
-            final_host, final_path, cookies, old_token, old_status, timed_out=timed_out
+            final_host,
+            final_path,
+            cookies,
+            old_token,
+            old_status,
+            timed_out=timed_out,
+            consent_pending=consent_pending,
         )
 
     # ── target lifecycle ──────────────────────────────────────────────────
@@ -326,12 +356,12 @@ class BrowserOAuthRenewer:
 
     def _drive_oauth(
         self, conn: CdpConnection, target_id: str, deadline: float
-    ) -> tuple[str, str, bool]:
+    ) -> tuple[str, str, bool, bool]:
         """Navigate the background tab and wait for the redirect chain.
 
-        Returns ``(final_host, final_path, timed_out)``. The full URL is
-        deliberately not returned: on the OAuth callback it carries ``code`` and
-        ``state``, which are secrets.
+        Returns ``(final_host, final_path, timed_out, consent_pending)``. The
+        full URL is deliberately not returned: on the OAuth callback it carries
+        ``code`` and ``state``, which are secrets.
         """
         attached = conn.call(
             "Target.attachToTarget",
@@ -359,6 +389,11 @@ class BrowserOAuthRenewer:
         final_host = ""
         final_path = ""
         timed_out = True
+        consent_pending = False
+        # How many consecutive polls the consent form has been visible. Requiring
+        # more than one avoids calling a mid-redirect page "pending" just because
+        # the approve button happened to be in the DOM for one sample.
+        consent_seen = 0
         while time.monotonic() < deadline:
             time.sleep(self._poll_interval)
             final_host, final_path, landed_on_login = self._current_location(conn, session_id)
@@ -367,6 +402,20 @@ class BrowserOAuthRenewer:
                 # than burning the whole budget.
                 timed_out = False
                 break
+
+            if self._looks_like_consent_page(final_host, final_path):
+                if self._consent_pending(conn, session_id):
+                    consent_seen += 1
+                    if consent_seen >= 2:
+                        # The form is up and nobody is going to answer it. Stop
+                        # now and report the real blocker instead of waiting out
+                        # the budget and calling it a timeout.
+                        consent_pending = True
+                        timed_out = False
+                        break
+                else:
+                    consent_seen = 0
+
             if final_host == _APP_HOST:
                 # We are back on the app; the callback has run. Give the
                 # Set-Cookie a moment to be committed before reading it.
@@ -375,7 +424,7 @@ class BrowserOAuthRenewer:
                 timed_out = False
                 break
 
-        return final_host, final_path, timed_out
+        return final_host, final_path, timed_out, consent_pending
 
     def _current_location(
         self, conn: CdpConnection, session_id: str
@@ -410,6 +459,63 @@ class BrowserOAuthRenewer:
         if not host.endswith(_LOGIN_HOST):
             return False
         return any(path.startswith(prefix) for prefix in _LOGIN_PATH_PREFIXES)
+
+    @staticmethod
+    def _looks_like_consent_page(host: str, path: str = "") -> bool:
+        """Whether the tab *could* be showing the consent form.
+
+        Only a cheap pre-filter: ``/oauth/authorize`` is also the path while the
+        request is still in flight, so this alone proves nothing. The decisive
+        check is :meth:`_consent_pending`, which asks the page.
+        """
+        if not host.endswith(_LOGIN_HOST):
+            return False
+        return path.startswith(_CONSENT_PATH_PREFIX)
+
+    def _consent_pending(self, conn: CdpConnection, session_id: str) -> bool:
+        """Whether the authorize tab is parked on an unanswered consent form.
+
+        Answers by asking the *document* whether it contains an approval
+        control, rather than by matching a selector we would then have to keep
+        in sync with GitCode's markup. The query is deliberately generic --
+        buttons and submit inputs whose label is an approval word -- and it
+        returns a boolean only.
+
+        Two deliberate limits:
+
+        * **It never clicks.** The product contains no selector automation by
+          design; approving an OAuth grant on the user's behalf is a decision
+          that belongs to the user, and a monitor silently widening its own
+          access is exactly the behaviour this project must not have. Detection
+          exists so the tool can *say* what is blocking, not so it can proceed.
+        * **It reads no page text out.** The expression returns true/false, so
+          nothing from the page -- which may contain a QR ticket or an account
+          name -- can reach a log or a result.
+        """
+        #: Labels GitCode has used for the approve control, plus the English
+        #: equivalents. Matching a small set of words is more robust than a CSS
+        #: selector, which changes with every front-end deploy.
+        expression = (
+            "(function(){"
+            "var words=['\\u6388\\u6743','\\u540c\\u610f','\\u5141\\u8bb8','Approve','Authorize','Allow'];"
+            "var nodes=document.querySelectorAll('button,input[type=submit],a[role=button]');"
+            "for(var i=0;i<nodes.length;i++){"
+            "var t=(nodes[i].innerText||nodes[i].value||'').trim();"
+            "if(t && words.indexOf(t)>=0 && !nodes[i].disabled) return true;"
+            "}"
+            "return false;"
+            "})()"
+        )
+        try:
+            result = conn.call(
+                "Runtime.evaluate",
+                {"expression": expression, "returnByValue": True},
+                session_id=session_id,
+                timeout=self._connect_timeout,
+            )
+        except WebSocketError:
+            return False
+        return (result.get("result") or {}).get("value") is True
 
     # ── cookie handling ───────────────────────────────────────────────────
     def _read_cookies(self, conn: CdpConnection) -> list[Mapping[str, Any]]:
@@ -459,6 +565,7 @@ class BrowserOAuthRenewer:
         old_status: CredentialStatus | None,
         *,
         timed_out: bool = False,
+        consent_pending: bool = False,
     ) -> RenewalResult:
         """Decide the outcome from observed state, not from hope."""
         landed_on_login = self._looks_like_login_page(final_host, final_path)
@@ -486,6 +593,40 @@ class BrowserOAuthRenewer:
             self._last_evidence = evidence
             return RenewalResult(
                 RenewalStatus.LOGIN_REQUIRED,
+                requires_interaction=True,
+                detail=evidence.detail,
+            )
+
+        if consent_pending:
+            # The consent form was up and unanswered. Checked before the cookie
+            # for the same reason as login: the jar may still hold the old
+            # cookie, and reporting that as success would be a lie.
+            #
+            # This branch exists because its absence produced a genuinely
+            # misleading result. Without it the loop above simply ran out of
+            # time, so a user whose only problem was an unclicked button was
+            # told "the browser may be slow or GitCode may be unreachable" --
+            # neither of which was true. Measured directly: approving the form
+            # by hand issued a fresh 60-minute token, so the flow was one click
+            # from working while the tool reported a timeout.
+            evidence = RenewalEvidence(
+                navigated_url_host=_APP_HOST,
+                final_url_host=final_host,
+                landed_on_login_page=False,
+                token_changed=False,
+                expiry_extended=False,
+                old_expires_in=old_status.expires_in if old_status else None,
+                new_expires_in=None,
+                consent_pending=True,
+                detail=(
+                    "GitCode is showing an approval page for the OpenCsitool "
+                    "application and waiting for it to be confirmed; the SSO "
+                    "session is still valid, so approving it is enough"
+                ),
+            )
+            self._last_evidence = evidence
+            return RenewalResult(
+                RenewalStatus.CONSENT_REQUIRED,
                 requires_interaction=True,
                 detail=evidence.detail,
             )

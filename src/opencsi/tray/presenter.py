@@ -40,6 +40,7 @@ STATE_LABELS_CN: dict[MonitorState, str] = {
     MonitorState.REFRESHING: "刷新中",
     MonitorState.RENEWING: "续期中",
     MonitorState.LOGIN_REQUIRED: "需要登录",
+    MonitorState.CONSENT_REQUIRED: "需要授权确认",
     MonitorState.BROWSER_UNAVAILABLE: "浏览器未运行",
     MonitorState.OFFLINE: "离线",
     MonitorState.SERVER_ERROR: "服务异常",
@@ -221,6 +222,14 @@ def actions_for(
         items.append(Action("login", "打开登录页面"))
     elif snapshot.state is MonitorState.LOGIN_REQUIRED:
         items.append(Action("login", "登录 / Sign in...", default=True))
+    elif snapshot.state is MonitorState.CONSENT_REQUIRED:
+        # "Sign in" would be the wrong offer: the SSO session is alive and the
+        # user is already authenticated. What is missing is one approval click on
+        # GitCode's consent page, so the action opens that page rather than a
+        # login form. Wording follows the same shape as BROWSER_UNAVAILABLE --
+        # name the step, not the symptom.
+        items.append(Action("login", "打开页面并批准授权", default=True))
+        items.append(Action("renew", "重试静默续期"))
     elif snapshot.state is MonitorState.AUTH_ERROR:
         items.append(Action("renew", "立即续期"))
         items.append(Action("login", "登录 / Sign in..."))
