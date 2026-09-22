@@ -62,7 +62,24 @@ TRAY_BINARY_NAME = "opencsi-tray.exe"
 #: How the command was derived. Reported rather than inferred, because "which
 #: binary will Windows actually start?" is the question this module exists to
 #: answer and a caller should not have to re-derive it from a string.
+#:
+#: There are four labels for the three running contexts, because the frozen CLI
+#: has two outcomes and they are not the same fact:
+#:
+#: ``frozen-tray``      this process *is* the windowed tray binary
+#: ``frozen-cli-tray``  this process is the frozen CLI, and the tray was found
+#:                      beside it -- the normal shape of a real install
+#: ``frozen-cli``       this process is the frozen CLI and no tray exists, so the
+#:                      console build is registered with a ``tray`` sub-command
+#: ``source``           running from a checkout
+#:
+#: Collapsing the middle two into ``frozen-tray`` was a defect, not a shortcut:
+#: ``frozen-tray`` is documented as describing *this build*, and it was being
+#: reported by a process that was demonstrably not the tray binary. A user running
+#: ``opencsi.exe tray --startup-status`` was told ``derived from: frozen-tray``,
+#: which reads as "this is the tray" and is false.
 SOURCE_FROZEN_TRAY = "frozen-tray"
+SOURCE_FROZEN_CLI_TRAY = "frozen-cli-tray"
 SOURCE_FROZEN_CLI = "frozen-cli"
 SOURCE_SOURCE_INSTALL = "source"
 
@@ -112,13 +129,20 @@ def _is_frozen_tray() -> bool:
     return Path(executable).name.lower() == TRAY_BINARY_NAME.lower()
 
 
-def startup_command() -> tuple[str, str]:
-    """The command to register, and how it was derived.
+def startup_command_for_tray() -> tuple[str, str]:
+    """The command to register so that Windows sign-in starts the tray.
 
     Returns ``(command, source)``. The source is one of
-    :data:`SOURCE_FROZEN_TRAY`, :data:`SOURCE_FROZEN_CLI` or
-    :data:`SOURCE_SOURCE_INSTALL`, so a caller can report *why* it chose what it
-    did instead of just printing a path.
+    :data:`SOURCE_FROZEN_TRAY`, :data:`SOURCE_FROZEN_CLI_TRAY`,
+    :data:`SOURCE_FROZEN_CLI` or :data:`SOURCE_SOURCE_INSTALL`, so a caller can
+    report *why* it chose what it did instead of just printing a path.
+
+    Named for the tray rather than for "this process", because that is the whole
+    point: the Run entry always means *start the tray*. An earlier generic name
+    (``default_command``) invited the reading "restart whatever called me", and
+    that reading is what produced the original defect -- from the frozen CLI it
+    registered ``opencsi.exe`` with no sub-command, which prints usage and exits,
+    so sign-in ran a program that did nothing at all.
     """
     if getattr(sys, "frozen", False):
         if _is_frozen_tray():
@@ -127,8 +151,9 @@ def startup_command() -> tuple[str, str]:
         sibling = _frozen_tray_sibling()
         if sibling is not None:
             # The correct answer for a real install: the windowed binary, run
-            # with no arguments.
-            return _quote(str(sibling)), SOURCE_FROZEN_TRAY
+            # with no arguments. Reported as its own source because *this*
+            # process is the CLI, not the tray -- see the constants above.
+            return _quote(str(sibling)), SOURCE_FROZEN_CLI_TRAY
 
         # A frozen CLI with no tray binary beside it. The sub-command is
         # mandatory here -- without it this registers a program that prints
@@ -143,9 +168,18 @@ def startup_command() -> tuple[str, str]:
     return f"{_quote(executable)} -m opencsi.tray", SOURCE_SOURCE_INSTALL
 
 
+#: Back-compatible alias. Kept because the name is referenced from the CLI, the
+#: tray and the docs, and because the two names answer the same question -- but
+#: ``startup_command_for_tray`` is the one to use in new code, since it says what
+#: the command is *for* rather than merely that it is a default.
+def startup_command() -> tuple[str, str]:
+    """Alias of :func:`startup_command_for_tray`."""
+    return startup_command_for_tray()
+
+
 def default_command() -> str:
-    """The command that starts the tray. See :func:`startup_command`."""
-    return startup_command()[0]
+    """The command that starts the tray. See :func:`startup_command_for_tray`."""
+    return startup_command_for_tray()[0]
 
 
 @dataclass(frozen=True)
@@ -218,13 +252,15 @@ class StartupManager:
                     command, _kind = winreg.QueryValueEx(key, self._value_name)
                 except FileNotFoundError:
                     return StartupStatus(
-                        supported=True, enabled=False, source=startup_command()[1]
+                        supported=True,
+                        enabled=False,
+                        source=startup_command_for_tray()[1],
                     )
             return StartupStatus(
                 supported=True,
                 enabled=True,
                 command=str(command),
-                source=startup_command()[1],
+                source=startup_command_for_tray()[1],
             )
         except OSError as exc:
             return StartupStatus(
@@ -244,7 +280,7 @@ class StartupManager:
         """
         if not self.supported:
             return StartupStatus(supported=False, detail="only available on Windows")
-        derived, source = startup_command()
+        derived, source = startup_command_for_tray()
         value = command or derived
         try:
             import winreg

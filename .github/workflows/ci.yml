@@ -78,6 +78,18 @@ jobs:
       - name: pytest
         run: python -m pytest -q
 
+      # §42 asks for these by name. They are inside `pytest` above, so this is
+      # redundant by construction -- which is the point: a future edit that
+      # excludes them from the default run (a marker, a testpaths change) would
+      # silently drop the only coverage the startup-registration fix has, and
+      # that fix is what stops sign-in from launching a program that does
+      # nothing. Named separately so the loss would be visible.
+      - name: startup helper tests
+        run: python -m pytest tests/test_tray.py -q -k "Startup"
+
+      - name: packaging tests
+        run: python -m pytest tests/test_packaging.py -q
+
   # ── 2. the package must import with zero third-party dependencies ────────
   stdlib-only:
     name: import with no optional extras
@@ -185,13 +197,19 @@ jobs:
           & $exe.FullName --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "--help exited $LASTEXITCODE" }
 
-      - name: The frozen tray must build a menu without a display
+      - name: The frozen tray must run
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Recurse -Filter opencsi-tray.exe | Select-Object -First 1
           if (-not $exe) { throw "opencsi-tray.exe was not produced" }
           Write-Host "found $($exe.FullName)"
-          # `--check` proves the icon and menu can be constructed and then exits.
+          # §43 names both of these. `--help` proves the windowed binary can
+          # parse arguments at all; a windowed build that cannot is a build whose
+          # every other invocation fails silently, because it has no console to
+          # print the traceback to.
+          & $exe.FullName --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "tray --help exited $LASTEXITCODE" }
+          # `--check` proves the icon and menu can be constructed, then exits.
           # It touches no network, so it cannot hang waiting for an API.
           #
           # NOTE: no `tray` prefix. This binary *is* the tray, so its arguments go
@@ -200,6 +218,26 @@ jobs:
           # but CI asserts the canonical form.
           & $exe.FullName --check
           if ($LASTEXITCODE -ne 0) { throw "tray --check exited $LASTEXITCODE" }
+
+      - name: The frozen CLI must register the tray, not itself
+        shell: pwsh
+        run: |
+          # §32/§62. The defect this guards is silent: an entry naming
+          # opencsi.exe with no sub-command looks healthy in Task Manager and
+          # does nothing at sign-in.
+          $cli = Get-ChildItem -Recurse -Filter opencsi.exe | Select-Object -First 1
+          $tray = Get-ChildItem -Recurse -Filter opencsi-tray.exe | Select-Object -First 1
+          $out = & $cli.FullName tray --startup-status 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) { throw "tray --startup-status exited $LASTEXITCODE" }
+          if ($out -notmatch [regex]::Escape($tray.Name)) {
+            throw "the CLI did not name the tray binary ($($tray.Name)) as what it would run"
+          }
+          # Read-only: this only asks what *would* run. Installing the entry is
+          # not done here, because a CI runner's registry is not ours to change.
+          if ($out -notmatch 'frozen-cli-tray') {
+            throw "expected the frozen-cli-tray source label, got: $out"
+          }
 
       - name: Upload the binaries
         if: always()

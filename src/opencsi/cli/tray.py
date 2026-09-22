@@ -408,7 +408,13 @@ def _launch_browser_then_refresh(service) -> None:
 
 def _startup(ctx: CliContext, args) -> int:
     """Manage the per-user start-at-sign-in entry."""
-    from ..tray.startup import StartupManager, default_command, startup_command
+    from ..tray.startup import (
+        SOURCE_FROZEN_CLI,
+        SOURCE_FROZEN_CLI_TRAY,
+        StartupManager,
+        default_command,
+        startup_command_for_tray,
+    )
 
     manager = StartupManager()
 
@@ -422,18 +428,24 @@ def _startup(ctx: CliContext, args) -> int:
             return 20
         ctx.out("The tray will start when you sign in.")
         ctx.out(f"command: {status.command}")
-        # Say which shape was chosen, because the three are not interchangeable
+        # Say which shape was chosen, because the four are not interchangeable
         # and the wrong one is the defect this reports on: a frozen CLI that
         # registers itself starts something that is not the tray.
-        derived, source = startup_command()
+        derived, source = startup_command_for_tray()
         del derived
         ctx.out(f"derived from: {source}")
-        if source == "frozen-cli":
+        if source == SOURCE_FROZEN_CLI:
             ctx.err(
                 "note: no opencsi-tray.exe was found next to this executable, so "
                 "sign-in will run the console build. Build the tray binary to "
                 "avoid a console window at sign-in."
             )
+        elif source == SOURCE_FROZEN_CLI_TRAY:
+            # Not a warning: this is the correct shape for a real install. Said
+            # out loud anyway, because "you are running the CLI and I registered
+            # the tray" is exactly the relationship a user cannot see, and it is
+            # the one the original bug got wrong.
+            ctx.out("(the tray binary beside this CLI, not the CLI itself)")
         ctx.out("")
         ctx.out("Remove it with: opencsi tray --remove-startup")
         ctx.out("It also appears in Task Manager > Startup apps.")

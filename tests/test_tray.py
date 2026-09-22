@@ -522,6 +522,182 @@ class AvailabilityTest(unittest.TestCase):
             tray.this_does_not_exist
 
 
+class StartupCommandContextTest(unittest.TestCase):
+    """§35: the three running contexts, each with the command it must register.
+
+    ``startup_command_for_tray`` had no test coverage at all, which is how the
+    P4 defect shipped: from the frozen CLI it registered ``opencsi.exe`` with no
+    sub-command, so sign-in ran a program that printed usage and exited. Nothing
+    in the suite noticed, because nothing in the suite called this function.
+
+    The three contexts are simulated by patching ``sys.frozen`` and
+    ``sys.executable``, which is exactly what PyInstaller changes, so no real
+    frozen build is needed to cover the branches. The frozen build is still
+    exercised separately -- a branch test cannot prove the spec emits the name
+    these tests assume.
+    """
+
+    def _context(self, *, frozen: bool, executable: str, sibling: str | None = None):
+        """Patch the two attributes PyInstaller sets, and the sibling lookup.
+
+        ``sibling`` is injected rather than created on disk: the test asserts the
+        *decision*, and writing a fake ``opencsi-tray.exe`` into the source tree
+        to observe a branch would leave a stray file behind on any failure.
+        """
+        from opencsi.tray import startup
+
+        class _Ctx:
+            def __enter__(self_inner):
+                self_inner._frozen = getattr(sys, "frozen", None)
+                self_inner._exe = sys.executable
+                self_inner._sibling = startup._frozen_tray_sibling
+                sys.frozen = frozen
+                sys.executable = executable
+                startup._frozen_tray_sibling = lambda: (
+                    Path(sibling) if sibling else None
+                )
+                return startup
+
+            def __exit__(self_inner, *exc):
+                if self_inner._frozen is None:
+                    sys.__dict__.pop("frozen", None)
+                else:
+                    sys.frozen = self_inner._frozen
+                sys.executable = self_inner._exe
+                startup._frozen_tray_sibling = self_inner._sibling
+                return False
+
+        return _Ctx()
+
+    def test_a_source_checkout_registers_the_module_form(self) -> None:
+        """`pythonw -m opencsi.tray`, not a bare interpreter.
+
+        ``pythonw`` rather than ``python`` because a console window flashing at
+        every sign-in is the thing the windowed binary exists to avoid.
+        """
+        with self._context(frozen=False, executable=r"C:\Py\python.exe") as startup:
+            command, source = startup.startup_command_for_tray()
+
+        self.assertEqual(source, startup.SOURCE_SOURCE_INSTALL)
+        self.assertIn("-m opencsi.tray", command)
+        self.assertIn("python", command.lower())
+
+    def test_the_frozen_tray_registers_itself_with_no_arguments(self) -> None:
+        """The tray binary takes no sub-command.
+
+        Registering ``"opencsi-tray.exe" tray`` would start a tray that tries to
+        interpret ``tray`` as an argument, which is a different bug from the one
+        being fixed but just as silent.
+        """
+        with self._context(
+            frozen=True, executable=r"C:\App\opencsi-tray.exe"
+        ) as startup:
+            command, source = startup.startup_command_for_tray()
+
+        self.assertEqual(source, startup.SOURCE_FROZEN_TRAY)
+        self.assertIn("opencsi-tray.exe", command)
+        self.assertNotIn("tray", command.replace("opencsi-tray.exe", "").strip())
+
+    def test_the_frozen_cli_registers_the_sibling_tray(self) -> None:
+        """The §32 defect, asserted directly: never a naked ``opencsi.exe``."""
+        with self._context(
+            frozen=True,
+            executable=r"C:\App\opencsi.exe",
+            sibling=r"C:\App\opencsi-tray.exe",
+        ) as startup:
+            command, source = startup.startup_command_for_tray()
+
+        self.assertEqual(source, startup.SOURCE_FROZEN_CLI_TRAY)
+        self.assertIn("opencsi-tray.exe", command)
+        self.assertNotIn(
+            "opencsi.exe",
+            command,
+            "the CLI registered itself; sign-in would print usage and exit",
+        )
+
+    def test_the_frozen_cli_without_a_sibling_uses_the_subcommand(self) -> None:
+        """The fallback must pass ``tray``, or it reproduces the same defect."""
+        with self._context(
+            frozen=True, executable=r"C:\App\opencsi.exe", sibling=None
+        ) as startup:
+            command, source = startup.startup_command_for_tray()
+
+        self.assertEqual(source, startup.SOURCE_FROZEN_CLI)
+        self.assertIn("opencsi.exe", command)
+        self.assertTrue(
+            command.rstrip().endswith("tray"),
+            f"the sub-command is mandatory here, got {command!r}",
+        )
+
+    def test_the_source_label_never_claims_a_context_that_is_not_running(
+        self,
+    ) -> None:
+        """The label must describe this build, not the command it produced.
+
+        ``frozen-tray`` means "this process *is* the windowed tray binary". It was
+        being reported by the frozen CLI whenever a sibling existed, so
+        ``opencsi.exe tray --startup-status`` printed ``derived from: frozen-tray``
+        -- a false statement about the running process, in the one output a user
+        consults to find out what will actually start at sign-in.
+        """
+        from opencsi.tray import startup
+
+        cases = [
+            (False, r"C:\Py\python.exe", None, startup.SOURCE_SOURCE_INSTALL),
+            (True, r"C:\App\opencsi-tray.exe", None, startup.SOURCE_FROZEN_TRAY),
+            (
+                True,
+                r"C:\App\opencsi.exe",
+                r"C:\App\opencsi-tray.exe",
+                startup.SOURCE_FROZEN_CLI_TRAY,
+            ),
+            (True, r"C:\App\opencsi.exe", None, startup.SOURCE_FROZEN_CLI),
+        ]
+        for frozen, executable, sibling, expected in cases:
+            with self.subTest(executable=executable, sibling=sibling):
+                with self._context(
+                    frozen=frozen, executable=executable, sibling=sibling
+                ) as mod:
+                    _command, source = mod.startup_command_for_tray()
+                    is_tray = mod._is_frozen_tray()
+                self.assertEqual(source, expected)
+                # The invariant: only a process that really is the tray binary
+                # may report `frozen-tray`.
+                self.assertEqual(
+                    source == mod.SOURCE_FROZEN_TRAY,
+                    is_tray,
+                    f"{source!r} disagrees with _is_frozen_tray()={is_tray}",
+                )
+
+    def test_matches_this_build_compares_against_the_tray_command(self) -> None:
+        """A registered entry must be judged against the tray command.
+
+        If this compared against the *CLI* command, a correct entry would be
+        reported as stale -- the warning would fire on exactly the installs that
+        are right.
+        """
+        from opencsi.tray import startup
+
+        with self._context(
+            frozen=True,
+            executable=r"C:\App\opencsi.exe",
+            sibling=r"C:\App\opencsi-tray.exe",
+        ):
+            command = startup.startup_command_for_tray()[0]
+            status = startup.StartupStatus(
+                supported=True, enabled=True, command=command
+            )
+            self.assertTrue(status.matches_this_build)
+
+            wrong = startup.StartupStatus(
+                supported=True, enabled=True, command=r"C:\App\opencsi.exe"
+            )
+            self.assertFalse(
+                wrong.matches_this_build,
+                "a naked CLI entry must not look correct",
+            )
+
+
 class StartupTest(unittest.TestCase):
     def test_status_is_reported_without_a_registry(self) -> None:
         manager = StartupManager()
