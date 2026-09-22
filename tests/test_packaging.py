@@ -16,6 +16,7 @@ than decorative).
 from __future__ import annotations
 
 import ast
+import contextlib
 import re
 import sys
 import unittest
@@ -45,29 +46,34 @@ class EntryPointTest(unittest.TestCase):
         """The frozen tray must run the same code as ``python -m opencsi.tray``.
 
         A build that ran a parallel implementation would be a build that is only
-        ever exercised in its frozen form.
+        ever exercised in its frozen form. This is also what went wrong before:
+        the argument handling lived in the entry script, so fixing it there left
+        the declared console script and the module form broken.
         """
         path = ROOT / "packaging" / "tray_entry.py"
         source = path.read_text(encoding="utf-8")
-        self.assertIn("from opencsi.tray.__main__ import main", source)
+        self.assertIn("opencsi.tray", source)
+        self.assertIn("__main__", source)
+        # The delegation must not reimplement the branch.
+        self.assertNotIn("cli.app", source, "the entry script reimplements the argv branch")
 
 
 class TrayEntryArgumentsTest(unittest.TestCase):
-    """``opencsi-tray.exe --once`` must honour its arguments.
+    """Every way of starting the tray must honour its arguments.
 
-    The entry script used to ignore argv entirely and always start the resident
-    GUI. So ``opencsi-tray.exe --once`` -- which reads as "print one snapshot and
-    exit" -- printed nothing and then sat in the notification area forever. A
-    user asking for a one-shot report got a process that never returns, with no
-    output and no error to explain it.
+    The entry used to ignore argv entirely and always start the resident GUI. So
+    ``opencsi-tray.exe --once`` -- which reads as "print one snapshot and exit"
+    -- printed nothing and then sat in the notification area forever.
 
-    The console binary was unaffected because it goes through argparse, which is
-    exactly why the bug survived: every test drove ``opencsi tray --once``, and
-    nothing exercised the frozen tray's own entry script.
+    That was fixed in ``packaging/tray_entry.py``, which turned out to be the
+    wrong place: the logic was *duplicated* there, so the declared
+    ``opencsi-monitor`` console script and ``python -m opencsi.tray`` both kept
+    the bug. ``opencsi-monitor --help`` hung forever -- the same defect, still
+    live, in two entry points nobody had run.
 
-    These tests call the real entry module with a patched ``sys.argv`` and assert
-    which target it reached, so they test the delegation rather than the presence
-    of a string.
+    The logic now lives once, in ``opencsi.tray.__main__``. These tests drive
+    that function directly, and a separate test proves the frozen script adds
+    nothing of its own.
     """
 
     def _entry(self):
@@ -80,6 +86,29 @@ class TrayEntryArgumentsTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    @contextlib.contextmanager
+    def _gui_is_forbidden(self):
+        """Make the resident-GUI branch raise instead of blocking forever.
+
+        This is not tidiness. Reintroducing the defect -- discarding the
+        arguments and falling through to the GUI -- made these tests *hang*
+        rather than fail, because the fallback is a real pystray message loop.
+        A test that hangs when the bug returns is worse than no test: it reports
+        nothing and blocks the suite, which is exactly how the original defect
+        survived. With this guard the regression fails in milliseconds.
+        """
+        from unittest import mock
+
+        from opencsi.tray import app as tray_app
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError(
+                "the GUI was started when an argument should have reached the CLI"
+            )
+
+        with mock.patch.object(tray_app, "TrayApp", refuse):
+            yield
 
     def test_no_arguments_starts_the_tray(self) -> None:
         """The double-click and start-at-sign-in case must be unchanged."""
@@ -103,30 +132,21 @@ class TrayEntryArgumentsTest(unittest.TestCase):
         self.assertEqual(calls, ["tray"], "a bare launch must start the tray")
 
     def test_once_is_forwarded_to_the_cli_tray_command(self) -> None:
-        """The reported bug: ``--once`` must reach the CLI, not be discarded.
-
-        ``opencsi.tray.__main__.main`` is stubbed as well as spied on. Without
-        that, a regression that discarded the arguments would call the *real*
-        GUI entry point and hang the suite instead of failing it -- which is
-        precisely how the original bug hid, so the test refuses to reproduce
-        that shape.
-        """
+        """The reported bug: ``--once`` must reach the CLI, not be discarded."""
         from unittest import mock
 
         import opencsi.cli.app as cli_app
-        import opencsi.tray.__main__ as tray_main
 
-        entry = self._entry()
+        from opencsi.tray import __main__ as tray_main
+
         seen = []
 
         def fake_cli_main(argv=None) -> int:
             seen.append(list(argv) if argv is not None else None)
             return 0
 
-        with mock.patch.object(cli_app, "main", fake_cli_main), mock.patch.object(
-            tray_main, "main", lambda: seen.append("TRAY-STARTED") or 0
-        ), mock.patch.object(sys, "argv", ["opencsi-tray.exe", "--once", "--no-proxy"]):
-            code = entry.main()
+        with self._gui_is_forbidden(), mock.patch.object(cli_app, "main", fake_cli_main):
+            code = tray_main.main(["--once", "--no-proxy"])
 
         self.assertEqual(code, 0)
         self.assertEqual(
@@ -139,18 +159,16 @@ class TrayEntryArgumentsTest(unittest.TestCase):
         from unittest import mock
 
         import opencsi.cli.app as cli_app
-        import opencsi.tray.__main__ as tray_main
 
-        entry = self._entry()
+        from opencsi.tray import __main__ as tray_main
+
         seen = []
         flags = ["--interval", "60", "--json"]
 
-        with mock.patch.object(
+        with self._gui_is_forbidden(), mock.patch.object(
             cli_app, "main", lambda argv=None: seen.append(list(argv)) or 0
-        ), mock.patch.object(
-            tray_main, "main", lambda: seen.append("TRAY-STARTED") or 0
-        ), mock.patch.object(sys, "argv", ["opencsi-tray.exe", *flags]):
-            entry.main()
+        ):
+            tray_main.main(flags)
 
         self.assertEqual(seen, [["tray", *flags]])
 
@@ -159,14 +177,58 @@ class TrayEntryArgumentsTest(unittest.TestCase):
         from unittest import mock
 
         import opencsi.cli.app as cli_app
-        import opencsi.tray.__main__ as tray_main
 
-        entry = self._entry()
+        from opencsi.tray import __main__ as tray_main
 
-        with mock.patch.object(cli_app, "main", lambda argv=None: 13), mock.patch.object(
-            tray_main, "main", lambda: 0
-        ), mock.patch.object(sys, "argv", ["opencsi-tray.exe", "--once"]):
-            self.assertEqual(entry.main(), 13)
+        with self._gui_is_forbidden(), mock.patch.object(
+            cli_app, "main", lambda argv=None: 13
+        ):
+            self.assertEqual(tray_main.main(["--once"]), 13)
+
+    def test_help_does_not_start_a_resident_tray(self) -> None:
+        """The defect, stated as a property: an argument must not be ignored.
+
+        ``opencsi-monitor --help`` printed nothing and hung forever, because the
+        argument was discarded and the GUI started. Whatever the flag means, a
+        request that carries one must reach the CLI.
+        """
+        from unittest import mock
+
+        import opencsi.cli.app as cli_app
+
+        from opencsi.tray import __main__ as tray_main
+
+        reached = []
+        with self._gui_is_forbidden(), mock.patch.object(
+            cli_app, "main", lambda argv=None: reached.append(list(argv)) or 0
+        ):
+            tray_main.main(["--help"])
+
+        self.assertEqual(reached, [["tray", "--help"]])
+
+    def test_every_documented_flag_reaches_the_cli(self) -> None:
+        """The tray's own flags must survive the hop, not just ``--once``."""
+        from unittest import mock
+
+        import opencsi.cli.app as cli_app
+
+        from opencsi.tray import __main__ as tray_main
+
+        for flag in (
+            ["--check"],
+            ["--once", "--json"],
+            ["--startup-status"],
+            ["--install-startup"],
+            ["--interval", "60"],
+            ["--auto-recover-browser"],
+        ):
+            with self.subTest(flag=flag):
+                seen = []
+                with self._gui_is_forbidden(), mock.patch.object(
+                    cli_app, "main", lambda argv=None: seen.append(list(argv)) or 0
+                ):
+                    tray_main.main(flag)
+                self.assertEqual(seen, [["tray", *flag]])
 
 
 class DeclaredScriptTest(unittest.TestCase):

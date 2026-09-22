@@ -9,6 +9,7 @@ that its single-instance guard behaves.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 import unittest
@@ -847,7 +848,11 @@ class ModuleEntryPointTest(unittest.TestCase):
         original = app_module.TrayApp
         app_module.TrayApp = _FakeApp
         try:
-            code = entry.main()
+            # An explicit empty argv, not the ambient one. `entry.main()` now
+            # forwards arguments to the CLI, so inheriting the *test runner's*
+            # argv would send `unittest discover -s tests` to argparse and fail
+            # the run for a reason that has nothing to do with the tray.
+            code = entry.main([])
         finally:
             app_module.TrayApp = original
 
@@ -877,8 +882,6 @@ class ModuleEntryPointTest(unittest.TestCase):
         """With no console at sign-in, a traceback would be lost entirely."""
         import opencsi.tray.__main__ as entry
 
-        original = entry.__dict__
-
         def explode(*_args, **_kwargs):
             raise RuntimeError("boom")
 
@@ -887,10 +890,31 @@ class ModuleEntryPointTest(unittest.TestCase):
         saved = context_module.make_context
         context_module.make_context = explode
         try:
-            code = entry.main()
+            # Explicitly empty: see the note in the wiring test above.
+            code = entry.main([])
         finally:
             context_module.make_context = saved
         self.assertEqual(code, 1)
+
+    def test_the_ambient_argv_is_used_when_none_is_passed(self) -> None:
+        """`python -m opencsi.tray --once` must work without a caller.
+
+        The explicit-argv parameter is a test seam; the real module invocation
+        passes nothing and must still read the process's own arguments.
+        """
+        from unittest import mock
+
+        import opencsi.cli.app as cli_app
+
+        import opencsi.tray.__main__ as entry
+
+        reached = []
+        with mock.patch.object(
+            cli_app, "main", lambda argv=None: reached.append(list(argv)) or 0
+        ), mock.patch.object(sys, "argv", ["opencsi.tray", "--once", "--json"]):
+            entry.main()
+
+        self.assertEqual(reached, [["tray", "--once", "--json"]])
 
 
 class TrayAppLogicTest(unittest.TestCase):
