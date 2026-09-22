@@ -547,6 +547,132 @@ class CdpCookieProvider:
         """
         return self._token
 
+    def remember_token(self, token: str, *, expires_in: float | None = None) -> None:
+        """Cache a token obtained by something other than the browser.
+
+        This exists for the browserless renewal path
+        (:mod:`opencsi.auth.http_oauth`). That flow obtains a real openCsiTool
+        session over plain HTTP, so the browser it was read *from* knows nothing
+        about the new cookie -- without this, the very next ``get_token()`` would
+        re-read the browser and hand back the old, expiring value, and the
+        renewal would look like it had not happened.
+
+        The cached value is treated exactly like one read from the browser: it
+        expires on the same schedule and ``refresh()`` still overrides it. The
+        provider stays a *cache over a browser*, not a credential store -- nothing
+        is written to disk and the browser remains the fallback source.
+        """
+        if not token:
+            return
+        register_secret(token)
+        self._token = token
+        self._read_at = time.time()
+        self._expires_at = (
+            self._read_at + float(expires_in)
+            if isinstance(expires_in, (int, float)) and expires_in > 0
+            else None
+        )
+        self._last_error = None
+        self._last_detail = None
+        self._last_hint = None
+
+    def read_all_cookies(self, *, timeout: float | None = None) -> list[Mapping[str, Any]]:
+        """Every cookie in the browser, for callers that need more than ``token``.
+
+        The browserless OAuth flow needs the *GitCode* session cookies, not the
+        openCsiTool one, so it cannot go through :meth:`get_token`. This exposes
+        the same read without duplicating the endpoint discovery, the page/browser
+        WebSocket fallback, or the error classification.
+
+        It deliberately does **not** reuse :meth:`_read_cookies`. That method
+        filters to ``https://opencsitool.com/`` because its one caller wants a
+        single cookie, and the filtered page read returns as soon as it has
+        anything -- so it answers "1 cookie" on a browser that holds hundreds, and
+        a GitCode lookup through it would always come back empty. The
+        ``Network.getCookies`` fallback inside it is unreachable for the same
+        reason. Hence a separate walk that asks for the whole store.
+
+        Returns an empty list rather than raising when the browser cannot be
+        reached: the caller is a capability probe as often as it is a fetch, and
+        "no cookies" and "no browser" lead to the same next step. Use
+        :meth:`last_error_code` to tell them apart when it matters.
+
+        No value is logged. Values are returned because the caller has to send
+        them, which is the same contract :meth:`get_token` already has.
+        """
+        del timeout  # the connection's own timeout governs the read
+        try:
+            endpoint = self._endpoint or discover_cdp_endpoint(
+                self._explicit, ports=self._ports, probe=self._discover
+            )
+        except OpenCsiError as exc:
+            self._note_failure(exc)
+            return []
+        self._endpoint = endpoint
+
+        errors: list[str] = []
+
+        # Browser-domain store first: it is the only call that returns cookies
+        # for *every* origin in one shot, with no target attachment.
+        browser_ws = endpoint.browser_ws_url()
+        if browser_ws:
+            try:
+                cookies = self._all_cookies_via_browser(browser_ws)
+                if cookies:
+                    return cookies
+            except (WebSocketError, NetworkError, CdpUnavailableError) as exc:
+                errors.append(f"browser socket: {type(exc).__name__}")
+
+        # Then a page socket, asked *unfiltered*. Chrome scopes the answer to the
+        # page's own origin only when ``urls`` is given, so omitting it is what
+        # makes this a whole-store read rather than a one-origin one.
+        page_ws = self._page_ws_url(endpoint)
+        if page_ws:
+            try:
+                cookies = self._all_cookies_via_page(page_ws)
+                if cookies:
+                    return cookies
+            except (WebSocketError, NetworkError, CdpUnavailableError) as exc:
+                errors.append(f"page socket: {type(exc).__name__}")
+
+        if errors:
+            self._last_error = CdpUnavailableError.code
+            self._last_detail = "could not read the browser cookie store (" + "; ".join(errors) + ")"
+            self._last_hint = self._upgrade_hint(endpoint)
+        return []
+
+    def _all_cookies_via_browser(self, ws_url: str) -> list[Mapping[str, Any]]:
+        """Whole cookie store over a browser-level connection."""
+        with CdpConnection(ws_url, timeout=self._timeout) as conn:
+            version = conn.call("Browser.getVersion", timeout=self._timeout)
+            self._browser = str(version.get("product") or "") or None
+            result = conn.call("Storage.getCookies", timeout=self._timeout)
+            cookies = result.get("cookies")
+            return [c for c in cookies if isinstance(c, Mapping)] if isinstance(cookies, list) else []
+
+    def _all_cookies_via_page(self, ws_url: str) -> list[Mapping[str, Any]]:
+        """Whole cookie store over a page-level connection.
+
+        ``Network.getCookies`` with no ``urls`` argument. Note this still only
+        reaches the *browser process's* store, not a different profile's -- which
+        is the correct boundary, and why the caller has to be pointed at the right
+        endpoint rather than this reaching across.
+        """
+        with CdpConnection(ws_url, timeout=self._timeout) as conn:
+            try:
+                conn.call("Network.enable", timeout=self._timeout)
+            except WebSocketError:
+                pass  # getCookies works without it on most builds
+            result = conn.call("Network.getCookies", timeout=self._timeout)
+            cookies = result.get("cookies")
+            return [c for c in cookies if isinstance(c, Mapping)] if isinstance(cookies, list) else []
+
+    def _note_failure(self, exc: OpenCsiError) -> None:
+        """Record a failure's code, scrubbed detail and hint in one place."""
+        self._last_error = exc.code
+        self._last_detail = scrub_text(str(exc))[:300] or exc.code
+        self._last_hint = exc.hint
+
     def refresh(self) -> str | None:
         """Force a re-read from the browser, bypassing the TTL."""
         try:

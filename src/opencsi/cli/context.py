@@ -30,6 +30,7 @@ from ..auth import (
     ManualCookieProvider,
     SessionManager,
 )
+from ..auth.session import SessionRenewer
 from ..client import BASE_URL, OpenCsiToolClient
 from ..errors import ConfigError, UsageError
 from ..formatting import Table, to_json
@@ -129,22 +130,45 @@ class CliContext:
 
     def make_renewer(
         self, provider: CredentialProvider, *, base_url: str
-    ) -> "BrowserOAuthRenewer | None":
+    ) -> "SessionRenewer | None":
         """Build a silent renewer for ``provider``, or ``None`` if inapplicable.
 
         A separate seam from :meth:`make_session` because ``login --renew``
         needs to *inspect* the renewer's evidence, not just hand it to a
         manager -- and because a test should be able to script a renewal
         without standing up a browser.
+
+        **Order matters, and it is the opposite of what this project assumed for
+        a long time.** The browserless HTTP renewer is tried first because it
+        needs no browser engine at all: measured, the whole OAuth leg is three
+        ordinary requests (``tools/probe_oauth_browserless.py``). The browser
+        renewer is kept as the fallback for the one case HTTP cannot cover --
+        a first-time consent that a human has to approve -- and because a build
+        with no GitCode session readable over CDP can still work if a browser
+        already holds one.
+
+        :class:`~opencsi.auth.session.FallbackRenewer` owns that ordering, so the
+        policy stays in one place rather than being re-derived by each caller.
         """
         if not isinstance(provider, CdpCookieProvider):
             return None
-        return BrowserOAuthRenewer(
+
+        from ..auth.http_oauth import HttpOAuthRenewer
+        from ..auth.session import FallbackRenewer
+
+        http = HttpOAuthRenewer(
+            provider,
+            base_url=base_url,
+            timeout=float(getattr(self.args, "renew_timeout", 45.0) or 45.0),
+            use_proxy=not bool(getattr(self.args, "no_proxy", False)),
+        )
+        browser = BrowserOAuthRenewer(
             getattr(self.args, "cdp", None),
             base_url=base_url,
             timeout=float(getattr(self.args, "renew_timeout", 45.0) or 45.0),
             ports=getattr(self.args, "ports", None) or None,
         )
+        return FallbackRenewer([http, browser])
 
     def make_session(
         self,

@@ -10,6 +10,16 @@ reload*, *session renewal* and *interactive login* that the original single
 """
 
 from .base import CredentialProvider, CredentialStatus
+from .auth_host import (
+    AUTH_PROFILE_DIRNAME,
+    DEFAULT_AUTH_PORT,
+    AuthBrowserHost,
+    AuthHostMode,
+    AuthHostResult,
+    AuthHostStatus,
+    auth_profile_dir,
+    ensure_auth_host,
+)
 from .browser_launch import (
     BrowserLaunch,
     BrowserLaunchStatus,
@@ -26,6 +36,13 @@ from .gitcode_qr import (
     QrProtocolError,
     QrStatus,
 )
+from .gitcode_bridge import (
+    BridgeResult,
+    BridgeStatus,
+    GitCodeBrowserSessionBridge,
+    GITCODE_SESSION_COOKIES,
+    cookie_records,
+)
 from .manual import ManualCookieProvider
 from .oauth_browser import (
     BrowserOAuthRenewer,
@@ -38,6 +55,7 @@ from .session import (
     DEFAULT_RENEW_MARGIN,
     InteractiveAuthenticator,
     LoginResult,
+    LoginStage,
     LoginStatus,
     RenewalResult,
     RenewalStatus,
@@ -69,6 +87,7 @@ __all__ = [
     "RenewalStatus",
     "LoginResult",
     "LoginStatus",
+    "LoginStage",
     "DEFAULT_RENEW_MARGIN",
     "GitCodeQrAuthenticator",
     "QrChallenge",
@@ -76,4 +95,17 @@ __all__ = [
     "QrLoginStatus",
     "QrProtocolError",
     "QrStatus",
+    "GitCodeBrowserSessionBridge",
+    "BridgeResult",
+    "BridgeStatus",
+    "GITCODE_SESSION_COOKIES",
+    "cookie_records",
+    "AuthBrowserHost",
+    "AuthHostResult",
+    "AuthHostStatus",
+    "AuthHostMode",
+    "auth_profile_dir",
+    "ensure_auth_host",
+    "AUTH_PROFILE_DIRNAME",
+    "DEFAULT_AUTH_PORT",
 ]
