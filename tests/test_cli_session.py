@@ -263,6 +263,33 @@ class RenewExitCodeTest(unittest.TestCase):
         missing = [s.name for s in RenewalStatus if s not in _RENEWAL_EXIT]
         self.assertEqual(missing, [], f"no exit code decided for: {missing}")
 
+    def test_every_qr_status_has_a_documented_exit_code(self) -> None:
+        """The QR map had the same silent fallback and no guard at all.
+
+        ``login --qr`` ended in ``{...}.get(result.status, 1)``, so a new
+        ``QrLoginStatus`` would have been reported as exit 1 -- not a documented
+        outcome for this command -- and every test would still have passed. The
+        renewal map was guarded when that class of bug was found; this one was
+        not, which is the "where else does this happen?" question left unasked.
+
+        ``SUCCEEDED`` is exempt because the success path returns 0 before the map
+        is consulted, and asserting its presence would contradict the code.
+        """
+        from opencsi.auth.gitcode_qr import QrLoginStatus
+        from opencsi.cli.login import _qr_exit_codes
+
+        codes = _qr_exit_codes()
+        missing = [
+            s.name for s in QrLoginStatus if s is not QrLoginStatus.SUCCEEDED and s not in codes
+        ]
+        self.assertEqual(missing, [], f"no exit code decided for: {missing}")
+
+    def test_the_qr_map_never_returns_a_success_code(self) -> None:
+        """A failure must not be reported as success by a mapping mistake."""
+        from opencsi.cli.login import _qr_exit_codes
+
+        self.assertNotIn(0, set(_qr_exit_codes().values()))
+
     def test_unverified_success_is_not_reported_as_ok(self) -> None:
         """A renewed cookie the server rejects must not exit 0.
 

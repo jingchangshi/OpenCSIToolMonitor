@@ -65,6 +65,30 @@ _RENEWAL_EXIT = {
 }
 
 
+def _qr_exit_codes() -> dict:
+    """QR outcomes mapped to exit codes.
+
+    Built by a function rather than a module-level literal because
+    ``gitcode_qr`` is imported lazily elsewhere in this module, and importing it
+    at module scope would pull the QR machinery into every ``opencsi``
+    invocation -- including the tray's, which must stay cheap at sign-in. The
+    mapping is still a single named source of truth, so a test can assert it is
+    exhaustive the same way ``_RENEWAL_EXIT`` is.
+
+    ``SUCCEEDED`` is deliberately absent: the success path returns 0 before
+    consulting the map.
+    """
+    from ..auth.gitcode_qr import QrLoginStatus
+
+    return {
+        QrLoginStatus.CANCELLED: EXIT_USAGE,
+        QrLoginStatus.EXPIRED: EXIT_SESSION_EXPIRED,
+        QrLoginStatus.TIMEOUT: EXIT_SESSION_EXPIRED,
+        QrLoginStatus.NETWORK_ERROR: EXIT_NETWORK_ERROR,
+        QrLoginStatus.PROTOCOL_ERROR: EXIT_QR_PROTOCOL,
+    }
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "login",
@@ -170,6 +194,8 @@ def _qr(ctx: CliContext) -> int:
     """
     from ..auth.gitcode_qr import GitCodeQrAuthenticator, QrLoginStatus, QrStatus
     from ..auth.qr_render import decode_payload_image, render_payload, write_image
+
+    qr_exit = _qr_exit_codes()
 
     authenticator = GitCodeQrAuthenticator(
         api_base=os.environ.get("OPENCSI_GITCODE_API", "https://web-api.gitcode.com"),
@@ -286,13 +312,7 @@ def _qr(ctx: CliContext) -> int:
 
     if result.ok:
         return 0
-    return {
-        QrLoginStatus.CANCELLED: EXIT_USAGE,
-        QrLoginStatus.EXPIRED: EXIT_SESSION_EXPIRED,
-        QrLoginStatus.TIMEOUT: EXIT_SESSION_EXPIRED,
-        QrLoginStatus.NETWORK_ERROR: EXIT_NETWORK_ERROR,
-        QrLoginStatus.PROTOCOL_ERROR: EXIT_QR_PROTOCOL,
-    }.get(result.status, 1)
+    return qr_exit.get(result.status, 1)
 
 
 # ── status mode ───────────────────────────────────────────────────────────
