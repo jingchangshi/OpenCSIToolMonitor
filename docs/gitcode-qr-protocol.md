@@ -23,7 +23,13 @@ GitCode 的微信小程序扫码登录是一个**纯 HTTP + JSON 的轮询式流
 保留意见（不改变判定，但必须诚实记录）：
 - ~~按约束要求，**未对创建二维码的 POST 做线上实测**~~ —— **该限制已解除**：`opencsi login --qr` 实现后已对创建接口做过 wire-level 实测（详见 §9.0），`X-Source` 未被服务端强制校验。
 - 扫码动作本身必须由真实微信客户端完成，但这属于"用户拿着手机扫码"的物理步骤，不属于"浏览器 JS 强制执行"，因此不构成 `QR_FLOW_BROWSER_BOUND`。
-- **本判定只覆盖"第一段"（GitCode 扫码 → 拿到 GitCode 凭据）。** 完整的 openCsiTool 登录是**两段**的；第二段（用 GitCode 凭据换 openCsiTool `token` cookie）**实测是 browser-bound**，因为 `/oauth/authorize` 是客户端渲染的 SPA 外壳。详见 §9.1。这不推翻上面的判定，但意味着**浏览器无法被完全移除**，只能退化为"可选认证后端"。
+- **本判定只覆盖"第一段"（GitCode 扫码 → 拿到 GitCode 凭据）。** 完整的 openCsiTool 登录是**两段**的。
+  ~~第二段实测是 browser-bound，因为 `/oauth/authorize` 是客户端渲染的 SPA 外壳。~~
+  **⚠️ 此结论已被推翻。** 第二段**同样是纯 HTTP**：`/oauth/authorize` 这个*页面*确实需要 JS 渲染，
+  但它背后的后端判断（`POST /uc/api/v1/oauth/checkOrAuthorize`）不需要。补上这一步即可拿到
+  `token` cookie，**全程无需浏览器**。判定为 `PURE_HTTP_OAUTH_FEASIBLE`，见
+  `docs/oauth-spa-investigation.md` 与 §9.1 的错因分析。
+  因此**浏览器可以被完全移除**；它只在一个场景下保留：账号从未批准过该应用的授权，需要人去点一次批准页。
 - **`qrcode` 字段不是 QR 码，而是微信小程序码（微信小程序二维码）**。这是渲染环节的硬约束，详见 §9.0；它不改变协议判定，但改变了终端展示方式。
 - 详见 §9 未解问题。
 
@@ -827,7 +833,11 @@ return l(e.qr_code_url || e.url || e.qr_code || e.image || "")
 
 ---
 
-### §9.1 实测：流程是**两段**的，第二段是 browser-bound
+### §9.1 实测：流程是**两段**的，第二段**也是纯 HTTP**
+
+> **⚠️ 本节结论已于后续调查中被推翻，原文保留在下方并标注错因。**
+> **现行结论：`PURE_HTTP_OAUTH_FEASIBLE` —— 第二段不需要浏览器。**
+> 详见 `docs/oauth-spa-investigation.md`，可用 `tools/probe_oauth_browserless.py` 复现。
 
 上面回答的是**第一段**（GitCode 扫码 → 拿到 GitCode 凭据）。但 `opencsi login --qr` 成功后
 openCsiTool 的 `token` cookie **并没有**建立，这一点此前只被当作"下一步提示"写进输出，未被
@@ -840,7 +850,7 @@ openCsiTool 的 `token` cookie **并没有**建立，这一点此前只被当作
    - `sso`：只装 3 个 GitCode SSO cookie（`GITCODE_ACCESS_TOKEN` / `GITCODE_REFRESH_TOKEN` /
      `GitCodeUserName`）—— 这正是"纯 CLI 扫码能拿到的东西"；
    - `all`：装浏览器里**全部 29 个** cookie，**唯独排除** openCsiTool 的 `token` —— 决定性对照；
-3. 用 `urllib` 跟随重定向 `GET` openCsiTool 的 OAuth 入口；
+3. 用 `urllib` **跟随重定向** `GET` openCsiTool 的 OAuth 入口；
 4. 检查 CookieJar 里是否出现新的 `token`。
 
 **结果**：
@@ -853,19 +863,58 @@ openCsiTool 的 `token` cookie **并没有**建立，这一点此前只被当作
 两种场景的响应**完全相同**：`5793` 字节、`11` 个 `<script>` 标签、`spa-shell=True`，
 没有重定向，也没有 `Set-Cookie`。
 
-**结论：第二段是 browser-bound，原因是 `/oauth/authorize` 是一个客户端渲染的 SPA 外壳。**
+**当时的结论（已被推翻）：第二段是 browser-bound，原因是 `/oauth/authorize` 是一个客户端渲染的 SPA 外壳。**
 "是否自动批准"这个判断（SSO 有效则直接回调，无效则渲染授权页）发生在 JavaScript 里，
-非 JS 的 HTTP 客户端只会拿到外壳。这**不是**缺 cookie（29 个全带上也一样），也**不是**
-CAPTCHA。因此 `QR_FLOW_REPRODUCIBLE` 只覆盖第一段；**把浏览器完全去掉在第二段被阻断**。
+非 JS 的 HTTP 客户端只会拿到外壳。因此 `QR_FLOW_REPRODUCIBLE` 只覆盖第一段；把浏览器完全去掉在第二段被阻断。
+
+#### 错在哪里（重要，因为这是一个方法论错误而非数据错误）
+
+上面的**观测全部属实**，错的只有从观测到结论的那一步。探针**跟随了重定向**，
+于是它必然停在 `/oauth/authorize` 这个 SPA 外壳上 —— 这是它设计上唯一能到达的地方。
+真正的判断逻辑不在外壳里，而在外壳**背后的一个后端调用**：
+
+```text
+POST https://web-api.gitcode.com/uc/api/v1/oauth/checkOrAuthorize
+     multipart: client_id, state, redirect_uri, response_type=code
+  -> 200 {"redirect_uri": "<callback>?code=...&state=..."}
+```
+
+把这一步补上，再 `GET` 返回的 callback，就拿到 `Set-Cookie: token`。
+`tools/probe_oauth_browserless.py` 在真实已登录的 GitCode 会话上跑通了整条链路，
+`getUserInfo` 返回 `200`，**全程没有任何浏览器引擎**。
+
+**被混淆的两个命题：**
+
+| 命题 | 真假 |
+| --- | --- |
+| `/oauth/authorize` 这个**页面**需要 JavaScript 才能渲染 | **真** |
+| 建立 openCsiTool 会话需要 JavaScript / 浏览器 | **假** |
+
+外壳是 JS 渲染的，**不等于**它的后端 API 不可直接调用。这正是 §74 里
+"SPA requires JavaScript ≠ all browserless implementations impossible" 所指的错误。
 
 > **一个我差点写错的地方，记录在此以免重犯。**
 > 探针最初只在响应体里 `grep` 关键字，看到 `captcha` 就倾向于把它当成阻断原因。加上
 > "这个关键字出现在 `<script>` 内部还是页面标记里"的判定后发现：它在 script bundle **内部**，
 > 是某个库的名字，不是挑战。仅凭"关键字出现过"就宣布阻断原因，和本项目此前几次
 > "断言自己没有观测过的事实"是同一类错误。探针现在会打印该出处，而不是只打印命中。
+>
+> 本节是同一类错误的**第二个实例**，而且更隐蔽：这次的关键字判定是对的，错的是
+> **请求序列本身不完整**。跟随重定向让探针停在了它唯一能到达的页面，而"到不了"
+> 被读成了"不存在路径"。补上一步即可推翻。
 
 这同时回答了本文档**未解问题 7**（openCsiTool 的 OAuth `redirect` 最终落到哪个路由）：
-落到 `/oauth/authorize`，且该路由需要 JS 才能继续。
+落到 `/oauth/authorize`（**页面**），但该页面的后端判断由 `checkOrAuthorize` 完成，
+不需要 JS 参与。
+
+#### 现行实现
+
+- `src/opencsi/auth/http_oauth.py` — `HttpOAuthRenewer`，纯 HTTP 续期，是**首选**路径。
+- `src/opencsi/auth/oauth_browser.py` — `BrowserOAuthRenewer` **保留**，仅用于 HTTP 覆盖不了的一种情况：
+  账号**从未批准过**该应用的授权（`checkOrAuthorize` 返回 200 但无 `redirect_uri`）。
+  此时报 `CONSENT_REQUIRED`，由人去点一次批准页 —— 批准第三方授权是用户的决定，不是本工具的决定。
+  提交授权的接口（`POST /uc/api/v1/oauth/authorize`）在本项目中**从未被调用**。
+
 
 ---
 
@@ -942,7 +991,10 @@ CAPTCHA。因此 `QR_FLOW_REPRODUCIBLE` 只覆盖第一段；**把浏览器完�
 | `tools/probe_gitcode_qr_live4.py` | 登录完成路径的完整响应头、WAF `418` 观测 | 否 |
 | `tools/probe_gitcode_qr_live5.py` | `/uc` 前缀改写线上确证（`405` vs `401`） | 否 |
 | `tools/probe_gitcode_bundle.py` | （已有）主 bundle 端点抽取 | 否 |
-| `tools/probe_oauth_pure_http.py` | §9.1：把浏览器 cookie 装进 `CookieJar`，验证第二段 OAuth 能否脱离浏览器完成 | 否 |
+| `tools/probe_oauth_pure_http.py` | §9.1（**已被推翻**）：把浏览器 cookie 装进 `CookieJar`，验证第二段 OAuth 能否脱离浏览器完成 | 否 |
+| `tools/probe_oauth_browserless.py` | §9.1 的**现行结论**：补上 `checkOrAuthorize` 这一步，用纯 HTTP 跑通第二段并验证 `getUserInfo` | 否（仅 `checkOrAuthorize` 状态查询） |
+| `tools/probe_qr_browserless_login.py` | 证明"扫码能拿到的凭据形态"足以在**无浏览器**条件下建立并验证 openCsiTool 会话 | 否（仅 `checkOrAuthorize`） |
+| `tools/probe_oauth_spa_static.py` / `_dynamic.py` | 从 bundle 与运行时 XHR 还原授权页调用的真实端点 | 否 |
 
 所有脚本均使用 `urllib.request.ProxyHandler({})` 绕过 `127.0.0.1:7890` 代理，并对所有形如
 `state= / code= / ticket= / token= / scene_id= / client_id= / captcha_id=` 的值做 mask 后才输出。

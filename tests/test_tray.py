@@ -1176,6 +1176,87 @@ class ModuleEntryPointTest(unittest.TestCase):
         self.assertIsNotNone(ctx)
         self.assertIsNone(getattr(args, "command", None))
 
+    def test_a_redundant_tray_prefix_is_tolerated(self) -> None:
+        """``opencsi-tray.exe tray --check`` must not be a usage error.
+
+        This binary *is* the tray, so the sub-command name is redundant here --
+        but a user who has just read ``opencsi tray --check`` will type it, and
+        so did the first draft of the CI workflow. The old answer was
+        "unrecognized arguments: tray", which names the problem but not the fix.
+
+        Asserted on the argv actually forwarded, so it tests the de-duplication
+        rather than merely that nothing raised.
+        """
+        import opencsi.tray.__main__ as entry
+        from opencsi.cli import app as cli_app
+
+        seen: dict[str, object] = {}
+
+        def fake_cli_main(argv):
+            seen["argv"] = list(argv)
+            return 0
+
+        original = cli_app.main
+        cli_app.main = fake_cli_main
+        try:
+            code = entry.main(["tray", "--check"])
+        finally:
+            cli_app.main = original
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            seen.get("argv"),
+            ["tray", "--check"],
+            "the prefix must be removed, not doubled",
+        )
+
+    def test_an_ordinary_flag_is_still_prefixed(self) -> None:
+        """The fix must not break the form that always worked."""
+        import opencsi.tray.__main__ as entry
+        from opencsi.cli import app as cli_app
+
+        seen: dict[str, object] = {}
+
+        def fake_cli_main(argv):
+            seen["argv"] = list(argv)
+            return 0
+
+        original = cli_app.main
+        cli_app.main = fake_cli_main
+        try:
+            code = entry.main(["--check"])
+        finally:
+            cli_app.main = original
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen.get("argv"), ["tray", "--check"])
+
+    def test_a_bare_tray_prefix_starts_the_resident_tray(self) -> None:
+        """``opencsi-tray.exe tray`` means "start the tray", not "no arguments
+        for the CLI" -- the latter would be a usage error."""
+        import opencsi.tray.__main__ as entry
+        from opencsi.tray import app as app_module
+
+        started: dict[str, object] = {}
+
+        class _FakeApp:
+            def __init__(self, service):
+                started["service"] = service
+
+            def run(self, **kwargs):
+                started["ran"] = True
+                return 0
+
+        original = app_module.TrayApp
+        app_module.TrayApp = _FakeApp
+        try:
+            code = entry.main(["tray"])
+        finally:
+            app_module.TrayApp = original
+
+        self.assertEqual(code, 0)
+        self.assertTrue(started.get("ran"), "the resident tray was not started")
+
     def test_an_unexpected_failure_is_reported_not_raised(self) -> None:
         """With no console at sign-in, a traceback would be lost entirely."""
         import opencsi.tray.__main__ as entry

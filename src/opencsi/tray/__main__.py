@@ -53,10 +53,29 @@ def main(argv: list[str] | None = None) -> int:
     if args:
         # ``opencsi-monitor --once`` and ``opencsi tray --once`` are the same
         # request; only the first has the sub-command name implied.
+        #
+        # A leading ``tray`` is tolerated because this binary *is* the tray, so
+        # the sub-command name is redundant here -- and a user who has just read
+        # `opencsi tray --check` in the docs will type `opencsi-tray.exe tray
+        # --check`. Without this the answer is "unrecognized arguments: tray",
+        # which names the problem but not the fix. It cost a CI job its first
+        # draft, which is a fair sign it would cost a user a support question.
+        if args[0] == "tray":
+            args = args[1:]
+            if not args:
+                # ``opencsi-tray.exe tray`` on its own means "start the tray",
+                # which is what the no-argument branch below does.
+                return _run_resident()
+
         from ..cli.app import main as cli_main
 
         return cli_main(["tray", *args])
 
+    return _run_resident()
+
+
+def _run_resident() -> int:
+    """Start the resident tray. The double-click and start-at-sign-in case."""
     service = None
     try:
         from ..cli.context import make_context

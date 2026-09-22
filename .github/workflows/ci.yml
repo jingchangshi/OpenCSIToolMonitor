@@ -1,0 +1,235 @@
+name: CI
+
+# What this workflow is for
+# -------------------------
+# It exists to catch the classes of breakage this project has actually suffered,
+# not to produce a green badge. Three of those were invisible to a plain
+# `pytest` run on one machine:
+#
+#   * the suite only ever ran under pytest, so anything unittest-specific (or any
+#     reliance on pytest fixtures) went unnoticed;
+#   * the frozen binaries were never executed, so a build that produced an EXE
+#     which could not start still "passed";
+#   * a probe script could be added that mutates state, and nothing checked.
+#
+# So each job below corresponds to a real defect rather than to a best practice.
+#
+# **No job needs credentials and no job touches the network.** Every test that
+# would need a live session is stubbed or skipped, which is what lets this run on
+# a fork with no secrets configured. A CI that required a real token would be a CI
+# that nobody outside this machine could run.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep the suite's own output stable across runners.
+  PYTHONIOENCODING: utf-8
+  PYTHONDONTWRITEBYTECODE: "1"
+  # Any accidental attempt to use a proxy in tests would be a bug; this makes it
+  # fail loudly rather than silently reaching out.
+  NO_PROXY: "*"
+
+jobs:
+  # ── 1. both runners, on the interpreter range the package claims ──────────
+  test:
+    name: tests (python ${{ matrix.python }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12", "3.13"]
+        include:
+          # The newest interpreter is where the project actually runs, so it is
+          # tested even though the classifier list stops at 3.13.
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: windows-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+
+      # unittest is not redundant with pytest. The suite is written to run under
+      # both, and pytest's collection does not exercise `unittest.main()` or the
+      # module-level imports the same way. A test that passes under one and fails
+      # under the other is a real bug in the test, and this is the only place it
+      # would be caught.
+      - name: unittest
+        run: python -m unittest discover -s tests -t tests -v
+
+      - name: pytest
+        run: python -m pytest -q
+
+  # ── 2. the package must import with zero third-party dependencies ────────
+  stdlib-only:
+    name: import with no optional extras
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The package declares `dependencies = []` on purpose: it has to run on an
+      # air-gapped Windows machine with no package index. That promise is easy to
+      # break by adding one convenient import, and nothing else would notice,
+      # because every developer machine has Pillow and pystray installed.
+      - name: The CLI must import with only the standard library
+        run: |
+          python -c "
+          import sys
+          import opencsi
+          for name in ('PIL', 'pystray', 'segno', 'requests'):
+              assert name not in sys.modules, f'{name} was imported at package import time'
+          print('opencsi imported with no third-party modules loaded')
+          "
+
+      # Run through the console-script entry point rather than `-m`, because that
+      # is what the installed tool actually invokes -- and `python -m opencsi`
+      # would additionally require a `__main__.py` that the package does not have.
+      - name: --help must work without the optional extras
+        run: |
+          python -c "
+          import sys
+          from opencsi.cli.app import main
+          sys.exit(main(['--help']))
+          "
+
+  # ── 3. no credentials may ever be committed ──────────────────────────────
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # This scans the *working tree* for the shapes a real credential takes. The
+      # project's whole contract is that secrets are never printed, logged or
+      # stored, and a contract that is only checked by hand is a contract that
+      # eventually breaks.
+      #
+      # The patterns are deliberately narrow: a broad "long string" rule would
+      # match base64 test fixtures and be ignored within a week. The script is
+      # also runnable locally, and each pattern was verified to *catch* a planted
+      # secret before being trusted -- a scan that passes vacuously is worthless.
+      - name: Scan for credential-shaped strings
+        run: bash tools/ci_secret_scan.sh
+
+  # ── 4. the probes must declare their safety posture ──────────────────────
+  probe-posture:
+    name: probe safety posture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # tools/probe_*.py reach a live service and can change real state. Every
+      # one must state in its docstring whether it is read-only, GET-only, or
+      # mutating -- so that nobody has to read the whole file to find out before
+      # running it. This is enforced in the unit suite too; running it here makes
+      # the requirement visible in CI rather than only in a test name.
+      - name: Every probe declares its posture
+        run: python -m pytest tests/test_packaging.py -q -k posture
+
+  # ── 5. the frozen binaries must actually start ───────────────────────────
+  frozen:
+    name: frozen binaries (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build and runtime extras
+        run: python -m pip install --upgrade pip pyinstaller Pillow pystray segno
+
+      - name: Build the standalone binaries
+        run: python tools/build_exe.py
+
+      # The point of this job. A frozen build is an independent test object: it
+      # has a different import system, no source tree, and no `sys.path` entry for
+      # `src`. A build that succeeds but produces a binary which cannot start is a
+      # failure that only running it can detect -- and it is exactly the failure
+      # that shipped once already, because the frozen tray resolved a startup
+      # command pointing at a binary that did not exist.
+      - name: The frozen CLI must run
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter opencsi.exe | Select-Object -First 1
+          if (-not $exe) { throw "opencsi.exe was not produced" }
+          Write-Host "found $($exe.FullName)"
+          & $exe.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw "--version exited $LASTEXITCODE" }
+          & $exe.FullName --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "--help exited $LASTEXITCODE" }
+
+      - name: The frozen tray must build a menu without a display
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter opencsi-tray.exe | Select-Object -First 1
+          if (-not $exe) { throw "opencsi-tray.exe was not produced" }
+          Write-Host "found $($exe.FullName)"
+          # `--check` proves the icon and menu can be constructed and then exits.
+          # It touches no network, so it cannot hang waiting for an API.
+          #
+          # NOTE: no `tray` prefix. This binary *is* the tray, so its arguments go
+          # straight to the tray sub-command; `opencsi-tray.exe tray --check`
+          # would double the sub-command. The entry point now tolerates that too,
+          # but CI asserts the canonical form.
+          & $exe.FullName --check
+          if ($LASTEXITCODE -ne 0) { throw "tray --check exited $LASTEXITCODE" }
+
+      - name: Upload the binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frozen-binaries
+          path: |
+            dist/**
+            build/**/*.exe
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ── 6. the tree must be clean of generated junk ──────────────────────────
+  hygiene:
+    name: repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: No compiled artefacts are committed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(__pycache__|\.pyc$|\.pyo$|\.egg-info|^dist/|^build/)'; then
+            echo "::error::compiled or generated files are tracked"; exit 1
+          fi
+          echo "no generated files are tracked"
+
+      - name: Every Python file compiles
+        run: python -m compileall -q src tools tests
