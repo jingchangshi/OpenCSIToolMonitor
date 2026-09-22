@@ -108,11 +108,15 @@ def main() -> int:
     #: run reported "INCONCLUSIVE: 0 renewals" while its own log showed the
     #: lifetime jumping 2418s -> 3557s twice. That is a renewal, whoever did it.
     #: A cookie's lifetime only ever falls on its own, so an increase is proof
-    #: that a new cookie was issued.
-    jumps = 0
+    #: that a new cookie was issued. But a renewal *this* process performs is
+    #: visible twice -- once through the wrapper and once as the lifetime moving
+    #: as a result -- so the two counters must not simply be added.
+    jumps = 0  # every lifetime jump, whoever caused it
+    external_jumps = 0  # jumps NOT explained by a renewal this process performed
     previous_lifetime: float | None = None
 
     while time.monotonic() < deadline:
+        renewals_before = renewals
         service.tick()
         snapshot = service.snapshot
         status = session.status()
@@ -125,14 +129,22 @@ def main() -> int:
             and lifetime_now > previous_lifetime + 30.0
         ):
             jumps += 1
+            if renewals > renewals_before:
+                # Same event, seen twice. Counting it in both buckets reported one
+                # renewal as "2 silent renewal(s)" on the run that prompted this
+                # fix, and exited 0 on the strength of the inflated number.
+                attribution = "this process"
+            else:
+                external_jumps += 1
+                attribution = "another renewer"
             print(
                 f"[{time.strftime('%H:%M:%S')}] LIFETIME JUMPED "
                 f"{previous_lifetime:.0f}s -> {lifetime_now:.0f}s "
-                f"(a new cookie was issued)"
+                f"({attribution} issued a new cookie)"
             )
         previous_lifetime = lifetime_now
 
-        if renewals + jumps >= args.renewals:
+        if renewals + external_jumps >= args.renewals:
             break
 
         lifetime = f"{lifetime_now:6.0f}s" if lifetime_now else " unknown"
@@ -152,6 +164,7 @@ def main() -> int:
     print()
     print(f"renewals performed by this process: {renewals}")
     print(f"lifetime jumps seen (any renewer) : {jumps}")
+    print(f"  of which another renewer caused : {external_jumps}")
 
     if problems:
         print("SOAK FAILED:")
@@ -159,9 +172,14 @@ def main() -> int:
             print(f"  - {item}")
         return 1
 
-    if renewals + jumps < args.renewals:
+    #: Distinct renewal events. A renewal this process performed shows up as both
+    #: a wrapper call and a lifetime jump, so adding the raw counters double-counts
+    #: it; `external_jumps` already excludes those.
+    total = renewals + external_jumps
+
+    if total < args.renewals:
         print(
-            f"INCONCLUSIVE: only {renewals + jumps} of {args.renewals} renewals "
+            f"INCONCLUSIVE: only {total} of {args.renewals} renewals "
             f"observed within {args.minutes:.0f} minutes. The session is still "
             "healthy, so this is not a failure -- run it longer to see more."
         )
@@ -177,9 +195,9 @@ def main() -> int:
 
     print()
     print(
-        f"VERIFIED: {renewals + jumps} silent renewal(s) across real expiries "
-        f"({renewals} performed by this process, {jumps} observed as lifetime "
-        "jumps), with no user interaction and no interactive login required."
+        f"VERIFIED: {total} silent renewal(s) across real expiries "
+        f"({renewals} performed by this process, {external_jumps} observed only as "
+        "lifetime jumps), with no user interaction and no interactive login required."
     )
     return 0
 

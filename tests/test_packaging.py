@@ -557,6 +557,37 @@ class LiveProbeTest(unittest.TestCase):
         self.assertIn("drift", source)
         self.assertIn("GROWTH_TOLERANCE", source)
 
+    def test_the_soak_does_not_double_count_its_own_renewals(self) -> None:
+        """One renewal must not be reported as two.
+
+        A renewal this process performs is visible twice: the wrapper around
+        ``session.renew`` counts the call, and the lifetime then jumps because a
+        new cookie was issued. Adding those two counters reported a single real
+        renewal as "2 silent renewal(s)" and exited 0 on the inflated number --
+        which is the worst kind of probe bug, because the exit code said the
+        stronger claim had been proven.
+
+        The counters are therefore tracked separately: ``jumps`` is every jump
+        observed, ``external_jumps`` only those no local renewal explains, and the
+        total that decides success uses ``renewals + external_jumps``.
+        """
+        source = (ROOT / "tools" / "probe_renewal_soak.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("external_jumps", source, "the attribution split is gone")
+        self.assertIn(
+            "renewals + external_jumps",
+            source,
+            "success is again decided by adding the raw counters, which "
+            "double-counts a renewal this process performed",
+        )
+        # The raw sum must not appear in the decision paths any more.
+        self.assertNotIn(
+            "renewals + jumps",
+            source,
+            "the double-counting sum is back",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
