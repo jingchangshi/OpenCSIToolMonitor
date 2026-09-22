@@ -609,6 +609,19 @@ GET  <that callback>   -> 200 + Set-Cookie: token
 > **页面需要 JS 渲染 ≠ 它的后端 API 不能直接调用。**
 > 错因分析见 [`docs/gitcode-qr-protocol.md`](docs/gitcode-qr-protocol.md) §9.1。
 
+**续期之后，凭据会被写回浏览器**，这样下一个进程还能用：
+
+```bash
+opencsi login --renew    # 纯 HTTP 续期，然后把新 cookie 通过 CDP 写回浏览器
+opencsi usage            # 另一个进程，从浏览器读到新 cookie
+```
+
+这不是多此一举：本项目的硬约束是**凭据不落盘**，所以浏览器就是凭据存储 ——
+`opencsi usage` 作为独立进程能工作，正是因为它从浏览器读 cookie。
+不写回去的话，续期只在**那一个进程的内存里**有效，
+`login --renew` 成功而紧接着的 `usage` 失败。
+细节见 [`docs/authentication.md`](docs/authentication.md) 的"浏览器是凭据存储"一节。
+
 唯一需要人的一步是：**账号从未批准过这个应用**时，GitCode 会要求点一次批准页。
 这时命令会报 `CONSENT_REQUIRED` 并打开页面让你确认 —— 批准第三方授权是你的决定，
 不是本工具的决定，所以提交授权的接口在本项目中**从未被调用**。

@@ -314,6 +314,49 @@ f"{key[:10]}****"     # sk-bM4LUSm****
 所以 `_evaluate()` 接收 `timed_out` 标志，最终**以 Cookie jar 的实际状态为准**；
 只有确实超时且**没有**拿到 token 时才报 `TIMEOUT`。
 
+### 浏览器是凭据存储，不是认证步骤
+
+这一节解释一个容易看反的设计，也是"浏览器无法被移除"这个说法最后的落点。
+
+**认证不需要浏览器**（见上）。但**凭据存放**需要它 —— 而这是两回事。
+
+本项目的硬约束是**凭据不落盘**：`token` 只存内存、不写配置文件、不写日志。
+那么 `opencsi usage` 作为**另一个进程**启动时，从哪里拿到凭据？
+答案一直是浏览器：`CdpCookieProvider` 从运行中的 Chrome/Edge 读 cookie。
+这就是为什么 `opencsi usage` 能在没有共享状态的前提下工作。
+
+纯 HTTP 续期打破了这一点，而且方式很隐蔽：它在**内存里**铸造了一个真实会话，
+但那个浏览器**从来不知道**这个新 cookie 存在。于是：
+
+```text
+opencsi login --renew   ->  RENEWED        （进程 A 内存里有 token）
+opencsi usage           ->  没有 token     （进程 B 去问浏览器，浏览器没有）
+```
+
+一次**成功的续期**，报成了失败。这是"把部分成功描述成完整成功"的镜像：
+这里是**把完整成功描述成失败**，同样是报告与事实不符。
+
+**修法只能是浏览器，不能是文件。** 把 cookie 写到磁盘会直接违反上面的硬约束，
+而且会把一个活的凭据放到项目承诺过绝不放的地方。
+
+所以续期成功后，`HttpOAuthRenewer._install_into_browser()` 会把这个 cookie
+通过 CDP 写回浏览器（`CdpCookieProvider.install_token()`）。写之前先验证了
+`Storage.setCookies` 在这个 Chrome 版本上确实可用 —— 用
+`tools/probe_cookie_write.py`（写一个合成标记再删掉），而不是假设它可用。
+
+几个刻意的边界：
+
+- **只写一个 cookie**：`token`，域 `opencsitool.com`。不碰任何其他 cookie，
+  也不删除任何东西。
+- **保持 `HttpOnly` / `Secure`**：被替换的那个 cookie 有这两个标志，
+  一次悄悄降级它们的安全属性的"修复"是安全回归。
+- **写入失败不算续期失败**。续期**确实**成功了，只有持久化这一步失败，
+  两者混为一谈会把一次可用的续期报成错误。失败记录在 `last_persisted` 上，
+  且 `None`（该 provider 没有写入能力）与 `False`（尝试了但失败）是**不同的事实**。
+- **`expires_in` 传的是相对秒数**，转成绝对时间由 provider 做。CDP 要的是绝对
+  epoch；传相对值会把过期时间设到 1970 年，cookie 立刻被丢弃 —— 那看起来
+  和"写入被拒绝"一模一样。
+
 ### 静默续期不抢焦点
 
 续期用 `Target.createTarget` 开一个**后台**目标，完成后 `Target.closeTarget` 关掉。
