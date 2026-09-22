@@ -392,5 +392,109 @@ class PyInstallerIsNotARuntimeDependencyTest(unittest.TestCase):
             )
 
 
+class LiveProbeTest(unittest.TestCase):
+    """The live probes are evidence, so they must stay runnable and honest.
+
+    These tools are what backs the claims in the implementation report that the
+    offline suite cannot reach: a real OAuth round trip, a real Windows message
+    loop. A probe that has silently stopped importing is worse than no probe,
+    because the report still cites it.
+
+    Nothing here *runs* a probe -- each needs a browser, a network and a live
+    session, so requiring them would make the suite unrunnable offline. What is
+    checked is the contract that makes them trustworthy: they parse, they carry
+    a docstring explaining what they prove, and the ones that can fail to prove
+    anything say so instead of reporting success.
+    """
+
+    def _probes(self) -> list[Path]:
+        return sorted((ROOT / "tools").glob("probe_*.py"))
+
+    def test_the_probes_are_present(self) -> None:
+        names = {path.name for path in self._probes()}
+        for expected in (
+            "probe_autonomous_renewal.py",
+            "probe_renewal_gate.py",
+            "probe_tray_live.py",
+        ):
+            with self.subTest(probe=expected):
+                self.assertIn(expected, names)
+
+    def test_every_probe_parses_and_explains_itself(self) -> None:
+        for path in self._probes():
+            with self.subTest(probe=path.name):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                docstring = ast.get_docstring(tree)
+                self.assertTrue(docstring, f"{path.name} has no docstring")
+                # A one-line title is not an explanation. The bar is low on
+                # purpose -- these probes differ wildly in scope -- but a reader
+                # must be able to tell what running it would prove.
+                self.assertGreaterEqual(
+                    len(docstring.split()),
+                    12,
+                    f"{path.name} does not explain what it proves",
+                )
+
+    def test_every_probe_declares_its_safety_posture(self) -> None:
+        """A probe runs against the live site, so it must state its own limits.
+
+        Each of these either performs network calls against a real account or
+        drives a real GUI, so "what could this touch?" has to be answerable from
+        the file itself. The acceptable declarations differ -- a QR probe is
+        read-only, the tray probe uses an offline stub, the soak probe writes
+        nothing but a line per sample -- so this checks that one of them is
+        present rather than demanding a single wording.
+        """
+        declarations = (
+            r"read-only",
+            r"GET only",
+            r"GET-only",
+            r"GET/OPTIONS",
+            r"never POST",
+            r"no state-mutating",
+            r"never prints",
+            r"touches no network",
+            r"offline stub",
+            r"writes nothing",
+        )
+        for path in self._probes():
+            with self.subTest(probe=path.name):
+                docstring = ast.get_docstring(
+                    ast.parse(path.read_text(encoding="utf-8"))
+                ) or ""
+                self.assertTrue(
+                    any(
+                        re.search(pattern, docstring, re.IGNORECASE)
+                        for pattern in declarations
+                    ),
+                    f"{path.name} does not declare what it may touch",
+                )
+
+    def test_the_gate_probe_can_refuse_to_claim_success(self) -> None:
+        """A probe that cannot reach its precondition must not report PASS.
+
+        `probe_renewal_gate.py` proves the renewal gate stays *shut*. With an
+        almost-expired credential the gate should be open, so the probe can
+        prove nothing -- and it must say that rather than exiting 0, which would
+        turn "I could not test this" into "this is fine".
+        """
+        source = (ROOT / "tools" / "probe_renewal_gate.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("return 2", source, "the SKIP path is gone")
+        self.assertIn("SKIP", source)
+        # It must take the margin from the real config, not retype it, or it
+        # would keep passing after the production policy changed.
+        self.assertIn("MonitorConfig().renew_margin", source)
+
+    def test_the_gate_probe_checks_both_directions(self) -> None:
+        """Growth means a renewal ran; decay means it correctly did not."""
+        source = (ROOT / "tools" / "probe_renewal_gate.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("drift", source)
+        self.assertIn("GROWTH_TOLERANCE", source)
+
+
 if __name__ == "__main__":
     unittest.main()
