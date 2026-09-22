@@ -30,10 +30,10 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | Windows 11 托盘 v1 | **完成，实测验证** | `opencsi tray --once` 打印真实快照；`--check` 报告 `tray: ok`，7 个菜单项（含「开机自启动」） |
 | 浏览器缺失时用户可自救 | **完成，实测验证** | 杀掉 Chrome 后单条命令即恢复：`state: OK`，`EXIT=0`（见 §10 缺陷 8） |
 | GitCode 授权页未确认时的正确报告 | **完成，实测（见 §10 缺陷 10 的边界说明）** | 真实站点确认了授权页会让旧代码报 `TIMEOUT`、且点「授权」即签发新 token；新状态的判定逻辑由离线脚本验证（真实站点无法按需复现该页面） |
-| 测试 | **完成** | **731 项测试**（730 通过、1 跳过、119 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
+| 测试 | **完成** | **732 项测试**（731 通过、1 跳过、119 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
-| 规范提交 | **完成** | 34 个修改源码/测试的提交（§11 完整列出）；其中 12 个修复了通过**运行真实产物**才发现的缺陷 |
+| 规范提交 | **完成** | 35 个修改源码/测试的提交（§11 完整列出）；其中 12 个修复了通过**运行真实产物**才发现的缺陷 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
@@ -319,7 +319,7 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 
 **分层。** 一切不需要 Windows 消息循环就能测试的东西都被下沉到 `monitor/` 与
 `tray/presenter.py`，它们是纯的。`app.py` 只负责把已经算好的值交给 pystray。这就是为什么
-731 项测试可以离线运行，而托盘本身在真机上验证。
+732 项测试可以离线运行，而托盘本身在真机上验证。
 
 **状态**（`MonitorState`）：`STARTING`、`OK`、`REFRESHING`、`RENEWING`、
 `LOGIN_REQUIRED`、`CONSENT_REQUIRED`、`BROWSER_UNAVAILABLE`、`OFFLINE`、
@@ -389,14 +389,14 @@ EXIT=0
 
 ## 9. 测试
 
-**731 项测试：730 通过，1 跳过，119 个 subtest 通过。**
+**732 项测试：731 通过，1 跳过，119 个 subtest 通过。**
 
 ```
 $ pytest
-730 passed, 1 skipped, 119 subtests passed in 38.87s
+731 passed, 1 skipped, 119 subtests passed in 39.11s
 
 $ python -m unittest discover -s tests -q
-Ran 731 tests in 37.129s
+Ran 732 tests in 38.332s
 OK (skipped=1)
 ```
 
@@ -727,20 +727,20 @@ SSO 会话显然还活着。照着这句提示去做，就是让用户在自己�
 
 ## 11. 提交
 
-自 `cf34c1b` 起，**修改了源码或测试的提交共 34 个**，下表完整列出（最旧在前，覆盖
-`cf34c1b` 到 `9115237`）。全部以 `opencsi contributors <contributors@opencsi.invalid>`
+自 `cf34c1b` 起，**修改了源码或测试的提交共 35 个**，下表完整列出（最旧在前，覆盖
+`cf34c1b` 到 `430148e`）。全部以 `opencsi contributors <contributors@opencsi.invalid>`
 署名。
 
 表中没有、也不可能有的是**纯文档提交**：它们撰写、修订本报告，修正本报告对自身 SHA 的
 引用，并把报告改写为中文。一个提交无法列出自己的 SHA，所以它们不可能出现在表里；
-`9115237` —— 最后一个修改源码或测试的提交 —— 是 §2 中命名的锚点。
+`430148e` —— 最后一个修改源码或测试的提交 —— 是 §2 中命名的锚点。
 
 这里刻意**不写"总提交数"**：那个数字每写一次文档提交就会失效，而写它的正是文档提交
-本身。34 则是稳定的——文档提交不碰 `src/`、`tests/`、`packaging/`，所以这个数字不会
+本身。35 则是稳定的——文档提交不碰 `src/`、`tests/`、`packaging/`，所以这个数字不会
 被本节自身的修订改变。判定标准同样是机械的：
 
 ```bash
-git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 34 行，即下表
+git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 35 行，即下表
 ```
 
 因此上表可以被独立复核，而不必相信这段文字。
@@ -781,6 +781,7 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging   # 34 行，即下表
 | `a48bce8` | test: cover the consent state end to end, and the tray menu it produces |
 | `27528e8` | fix(monitor): classify a 401 by what renewal said, not just by the HTTP status |
 | `9115237` | fix(cli): stop telling a signed-in user that their SSO session is gone |
+| `430148e` | test(auth): anchor the consent probe to the labels the real page shows |
 
 ---
 
