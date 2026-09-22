@@ -168,5 +168,90 @@ class DescribeHonestyTest(unittest.TestCase):
         self.assertIn("will start hidden", host.describe())
 
 
+class VisibleFallbackTest(unittest.TestCase):
+    """A caller that promised no window must be able to keep that promise.
+
+    ``ensure_running`` used to open the window *first* and report it afterwards.
+    A caller that inspected the result and declined was therefore too late: the
+    window was already on screen, and the only thing it could still control was
+    what it said about it. These tests pin the refusal to the point *before* the
+    launch, which is the only point where it changes anything.
+
+    No browser is started: ``_headless_supported`` is patched to the pessimistic
+    answer so the fallback branch is reached, and ``launch_debug_browser`` is
+    patched so the launch is observable rather than real.
+    """
+
+    def _host(self, **kw):
+        return AuthBrowserHost(port=9224, headless=True, **kw)
+
+    def test_a_caller_that_forbids_a_window_gets_no_launch(self) -> None:
+        host = self._host(visible_fallback=False)
+
+        with (
+            mock.patch.object(host, "is_running", return_value=False),
+            mock.patch.object(auth_host, "find_browser", return_value=("chrome", auth_host.Path("chrome.exe"))),
+            mock.patch.object(auth_host, "_headless_supported", return_value=False),
+            mock.patch.object(auth_host, "launch_debug_browser") as launch,
+        ):
+            result = host.ensure_running()
+
+        launch.assert_not_called()
+        self.assertFalse(result.ok)
+        self.assertFalse(result.visible)
+        self.assertIs(result.status, auth_host.AuthHostStatus.FAILED)
+        # The reason must name the actual cause, or a user cannot act on it.
+        self.assertIn("does not open windows", result.detail or "")
+
+    def test_the_default_still_falls_back_to_a_window(self) -> None:
+        """The interactive path wants a browser, so it must keep the fallback.
+
+        Refusing it by default would break ``login --qr`` on any build that
+        rejects ``--headless=new``, which is the opposite of the fix's intent.
+        """
+        from opencsi.auth.browser_launch import BrowserLaunch, BrowserLaunchStatus
+
+        host = self._host()
+
+        with (
+            mock.patch.object(host, "is_running", return_value=False),
+            mock.patch.object(auth_host, "find_browser", return_value=("chrome", auth_host.Path("chrome.exe"))),
+            mock.patch.object(auth_host, "_headless_supported", return_value=False),
+            mock.patch.object(
+                auth_host,
+                "launch_debug_browser",
+                return_value=BrowserLaunch(BrowserLaunchStatus.LAUNCHED, browser="chrome"),
+            ) as launch,
+        ):
+            result = host.ensure_running()
+
+        launch.assert_called_once()
+        self.assertTrue(result.ok)
+        self.assertTrue(result.visible)
+        self.assertFalse(result.headless, "a visible engine must not be reported as headless")
+
+    def test_a_visible_result_is_never_reported_as_headless(self) -> None:
+        """The one field a caller uses to decide whether to trust "no window"."""
+        from opencsi.auth.browser_launch import BrowserLaunch, BrowserLaunchStatus
+
+        host = self._host()
+
+        with (
+            mock.patch.object(host, "is_running", return_value=False),
+            mock.patch.object(auth_host, "find_browser", return_value=("chrome", auth_host.Path("chrome.exe"))),
+            mock.patch.object(auth_host, "_headless_supported", return_value=False),
+            mock.patch.object(
+                auth_host,
+                "launch_debug_browser",
+                return_value=BrowserLaunch(BrowserLaunchStatus.LAUNCHED, browser="chrome"),
+            ),
+        ):
+            result = host.ensure_running()
+
+        self.assertIs(result.mode, auth_host.AuthHostMode.VISIBLE)
+        self.assertFalse(result.headless)
+        self.assertNotIn("no user-visible window", host.describe())
+
+
 if __name__ == "__main__":
     unittest.main()

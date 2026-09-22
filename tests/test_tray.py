@@ -1066,6 +1066,27 @@ class TrayCliTest(unittest.TestCase):
             parser.parse_args(["tray", "--auto-recover-browser"]).auto_recover_browser
         )
 
+    def test_the_hidden_host_is_on_by_default_and_can_be_refused(self) -> None:
+        """Opposite defaults, because the two recoveries cost the user differently.
+
+        The hidden host opens nothing, so it is on by default and the flag turns
+        it *off* (``--no-auth-host``). The visible browser opens a window, so it
+        is off by default and the flag turns it *on*. Getting either polarity
+        backwards would either open windows unasked or leave §30's post-reboot
+        case reporting a failure it was supposed to resolve.
+        """
+        from opencsi.cli.context import build_parser
+
+        parser = build_parser()
+        self.assertTrue(parser.parse_args(["tray"]).auto_recover_auth_host)
+        self.assertFalse(
+            parser.parse_args(["tray", "--no-auth-host"]).auto_recover_auth_host
+        )
+        # The two flags are independent, not aliases of one another.
+        both = parser.parse_args(["tray", "--no-auth-host", "--auto-recover-browser"])
+        self.assertFalse(both.auto_recover_auth_host)
+        self.assertTrue(both.auto_recover_browser)
+
     def test_once_exit_codes_name_the_cause_not_a_blanket_permission_error(
         self,
     ) -> None:

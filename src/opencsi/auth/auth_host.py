@@ -205,6 +205,32 @@ def _headless_supported(executable: Path) -> bool:
     A probe failure means "unknown", and unknown is treated as unsupported so the
     caller falls back to a mode that is known to work rather than starting a
     browser that immediately exits.
+
+    .. warning::
+
+       **This probe is known to be wrong on Chrome 153**, and the failure is
+       measured rather than suspected. On that build
+       ``chrome --headless=new --version`` neither rejects the flag nor prints a
+       version -- it *hangs*, so the fifteen-second timeout below fires and a
+       build with working headless support is reported as not having any. The
+       same Chrome launched with ``--headless=new --remote-debugging-port=...``
+       answers ``/json/version`` with ``HeadlessChrome/153.0.0.0``, which is
+       proof the capability is present.
+
+       It is left in place rather than replaced by a launch-based probe because
+       the replacement could not be verified on the development machine: every
+       Chromium started from a Python child process there exits immediately with
+       status 0 (a sandbox artefact -- the same launch via a shell works), so a
+       probe that depends on starting one cannot be shown to work. Shipping an
+       unverified probe that starts browsers is worse than shipping a slow one
+       that is merely pessimistic, because the pessimistic answer is at least
+       *safe*: it falls back to a visible window instead of claiming a hidden
+       engine that is not there.
+
+       The consequence is stated plainly in
+       ``OpenCSIToolMonitor_Final_Auth_Closure_Report.md`` §9b: on this machine
+       the unattended monitor cannot bring up a hidden auth host, and it reports
+       ``BROWSER_UNAVAILABLE`` rather than opening a window unasked.
     """
     try:
         completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
@@ -303,11 +329,22 @@ class AuthBrowserHost:
         profile: Path | None = None,
         headless: bool = True,
         start_timeout: float = DEFAULT_START_TIMEOUT,
+        visible_fallback: bool = True,
     ) -> None:
         self._port = port
         self._profile = profile or auth_profile_dir()
         self._headless = headless
         self._start_timeout = start_timeout
+        #: Whether a build that rejects ``--headless=new`` may be started in a
+        #: visible window anyway. ``True`` for the interactive path, where the
+        #: user asked for a browser and a window is expected; ``False`` for an
+        #: unattended caller that promised not to put anything on the desktop.
+        #:
+        #: This has to be decided *before* the launch, not after. The fallback
+        #: opens a real window as part of starting, so a caller that inspected the
+        #: result and then declined it would already have put the window on
+        #: screen -- reporting the right thing while doing the wrong one.
+        self._visible_fallback = visible_fallback
         #: Whether the *running* engine was actually started hidden, as opposed
         #: to whether one was requested. ``None`` until a launch has been
         #: observed. Kept separately from ``_headless`` because the two differ
@@ -451,6 +488,26 @@ class AuthBrowserHost:
             # experience than a hidden one, but it is strictly better than no
             # session renewal at all -- and the caller is told, so the tray can
             # avoid claiming the browser is invisible.
+            #
+            # Unless the caller ruled it out. An unattended monitor that promised
+            # not to open windows must be able to keep that promise, and it can
+            # only do so here, before the launch: declining a window after it has
+            # been opened is not declining it.
+            if not self._visible_fallback:
+                self._headless_actual = None
+                return AuthHostResult(
+                    status=AuthHostStatus.FAILED,
+                    mode=AuthHostMode.STOPPED,
+                    port=self._port,
+                    browser=name,
+                    executable=str(executable),
+                    profile=str(self._profile),
+                    headless=False,
+                    detail=(
+                        f"{name} does not accept --headless=new, and this caller "
+                        "does not open windows, so no engine was started"
+                    ),
+                )
             launch = launch_debug_browser(
                 "about:blank",
                 port=self._port,

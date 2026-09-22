@@ -425,13 +425,31 @@ class RefreshPolicyTest(unittest.TestCase):
 
 
 class BrowserRecoveryTest(unittest.TestCase):
-    """Automatic recovery from "the browser is not running" (objective §68).
+    """Automatic recovery from "the browser is not running" (objective §68, §30).
 
-    Off by default, because starting a browser puts a window on someone's
-    desktop and a monitor that opens windows unasked is not a monitor anyone
-    keeps. These tests pin both halves: nothing happens unless the user opts in,
-    and when they do, it happens once rather than on every backoff tick.
+    Two layers, with different defaults, because they cost the user differently:
+
+    * the **hidden** auth host (§30) is on by default -- it puts nothing on the
+      desktop, and §61 says the user must not see ``BROWSER_UNAVAILABLE`` merely
+      because Chrome was not already running;
+    * the **visible** browser is opt-in, because a monitor that opens windows
+      unasked is not a monitor anyone keeps.
+
+    These tests pin both halves, and the ordering between them.
+
+    Every test here patches ``_try_auth_host``. Without that the hidden-host layer
+    would call ``AuthBrowserHost.ensure_running`` for real, which starts a browser
+    and makes the suite depend on what happens to be installed -- and, worse,
+    would make these tests pass or fail according to whether a real session
+    existed on the machine.
     """
+
+    def setUp(self) -> None:
+        patcher = mock.patch.object(
+            MonitorService, "_try_auth_host", return_value=False
+        )
+        self._auth_host = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _failing(self, clock, **cfg):
         from opencsi.errors import CdpUnavailableError
@@ -450,6 +468,84 @@ class BrowserRecoveryTest(unittest.TestCase):
 
         launch.assert_not_called()
         self.assertIs(snap.state, MonitorState.BROWSER_UNAVAILABLE)
+
+    def test_the_hidden_host_is_tried_without_any_opt_in(self) -> None:
+        """§30/§61: no BROWSER_UNAVAILABLE merely because Chrome was not started.
+
+        The hidden host is the one recovery that costs the user nothing visible,
+        so it runs by default. Making it opt-in would leave the post-reboot case
+        -- the exact case §30 describes -- reporting a failure whose remedy is not
+        "opt in" but "nothing was signed in yet".
+        """
+        clock = _Clock()
+        service = self._failing(clock)
+        self._auth_host.return_value = True
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser"
+        ) as launch:
+            service.refresh_now(block=True)
+
+        self._auth_host.assert_called_once()
+        launch.assert_not_called()
+
+    def test_the_hidden_host_is_preferred_over_a_visible_window(self) -> None:
+        """Order matters: the invisible option must be the one tried first.
+
+        If the visible launch ran first it would open a window on every machine
+        whose Chrome was not yet running, and the hidden host would only be
+        reached when that failed -- inverting §30 for the users who never opted
+        in to windows.
+        """
+        clock = _Clock()
+        service = self._failing(clock, auto_recover_browser=True)
+        self._auth_host.return_value = True
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser"
+        ) as launch:
+            service.refresh_now(block=True)
+
+        self._auth_host.assert_called_once()
+        launch.assert_not_called()
+
+    def test_a_visible_auth_host_does_not_count_as_recovery(self) -> None:
+        """A host that fell back to a window is not the recovery §30 promises.
+
+        Chrome 153 rejects ``--headless=new``, and ``ensure_running`` then opens a
+        window and reports it truthfully. Treating that as success would open a
+        window for a user who declined windows *and* make the tray claim a hidden
+        runtime while one was on screen.
+        """
+        clock = _Clock()
+        service = self._failing(clock)
+        self._auth_host.return_value = False
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser"
+        ) as launch:
+            snap = service.refresh_now(block=True)
+
+        launch.assert_not_called()
+        self.assertIs(snap.state, MonitorState.BROWSER_UNAVAILABLE)
+
+    def test_the_hidden_host_is_rate_limited_too(self) -> None:
+        """A host that keeps failing must not be respawned every backoff tick."""
+        clock = _Clock()
+        service = self._failing(clock, browser_recover_cooldown=600.0)
+        self._auth_host.return_value = False
+
+        for _ in range(5):
+            service.refresh_now(block=True)
+        self.assertEqual(
+            self._auth_host.call_count, 1, "the cooldown did not hold"
+        )
+
+        clock.advance(601.0)
+        service.refresh_now(block=True)
+        self.assertEqual(
+            self._auth_host.call_count, 2, "the cooldown never expired"
+        )
 
     def test_an_opted_in_service_starts_a_browser(self) -> None:
         from opencsi.auth.browser_launch import BrowserLaunch, BrowserLaunchStatus

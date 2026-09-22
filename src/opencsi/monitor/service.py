@@ -332,6 +332,22 @@ class MonitorConfig:
     #: about unattended operation; it is not something to assume on a user's
     #: behalf because it happens to make the happy path smoother.
     auto_recover_browser: bool = False
+    #: Whether the service may start the *hidden* authentication host when the
+    #: credential source has gone away.
+    #:
+    #: On by default, unlike :attr:`auto_recover_browser`, and the difference is
+    #: the whole point of objective §30: the objection to starting a browser
+    #: unasked is that it puts a window on someone's desktop, and a headless host
+    #: does not. Without this, a machine where Chrome simply was not running yet
+    #: reports ``BROWSER_UNAVAILABLE`` -- which reads as "this tool is broken"
+    #: when the truth is "nothing is signed in yet" and the remedy is a QR scan.
+    #:
+    #: It is still not unconditional. Some Chromium builds reject
+    #: ``--headless=new`` (Chrome 153 on the development machine does), and this
+    #: host then falls back to a *visible* window. A visible fallback is exactly
+    #: the behaviour :attr:`auto_recover_browser` exists to gate, so it is refused
+    #: unless the user opted in -- see :meth:`_maybe_recover_browser`.
+    auto_recover_auth_host: bool = True
     #: Minimum gap between automatic browser launches. Without this, a machine
     #: where the launch keeps failing would retry on every backoff tick and
     #: spawn a browser window each time.
@@ -744,23 +760,35 @@ class MonitorService:
         return published
 
     def _maybe_recover_browser(self) -> bool:
-        """Start a readable browser, if the user opted in and the cooldown allows.
+        """Try to restore a credential source, hidden first.
 
         This exists for the unattended case the objective describes: Windows
         starts the tray at sign-in, but Chrome is not running yet, so the tray
-        would otherwise sit at "browser not running" until someone clicked. With
-        ``auto_recover_browser`` on, the commonest post-reboot situation resolves
-        itself and the user notices nothing.
+        would otherwise sit at "browser not running" until someone clicked.
 
-        Returns whether a **usable** browser was started -- not merely whether a
-        launch was attempted. The caller retries the fetch on ``True``, and
-        retrying after a failed launch would only repeat the same failure while
-        doubling the work. Never raises: a recovery that fails must leave the
-        state honest, not take down the worker.
+        Objective §30 puts the hidden host first, and §61 spells out why: the user
+        must not see ``BROWSER_UNAVAILABLE`` merely because Chrome was not already
+        open. The order is therefore:
+
+        1. ``AuthBrowserHost.ensure_running(headless=True)`` -- the engine needed
+           for the OAuth leg, with no window. Costs the user nothing visible.
+        2. ``launch_debug_browser`` -- a *visible* window. Only when the user
+           opted in with ``auto_recover_browser``, because that is the behaviour
+           they would object to, and only when the hidden attempt did not work.
+
+        The visible fallback is gated rather than automatic because
+        ``--headless=new`` is not universally supported: on a build that rejects
+        it, the auth host falls back to a visible window itself, and honouring
+        that silently would open a window for a user who never asked for one.
+        ``ensure_running`` reports which mode it got, so that case is detectable
+        instead of guessed.
+
+        Returns whether a **usable** credential source was started -- not merely
+        whether a launch was attempted. The caller retries the fetch on ``True``,
+        and retrying after a failed launch would only repeat the same failure
+        while doubling the work. Never raises: a recovery that fails must leave
+        the state honest, not take down the worker.
         """
-        if not self.config.auto_recover_browser:
-            return False
-
         now = self._clock()
         if (
             self._last_browser_recover is not None
@@ -768,10 +796,19 @@ class MonitorService:
         ):
             return False
 
-        # Stamped before the attempt, not after: a launch that raises must still
-        # start the cooldown, or a permanently broken browser would be retried
-        # on every backoff tick.
+        # Stamped *before* either attempt, not after a success. A host that fails
+        # to start -- no browser installed, or a build that rejects
+        # ``--headless=new`` and is refused below -- would otherwise be retried on
+        # every backoff tick, spawning a doomed process each time. The visible
+        # path always did this; the hidden path has the same failure mode and the
+        # same cost, which is why the stamp is shared rather than per-branch.
         self._last_browser_recover = now
+
+        if self.config.auto_recover_auth_host and self._try_auth_host():
+            return True
+
+        if not self.config.auto_recover_browser:
+            return False
 
         try:
             from ..auth.browser_launch import launch_debug_browser
@@ -791,6 +828,52 @@ class MonitorService:
 
         log.info("automatic browser recovery: %s", result.status.value)
         return False
+
+    def _try_auth_host(self) -> bool:
+        """Bring up the hidden authentication host. Returns whether it is usable.
+
+        Kept separate from :meth:`_maybe_recover_browser` because it answers a
+        different question: not "did a browser start?" but "is there now an engine
+        answering that a renewal could use?".
+
+        A **visible** fallback is ruled out before the launch, not rejected after
+        it. Chrome 153 on the development machine rejects ``--headless=new``, and
+        the host would otherwise open a window as part of starting and only then
+        report it -- so a caller that inspected the result and declined would have
+        already put the window on screen. ``visible_fallback=False`` keeps the
+        promise instead of merely describing it, and the visible path is left to
+        the opt-in flag.
+
+        Reporting success for a visible engine would also make the tray claim a
+        hidden runtime while a window sat on the desktop, which is the same class
+        of false report as the browser-bound conclusion this project already had
+        to correct.
+        """
+        try:
+            from ..auth.auth_host import AuthBrowserHost
+        except Exception as exc:  # noqa: BLE001 - an import problem is not fatal
+            log.debug("auth host unavailable: %s", type(exc).__name__)
+            return False
+
+        try:
+            result = AuthBrowserHost(visible_fallback=False).ensure_running()
+        except Exception as exc:  # noqa: BLE001 - recovery must never raise
+            log.info("auth host recovery failed: %s", type(exc).__name__)
+            return False
+
+        if not result.ok:
+            log.info("auth host recovery: %s", result.status.value)
+            return False
+
+        if result.visible:
+            # Should be unreachable now that the fallback is refused up front, so
+            # it is kept as a guard rather than a branch: if a future launch path
+            # reintroduces a window, this refuses to call it a hidden recovery.
+            log.info("auth host reported a visible window; not counting it")
+            return False
+
+        log.info("started the hidden auth host on port %s", result.port)
+        return True
 
     def _credential_status(self) -> float | None:
         """Seconds of credential life left, or ``None``. Never raises."""

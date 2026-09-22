@@ -78,6 +78,15 @@ def register(subparsers) -> None:  # noqa: ANN001 - argparse plumbing
             "(off by default: it puts a window on your desktop)"
         ),
     )
+    behavior.add_argument(
+        "--no-auth-host",
+        dest="auto_recover_auth_host",
+        action="store_false",
+        help=(
+            "do not start the hidden authentication engine when the credential "
+            "source is gone (it is on by default: it opens no window)"
+        ),
+    )
 
     startup = parser.add_argument_group("start at sign-in")
     startup.add_argument(
@@ -122,6 +131,7 @@ def run(ctx: CliContext) -> int:
         refresh_interval=float(args.interval),
         renew_margin=float(args.renew_margin),
         auto_recover_browser=bool(args.auto_recover_browser),
+        auto_recover_auth_host=bool(args.auto_recover_auth_host),
     )
 
     if args.once:
