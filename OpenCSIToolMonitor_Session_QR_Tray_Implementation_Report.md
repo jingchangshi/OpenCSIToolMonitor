@@ -30,11 +30,11 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | Windows 11 托盘 v1 | **完成，实测验证** | `opencsi tray --once` 打印真实快照；`--check` 报告 `tray: ok`，7 个菜单项（含「开机自启动」） |
 | 浏览器缺失时用户可自救 | **完成，实测验证** | 杀掉 Chrome 后单条命令即恢复：`state: OK`，`EXIT=0`（见 §10 缺陷 8） |
 | GitCode 授权页未确认时的正确报告 | **完成，实测（见 §10 缺陷 10 的边界说明）** | 真实站点确认了授权页会让旧代码报 `TIMEOUT`、且点「授权」即签发新 token；新状态的判定逻辑由离线脚本验证（真实站点无法按需复现该页面） |
-| 测试 | **完成** | **745 项测试**（744 通过、1 跳过、125 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
+| 测试 | **完成** | **746 项测试**（745 通过、1 跳过、125 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
 | 规范提交 | **完成** | 46 个触碰源码/测试的提交（§11 完整列出） |
-| 实测发现并修复的缺陷 | **完成** | 17 个（§10 完整列出），通过两种方式发现：**运行真实产物**，以及修好一个缺陷后追问**"还有哪里会这样"**。缺陷 9–17 各自带一行显式的「发现方式」；缺陷 1–8 在正文里说明来源 |
+| 实测发现并修复的缺陷 | **完成** | 18 个（§10 完整列出），通过两种方式发现：**运行真实产物**，以及修好一个缺陷后追问**"还有哪里会这样"**。缺陷 9–18 各自带一行显式的「发现方式」；缺陷 1–8 在正文里说明来源 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
@@ -264,6 +264,30 @@ renew margin   : 300s (production value)
 看不见**的 soak。对一个正常工作的系统给出"无法判定"，与之前修掉的那些状态检查属于
 同一类错误——只是这次错在探针里，而不是产品里。
 
+### 探针修正后再跨一次余量线，并暴露了修正自身的**反向**缺陷
+
+修好跳升计数后重跑一次 78 分钟 soak（`--minutes 60 --renewals 2 --interval 15`），
+干净地跨过了余量线：
+
+```
+[17:21:33] OK               lifetime    317s
+[17:22:37] RENEWED  token_changed=True
+[17:22:37] LIFETIME JUMPED 272s -> 3598s (a new cookie was issued)
+final check    : server accepted the session (shijingchang)
+```
+
+寿命降到 **272 秒**（余量线 300s），无人触碰地续期并回到 3598 秒，服务端继续接受该会话。
+这满足 §52 要求的"至少跨过一次 openCsiTool token 到期"。
+
+但这次输出的汇总行暴露了**修正本身带来的新缺陷**（已记为缺陷 18）：
+`renewals + jumps` 把**同一个事件**算了两遍——两行时间戳完全相同，就是一次续期。
+它打印 `VERIFIED: 2 silent renewal(s) ... (1 performed by this process, 1 observed
+as lifetime jumps)` 并以 0 退出，而真实数字是 1。
+
+**这是本轮唯一一个由探针自身输出暴露、而不是由产品行为暴露的缺陷**，也是本项目反复在
+产品代码里找的那种形态出现在探针里：**退出码断言的结论比证据支持的更强**。修法是给每次
+跳升归因，并打印三个数字让算术可核对。缺陷 18 记有完整细节与回归测试。
+
 ---
 
 ## 6. GitCode 扫码登录调研
@@ -361,7 +385,7 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 
 **分层。** 一切不需要 Windows 消息循环就能测试的东西都被下沉到 `monitor/` 与
 `tray/presenter.py`，它们是纯的。`app.py` 只负责把已经算好的值交给 pystray。这就是为什么
-745 项测试可以离线运行，而托盘本身在真机上验证。
+746 项测试可以离线运行，而托盘本身在真机上验证。
 
 **状态**（`MonitorState`）：`STARTING`、`OK`、`REFRESHING`、`RENEWING`、
 `LOGIN_REQUIRED`、`CONSENT_REQUIRED`、`BROWSER_UNAVAILABLE`、`OFFLINE`、
@@ -431,14 +455,14 @@ EXIT=0
 
 ## 9. 测试
 
-**745 项测试：744 通过，1 跳过，125 个 subtest 通过。**
+**746 项测试：745 通过，1 跳过，125 个 subtest 通过。**
 
 ```
 $ pytest
-744 passed, 1 skipped, 125 subtests passed in 39.25s
+745 passed, 1 skipped, 125 subtests passed in 39.39s
 
 $ python -m unittest discover -s tests -q
-Ran 745 tests in 39.621s
+Ran 746 tests in 40.122s
 OK (skipped=1)
 ```
 
@@ -504,7 +528,7 @@ total 2
 `install_logging_redaction` 都已应用在续期/扫码路径上。`scene_id` 与扫码载荷在 `repr` 中
 被脱敏。verbose 日志只打印请求**路径**——绝不打印 query string，绝不打印 cookie。
 
-### 本轮发现并修复的十七个真实缺陷
+### 本轮发现并修复的十八个真实缺陷
 
 1. **图标卡在"续期中"。** `_maybe_renew` 在成功时直接返回，没有离开 `RENEWING`，导致托盘
    在一次已经成功的续期之后仍显示续期状态长达 5 分钟。由一个实测探针发现：在一个已经续期
@@ -875,13 +899,48 @@ catch-all 不是映射而是分支，无法用穷尽性断言，因此改为**�
 重载路径的导航次数为 **0**，`test_reload_falls_through_to_renewal` 断言重载拿到同一个 token
 时 OAuth 往返**确实发生**。改后的 README 描述的是这两条断言所钉住的顺序。
 
-### 缺陷 1–17 的共同形态
+### 缺陷 18：soak 探针把**一次**续期报成了**两次**，并以这个数字退出 0
+
+**发现方式：运行真实产物——而且是本轮唯一一个由"探针自身的输出"暴露的缺陷。**
+78 分钟的跨余量线 soak 成功跑完后打印：
+
+```
+[17:22:37] RENEWED  token_changed=True
+[17:22:37] LIFETIME JUMPED 272s -> 3598s (a new cookie was issued)
+
+renewals performed by this process: 1
+lifetime jumps seen (any renewer) : 1
+
+VERIFIED: 2 silent renewal(s) across real expiries (1 performed by this process,
+1 observed as lifetime jumps), with no user interaction ...
+```
+
+两行时间戳**完全相同**，寿命从 272s 跳到 3598s——这是**一个**事件被打印了两次。
+根因是两个计数器从来不独立：本进程执行的续期**既**会被 `session.renew` 的包装器计数，
+**也**会让寿命随之跳升，所以 `renewals + jumps` 把每一次本地续期都算了两遍。
+
+上一轮引入跳升计数是为了看见**别的进程**做的续期（包装器看不见它们），这个目的仍然正确；
+错的是把两个计数器**直接相加**。修法：给每次跳升归因——若本次采样与上次采样之间发生过
+本地续期，则该跳升就是那次续期，不计入外部计数；成功判据改为
+`renewals + external_jumps`，并同时打印三个数字，让算术可以一眼核对而不必信任。
+
+**这个缺陷值得单独列出，因为它是本项目反复在别人代码里找的那种形态，出现在了我自己的探针里：
+退出码断言的结论比证据支持的更强。** 它以 0 退出，而那个数字错了一倍。回归测试
+`test_the_soak_does_not_double_count_its_own_renewals` 钉住它——把求和改回
+`renewals + jumps` 后该测试失败（`the double-counting sum is back`）。
+
+**该次运行的真实结论不受影响，依然成立**：一次真实的、无人值守的跨余量线续期——寿命降到
+272s（生产余量线 300s），随后 `RENEWED token_changed=True`，回到 3598s，服务端继续接受
+该会话（`shijingchang`）。
+
+### 缺陷 1–18 的共同形态
 
 缺陷 4、5、6 是"测试检查声明而非产物"；缺陷 7 与 9 是"测试只覆盖了其中一个入口点"；
 缺陷 8 是"测试只覆盖了状态映射，没覆盖该状态下**动作能否达成目的**"；缺陷 10、11、12 是
 "测试只覆盖了错误**分类**，没覆盖该分类是否**描述事实**，以及是否覆盖了**所有**能产生
 该错误的路径与**所有**会消费它的调用方"；缺陷 13 是"状态检查断言了一个**它从未观测过的
-事实**"；缺陷 14、15 与 16 是"同一条规则写在两个地方，只修了看见症状的那一处"。
+事实**"；缺陷 14、15 与 16 是"同一条规则写在两个地方，只修了看见症状的那一处"；
+缺陷 17 是"代码改对了，但文档仍描述旧行为"；缺陷 18 是"**度量工具本身算错了**，并以错误的数字宣布成功"。
 
 上述形态其实是同一件事：**测试断言的是代码写了什么，而不是用户能否得到他要的东西。**
 缺陷 8 的每一个子缺陷都在既有测试的射程之外——`_CODE_STATE` 的映射有测试、退出码的
@@ -912,14 +971,14 @@ catch-all 不是映射而是分支，无法用穷尽性断言，因此改为**�
 
 ## 11. 提交
 
-自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 47 个**，下表完整列出（最旧在前，
-覆盖 `cf34c1b` 到 `ea735a4`）。全部以
+自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 48 个**，下表完整列出（最旧在前，
+覆盖 `cf34c1b` 到 `72562a3`）。全部以
 `opencsi contributors <contributors@opencsi.invalid>` 署名。
 
 判定标准是机械的，共四个目录：
 
 ```bash
-git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 47 行，即下表
+git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 48 行，即下表
 ```
 
 `tools/` 之所以算在内，是因为 `tests/test_packaging.py` 的 `LiveProbeTest` 会断言
@@ -988,6 +1047,7 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 47 行，即�
 | `f400c90` | test(tray): pin which monitor states may reach the exit-code catch-all |
 | `71e7e54` | fix(tools): make the soak see renewals it did not perform itself |
 | `ea735a4` | research: prove the openCsiTool OAuth leg is browser-bound, not cookie-bound |
+| `72562a3` | fix(tools): stop the soak counting one renewal as two |
 
 ---
 
