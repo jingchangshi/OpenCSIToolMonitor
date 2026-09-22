@@ -390,6 +390,84 @@ class RenewalCapabilityConsistencyTest(unittest.TestCase):
         self.assertFalse(payload["renewal"]["available"])
         self.assertIn("no browser endpoint", payload["renewal"]["reason"])
 
+    def test_status_shows_the_caveat_when_renewal_is_available_but_caveated(self) -> None:
+        """Available is true and still not the whole answer.
+
+        Measured on this machine: ``login --status`` printed "Silent renewal:
+        available" while ``login --renew`` could not complete, because the
+        browser held no GitCode SSO cookie. The sentence saying so existed and
+        was suppressed -- the only branch that printed ``reason`` was
+        ``if not available``. A user reading "available" concludes the feature
+        works, which is the conclusion the reason string contradicts.
+        """
+        provider = _FakeCdpProvider("TOKEN")
+        client = _stub_client(token="TOKEN")
+        with unittest.mock.patch(
+            "opencsi.auth.oauth_browser.renewal_capability"
+        ) as probe:
+            probe.return_value = RenewalCapability(
+                True,
+                "the browser can run the OAuth round-trip, but it holds no "
+                "GitCode SSO cookie, so a renewal would ask for a sign-in",
+                caveated=True,
+            )
+            code, out, _ = run_cli(
+                ["login", "--status"], client=client, provider=provider
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("available", out)
+        self.assertIn(
+            "no GitCode SSO cookie",
+            out,
+            "the caveat was dropped, so 'available' was the only thing shown",
+        )
+
+    def test_doctor_warns_rather_than_passing_a_caveated_capability(self) -> None:
+        """``doctor`` must not report OK for renewal that will ask for a sign-in.
+
+        The check was rewritten once already for exactly this: it said health on
+        a machine where the next renewal parked on GitCode's approval page, and
+        the troubleshooting guide said that line meant recovery.
+        """
+        provider = _FakeCdpProvider("TOKEN")
+        client = _stub_client(token="TOKEN")
+        with unittest.mock.patch(
+            "opencsi.auth.oauth_browser.renewal_capability"
+        ) as probe:
+            probe.return_value = RenewalCapability(
+                True, "no GitCode SSO cookie; a renewal would ask for a sign-in",
+                caveated=True,
+            )
+            _, out, _ = run_cli(
+                ["doctor", "--skip-contract", "--json"],
+                client=client, provider=provider,
+            )
+        checks = {c["check"]: c for c in json.loads(out)["checks"]}
+        entry = checks["silent renewal"]
+        self.assertNotEqual(
+            entry["status"],
+            "ok",
+            "doctor passed a renewal that cannot run unattended",
+        )
+        self.assertIn("no GitCode SSO cookie", entry["detail"])
+
+    def test_a_clean_capability_still_passes_doctor(self) -> None:
+        """The warning must be about the caveat, not about renewal in general."""
+        provider = _FakeCdpProvider("TOKEN")
+        client = _stub_client(token="TOKEN")
+        with unittest.mock.patch(
+            "opencsi.auth.oauth_browser.renewal_capability"
+        ) as probe:
+            probe.return_value = RenewalCapability(
+                True, "GitCode SSO available; OAuth can be re-run in a background tab"
+            )
+            _, out, _ = run_cli(
+                ["doctor", "--skip-contract", "--json"],
+                client=client, provider=provider,
+            )
+        checks = {c["check"]: c for c in json.loads(out)["checks"]}
+        self.assertEqual(checks["silent renewal"]["status"], "ok")
+
     def test_doctor_and_status_use_the_same_probe(self) -> None:
         """Neither command may answer this question on its own."""
         for module in ("src/opencsi/cli/login.py", "src/opencsi/cli/doctor.py"):
@@ -470,10 +548,28 @@ class SsoPresenceTest(unittest.TestCase):
         A transient DevTools hiccup would otherwise become a confident warning
         that the user has been signed out -- the same class of error as claiming
         the session is fine without looking.
+
+        It must not be reported as *present* either. This assertion used to
+        require the literal "GitCode SSO available", which is the same
+        over-claim this class exists to prevent, one branch further on: the
+        cookie read failed, so presence was never established. The message now
+        says the state is unknown, which is both honest and still not a
+        sign-out warning.
         """
         capability = self._capability(None)
         self.assertTrue(capability.available)
-        self.assertIn("GitCode SSO available", capability.reason)
+        self.assertNotIn(
+            "GitCode SSO available",
+            capability.reason,
+            "a failed cookie read is not evidence that the SSO cookie is there",
+        )
+        self.assertIn("unknown", capability.reason.lower())
+        self.assertNotIn(
+            "no GitCode SSO cookie",
+            capability.reason,
+            "a failed read must not be reported as a missing cookie",
+        )
+        self.assertTrue(capability.caveated)
 
     def test_the_probe_never_returns_a_cookie_value(self) -> None:
         """Only names are examined, so nothing secret can reach a report."""

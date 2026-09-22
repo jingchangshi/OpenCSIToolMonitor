@@ -842,6 +842,15 @@ def _status(ctx: CliContext) -> int:
             # between a fixable misconfiguration and a credential that has no
             # upstream session to renew against.
             ctx.out(f"  {capability.reason}")
+        elif capability.caveated:
+            # "available" is true and still not the whole answer. When the
+            # browser holds no GitCode SSO cookie the round-trip is possible but
+            # will park on a sign-in, and printing only the boolean tells the
+            # user the feature works. Measured on this machine: --status said
+            # "Silent renewal: available" while --renew could not complete, and
+            # the sentence explaining why was suppressed by the `if not
+            # available` above.
+            ctx.out(f"  note: {capability.reason}")
         if capability.available and session.needs_renewal():
             ctx.out(
                 "The session is inside the renewal margin; the next request will "

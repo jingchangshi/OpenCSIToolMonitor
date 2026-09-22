@@ -114,8 +114,22 @@ def _record_renewal(record, provider, credential_ok: bool) -> None:
     from ..auth.oauth_browser import renewal_capability
 
     capability = renewal_capability(provider)
-    if capability.available:
+    if capability.available and not capability.caveated:
         record("silent renewal", OK, capability.reason)
+    elif capability.available:
+        # The machinery is reachable but something about it needs saying -- most
+        # often that the browser holds no GitCode SSO cookie, so the round-trip
+        # will park on a sign-in. Reporting OK here is the exact defect this
+        # check was rewritten to stop: `doctor` said health, the troubleshooting
+        # guide said that line meant recovery, and the next renewal asked the
+        # user to approve an authorization. The reason string carries the
+        # detail; WARN is what makes it visible.
+        record(
+            "silent renewal",
+            WARN,
+            capability.reason,
+            "renewal is possible but not currently unattended",
+        )
     else:
         record(
             "silent renewal",

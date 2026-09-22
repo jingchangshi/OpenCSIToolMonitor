@@ -846,13 +846,26 @@ class RenewalCapability:
 
     ``reason`` is a human-readable explanation, so a caller never has to
     translate a boolean into advice.
+
+    ``available`` and ``reason`` are not redundant. Renewal can be *available*
+    and still not do what the user expects: when the machinery is reachable but
+    the browser holds no GitCode SSO cookie, the round-trip will run and then
+    park on a sign-in page. That is why ``caveated`` exists -- a caller that
+    prints only the boolean tells the user "available" and drops the one fact
+    that decides whether it will work.
     """
 
     available: bool
     reason: str
+    #: True when renewal is possible but something about it needs saying.
+    caveated: bool = False
 
     def as_dict(self) -> dict[str, object]:
-        return {"available": self.available, "reason": self.reason}
+        return {
+            "available": self.available,
+            "reason": self.reason,
+            "caveated": self.caveated,
+        }
 
 
 def renewal_capability(
@@ -928,6 +941,20 @@ def renewal_capability(
             "the browser can run the OAuth round-trip, but it holds no GitCode "
             "SSO cookie, so a renewal would ask for a sign-in; sign in at "
             f"{base_url}/myTools and keep the tab open",
+            caveated=True,
+        )
+    if sso_present is None:
+        # Could not tell. Say so, and do not fall through to the optimistic
+        # message: "the SSO cookie is there" is a fact this branch did not
+        # establish. Unknown is not missing -- the session may be perfectly
+        # fine -- but it is also not *present*, and the previous wording
+        # asserted presence from a failed read.
+        return RenewalCapability(
+            True,
+            "the browser can run the OAuth round-trip, but its GitCode SSO "
+            "cookie could not be read, so whether a renewal will need a "
+            "sign-in is unknown",
+            caveated=True,
         )
 
     return RenewalCapability(
