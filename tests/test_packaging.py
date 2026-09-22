@@ -506,6 +506,12 @@ class LiveProbeTest(unittest.TestCase):
         read-only, the tray probe uses an offline stub, the soak probe writes
         nothing but a line per sample -- so this checks that one of them is
         present rather than demanding a single wording.
+
+        §45 asks for an explicit vocabulary (LIVE / NETWORK / AUTH_SIDE_EFFECT /
+        GET_ONLY). The free-text check above is kept because it already covers
+        every probe and describes *what* is touched; the tagged check below adds
+        the machine-readable half, so a probe that changes real authentication
+        state cannot be mistaken for one that only reads.
         """
         declarations = (
             r"read-only",
@@ -530,6 +536,101 @@ class LiveProbeTest(unittest.TestCase):
                         for pattern in declarations
                     ),
                     f"{path.name} does not declare what it may touch",
+                )
+
+    def test_every_probe_carries_a_posture_tag(self) -> None:
+        """§45's vocabulary, enforced where it can be checked objectively.
+
+        Requiring a tag on all 22 probes would be 22 mechanical edits that assert
+        nothing -- the tag would be added to satisfy the test, not to inform a
+        reader. What §45 is actually for is narrower and checkable: *a probe that
+        changes real state must not be mistakable for one that only reads.*
+
+        So the expected posture is **derived from the source** rather than
+        demanded of every file. A probe that starts a browser, stops one, writes
+        a cookie, or issues a non-GET request must say so; a probe that only
+        reads is already covered by the free-text check above and does not need a
+        second label.
+        """
+        mutating = {
+            # Each pattern names a specific API that changes real state. Broad
+            # patterns were tried first and produced false positives that would
+            # have made the test noise: `\.stop\(\)` matches pystray's
+            # `icon.stop()` and the monitor's `service.stop()`, neither of which
+            # touches authentication, and `renew\(force=True\)` matches a
+            # *docstring* in probe_autonomous_renewal.py that merely mentions it.
+            # A test that cries wolf gets its tag added without thought.
+            r"AuthBrowserHost\(": "starts a real browser",
+            r"\.ensure_running\(": "starts a real browser",
+            r"Storage\.setCookies": "writes a cookie into a browser",
+            r"\.install_token\(": "writes a session cookie into a browser",
+            r"session\.renew\(": "performs a real renewal",
+        }
+        for path in self._probes():
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            docstring = ast.get_docstring(tree) or ""
+            # Match against the code only, with docstrings and comments removed.
+            # A probe that merely *describes* a renewal in prose does not perform
+            # one, and matching the raw text flagged exactly that case.
+            code = self._code_without_docstrings(tree)
+            reasons = [
+                why for pattern, why in mutating.items() if re.search(pattern, code)
+            ]
+            if not reasons:
+                continue
+            with self.subTest(probe=path.name):
+                self.assertTrue(
+                    re.search(r"\bAUTH_SIDE_EFFECT\b", docstring),
+                    f"{path.name} ({'; '.join(sorted(set(reasons)))}) must carry "
+                    "the AUTH_SIDE_EFFECT tag so it cannot be mistaken for a "
+                    "read-only probe",
+                )
+
+    @staticmethod
+    def _code_without_docstrings(tree: ast.AST) -> str:
+        """The module's executable code, with every docstring blanked out.
+
+        Achieved by replacing docstring nodes with a pass, then unparsing -- so
+        the result contains no string literal that happens to name an API.
+        ``ast.unparse`` is available on 3.9+, and the package requires 3.10.
+        """
+        for node in ast.walk(tree):
+            if not isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                continue
+            body = getattr(node, "body", None)
+            if not body:
+                continue
+            first = body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                if isinstance(first.value.value, str):
+                    body[0] = ast.Pass()
+        return ast.unparse(tree)
+
+    def test_the_auth_side_effect_probes_are_not_run_by_ci(self) -> None:
+        """A probe that mints real sessions must stay out of the workflow.
+
+        §44 says CI runs only fake DevTools, fake HTTP, offline fixtures and
+        packaging. This checks the consequence for the tagged probes: a workflow
+        that started invoking them would be reaching a live account on every
+        push, which is exactly what §44 forbids.
+        """
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        for path in self._probes():
+            docstring = ast.get_docstring(
+                ast.parse(path.read_text(encoding="utf-8"))
+            ) or ""
+            if not re.search(r"\bAUTH_SIDE_EFFECT\b", docstring):
+                continue
+            with self.subTest(probe=path.name):
+                self.assertNotIn(
+                    path.name,
+                    workflow,
+                    f"CI invokes {path.name}, which changes real auth state",
                 )
 
     def test_the_gate_probe_can_refuse_to_claim_success(self) -> None:

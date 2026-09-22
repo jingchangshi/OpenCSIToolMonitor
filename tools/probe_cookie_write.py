@@ -18,9 +18,12 @@ The browser is already this project's credential store -- that is the documented
 design, and the reason a cookie is never written to disk. So the fix is to hand
 the minted cookie *to the browser*, not to a file.
 
-Safety posture: touches no network, never prints a token value, writes nothing to
-disk. It does set a cookie in the target browser, which is the operation under
-test; that cookie is a synthetic marker, not a credential.
+Safety posture: **AUTH_SIDE_EFFECT** (local only). It sets a cookie in the
+target browser, which is the operation under test -- that cookie is a synthetic
+marker, never a credential, and it is removed again before the probe exits. It
+touches no network, never prints a token value, and writes nothing to disk. It
+does modify a browser's cookie store, so it is not read-only and must not be
+wired into CI.
 """
 
 from __future__ import annotations

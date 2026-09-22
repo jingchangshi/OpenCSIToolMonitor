@@ -29,6 +29,10 @@ Read-only in the business sense: the only write is the OAuth round trip, which i
 authentication, not a business mutation. No business endpoint is touched with
 anything but GET.
 
+Safety posture: **LIVE / NETWORK / AUTH_SIDE_EFFECT**. It performs a real
+renewal, so it mints a real openCsiTool session and changes the credential the
+browser holds. Not read-only, and must not be wired into CI (§44).
+
 Run: python tools/probe_autonomous_renewal.py
 """
 
