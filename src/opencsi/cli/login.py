@@ -465,7 +465,22 @@ def _renew(ctx: CliContext) -> int:
             )
         if not result.ok:
             ctx.blank()
-            if result.requires_interaction:
+            if result.status is RenewalStatus.CONSENT_REQUIRED:
+                # NOT the "SSO session is gone" message below. The user is still
+                # signed in -- GitCode has rendered an approval page naming them
+                # -- so telling them to sign in sends them to do work that cannot
+                # fix anything. `requires_interaction` is true for both states,
+                # which is exactly why it must not be used as a synonym for
+                # "signed out".
+                ctx.err(
+                    "error: GitCode is waiting for the OpenCsitool approval to be "
+                    "confirmed."
+                )
+                ctx.err(
+                    "       -> open https://opencsitool.com/myTools and approve it; "
+                    "no sign-in is needed."
+                )
+            elif result.requires_interaction:
                 ctx.err(
                     "error: the GitCode SSO session is gone, so silent renewal "
                     "cannot help."

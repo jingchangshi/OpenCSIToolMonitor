@@ -241,6 +241,28 @@ class RenewExitCodeTest(unittest.TestCase):
         (code, _, _), _ = self._run(RenewalResult(RenewalStatus.OAUTH_FAILED))
         self.assertEqual(code, EXIT_SESSION_EXPIRED)
 
+    def test_consent_required_exits_with_the_session_code(self) -> None:
+        """Not the network code: nothing about this is a network problem."""
+        result = RenewalResult(RenewalStatus.CONSENT_REQUIRED, requires_interaction=True)
+        (code, _, err), _ = self._run(result)
+        self.assertEqual(code, EXIT_SESSION_EXPIRED)
+        self.assertIn("approval", err.lower())
+
+    def test_every_renewal_status_has_a_documented_exit_code(self) -> None:
+        """The map must be exhaustive, because the fallback is silent.
+
+        ``_RENEWAL_EXIT.get(status, 1)`` turns any status someone forgets into
+        exit 1, which is not a documented renewal outcome at all -- so a new
+        status would be reported as a generic failure rather than crashing or
+        being noticed. This asserts membership directly, so adding a status
+        without deciding its exit code fails here.
+        """
+        from opencsi.auth.session import RenewalStatus
+        from opencsi.cli.login import _RENEWAL_EXIT
+
+        missing = [s.name for s in RenewalStatus if s not in _RENEWAL_EXIT]
+        self.assertEqual(missing, [], f"no exit code decided for: {missing}")
+
     def test_unverified_success_is_not_reported_as_ok(self) -> None:
         """A renewed cookie the server rejects must not exit 0.
 
