@@ -52,6 +52,11 @@ from ..models import MyToolsSnapshot
 
 log = logging.getLogger("opencsi.monitor")
 
+#: The page a browser is pointed at when the service has to start one. Kept
+#: here rather than imported from the CLI so the monitor does not depend on the
+#: command layer -- the dependency runs the other way.
+_LOGIN_URL = "https://opencsitool.com/myTools"
+
 
 class MonitorState(str, Enum):
     """What the tray should show. One value per *kind* of problem.
@@ -294,6 +299,19 @@ class MonitorConfig:
     backoff_max: float = 900.0
     #: How long a single fetch may take before it is treated as failed.
     fetch_timeout: float = 30.0
+    #: Whether the service may start a browser by itself when the credential
+    #: source has gone away (objective §68: "user notices nothing").
+    #:
+    #: Off by default, and deliberately so. Starting a browser puts a window on
+    #: someone's desktop, and a monitoring tool that opens windows unasked is
+    #: the kind of behaviour users are right to resent. Opting in is a choice
+    #: about unattended operation; it is not something to assume on a user's
+    #: behalf because it happens to make the happy path smoother.
+    auto_recover_browser: bool = False
+    #: Minimum gap between automatic browser launches. Without this, a machine
+    #: where the launch keeps failing would retry on every backoff tick and
+    #: spawn a browser window each time.
+    browser_recover_cooldown: float = 600.0
 
 
 class MonitorService:
@@ -333,6 +351,9 @@ class MonitorService:
         #: Set once the user has been told the session needs them; cleared by a
         #: settled healthy state. See :meth:`_publish`.
         self._attention_latched = False
+        #: When an automatic browser recovery was last attempted, for the
+        #: cooldown. ``None`` means never.
+        self._last_browser_recover: float | None = None
 
     # ── observation ───────────────────────────────────────────────────────
     @property
@@ -586,12 +607,16 @@ class MonitorService:
         )
         return self.snapshot
 
-    def _refresh_once(self, *, force: bool = False) -> MonitorSnapshot:
+    def _refresh_once(self, *, force: bool = False, _recovered: bool = False) -> MonitorSnapshot:
         """Fetch the business data once and publish the outcome.
 
         Never raises. A failure updates the *state* and keeps the last good
         numbers, because a tray that vanishes or blanks on a network blip is
         worse than one that says "Offline, last update 23:18".
+
+        ``_recovered`` is internal and guards against a second recovery attempt
+        in the same cycle: the retry below must be tried exactly once, or a
+        browser that starts but still yields no cookie would loop.
         """
         if not force and self._clock() < self._next_refresh_at:
             return self.snapshot
@@ -601,9 +626,9 @@ class MonitorService:
         try:
             snapshot = self._client.get_my_tools(refresh=force)
         except OpenCsiError as exc:
-            return self._handle_failure(exc)
+            return self._handle_failure(exc, recovered=_recovered)
         except Exception as exc:  # noqa: BLE001 - the tray must not die
-            return self._handle_failure(exc)
+            return self._handle_failure(exc, recovered=_recovered)
 
         credential = self._credential_status()
         published = MonitorSnapshot.from_snapshot(
@@ -615,7 +640,9 @@ class MonitorService:
         self._publish(published)
         return published
 
-    def _handle_failure(self, exc: BaseException) -> MonitorSnapshot:
+    def _handle_failure(
+        self, exc: BaseException, *, recovered: bool = False
+    ) -> MonitorSnapshot:
         """Classify a failure, apply backoff, and keep the last good data."""
         state = state_for_error(exc)
         failures = self.snapshot.consecutive_failures + 1
@@ -636,8 +663,68 @@ class MonitorService:
             credential_expires_in=self._credential_status(),
         )
         log.info("refresh failed (%s): %s", state.value, type(exc).__name__)
+
+        # A successful launch does not by itself mean the data is reachable: the
+        # browser needs a moment to answer on its port, and the profile may hold
+        # no cookie. Retrying once, in this same cycle, is what makes an
+        # unattended recovery actually unattended -- without it the one-shot
+        # path still reports BROWSER_UNAVAILABLE on the run that fixed it, and a
+        # scheduled task would look like it had failed.
+        if state is MonitorState.BROWSER_UNAVAILABLE and not recovered:
+            if self._maybe_recover_browser():
+                return self._refresh_once(force=True, _recovered=True)
+
         self._publish(published)
         return published
+
+    def _maybe_recover_browser(self) -> bool:
+        """Start a readable browser, if the user opted in and the cooldown allows.
+
+        This exists for the unattended case the objective describes: Windows
+        starts the tray at sign-in, but Chrome is not running yet, so the tray
+        would otherwise sit at "browser not running" until someone clicked. With
+        ``auto_recover_browser`` on, the commonest post-reboot situation resolves
+        itself and the user notices nothing.
+
+        Returns whether a **usable** browser was started -- not merely whether a
+        launch was attempted. The caller retries the fetch on ``True``, and
+        retrying after a failed launch would only repeat the same failure while
+        doubling the work. Never raises: a recovery that fails must leave the
+        state honest, not take down the worker.
+        """
+        if not self.config.auto_recover_browser:
+            return False
+
+        now = self._clock()
+        if (
+            self._last_browser_recover is not None
+            and now - self._last_browser_recover < self.config.browser_recover_cooldown
+        ):
+            return False
+
+        # Stamped before the attempt, not after: a launch that raises must still
+        # start the cooldown, or a permanently broken browser would be retried
+        # on every backoff tick.
+        self._last_browser_recover = now
+
+        try:
+            from ..auth.browser_launch import launch_debug_browser
+        except Exception as exc:  # noqa: BLE001 - an import problem is not fatal
+            log.debug("browser recovery unavailable: %s", type(exc).__name__)
+            return False
+
+        try:
+            result = launch_debug_browser(_LOGIN_URL)
+        except Exception as exc:  # noqa: BLE001 - launching must never raise here
+            log.info("automatic browser recovery failed: %s", type(exc).__name__)
+            return False
+
+        if result.ok:
+            log.info("started %s to restore the credential source", result.browser)
+            return True
+
+        log.info("automatic browser recovery: %s", result.status.value)
+        return False
 
     def _credential_status(self) -> float | None:
         """Seconds of credential life left, or ``None``. Never raises."""

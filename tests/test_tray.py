@@ -687,6 +687,16 @@ class TrayCliTest(unittest.TestCase):
         args = build_parser().parse_args(["tray", "--startup-status"])
         self.assertTrue(args.startup_status)
 
+    def test_browser_auto_recovery_is_off_unless_asked_for(self) -> None:
+        """It puts a window on someone's desktop; that is not a default."""
+        from opencsi.cli.context import build_parser
+
+        parser = build_parser()
+        self.assertFalse(parser.parse_args(["tray"]).auto_recover_browser)
+        self.assertTrue(
+            parser.parse_args(["tray", "--auto-recover-browser"]).auto_recover_browser
+        )
+
     def test_once_exit_codes_name_the_cause_not_a_blanket_permission_error(
         self,
     ) -> None:

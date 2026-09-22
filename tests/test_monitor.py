@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 
 import helpers
 
@@ -20,7 +21,12 @@ from opencsi.auth.session import (
     RenewalStatus,
     SessionManager,
 )
-from opencsi.errors import NetworkError, OpenCsiError, SessionExpiredError
+from opencsi.errors import (
+    CdpUnavailableError,
+    NetworkError,
+    OpenCsiError,
+    SessionExpiredError,
+)
 from opencsi.models import MyToolsSnapshot
 from opencsi.monitor import (
     MonitorConfig,
@@ -407,6 +413,164 @@ class RefreshPolicyTest(unittest.TestCase):
         for _ in range(6):
             service.refresh_now(block=True)
         self.assertLessEqual(service._next_refresh_at - clock(), 25.0)
+
+
+class BrowserRecoveryTest(unittest.TestCase):
+    """Automatic recovery from "the browser is not running" (objective §68).
+
+    Off by default, because starting a browser puts a window on someone's
+    desktop and a monitor that opens windows unasked is not a monitor anyone
+    keeps. These tests pin both halves: nothing happens unless the user opts in,
+    and when they do, it happens once rather than on every backoff tick.
+    """
+
+    def _failing(self, clock, **cfg):
+        from opencsi.errors import CdpUnavailableError
+
+        client = _Client(error=CdpUnavailableError("no endpoint"))
+        return _service(client, clock=clock, **cfg)
+
+    def test_nothing_is_launched_without_opt_in(self) -> None:
+        clock = _Clock()
+        service = self._failing(clock)
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser"
+        ) as launch:
+            snap = service.refresh_now(block=True)
+
+        launch.assert_not_called()
+        self.assertIs(snap.state, MonitorState.BROWSER_UNAVAILABLE)
+
+    def test_an_opted_in_service_starts_a_browser(self) -> None:
+        from opencsi.auth.browser_launch import BrowserLaunch, BrowserLaunchStatus
+
+        clock = _Clock()
+        service = self._failing(clock, auto_recover_browser=True)
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            return_value=BrowserLaunch(BrowserLaunchStatus.LAUNCHED, browser="chrome"),
+        ) as launch:
+            service.refresh_now(block=True)
+
+        launch.assert_called_once()
+
+    def test_recovery_is_not_retried_on_every_tick(self) -> None:
+        """A failing launch must not spawn a window on every backoff tick."""
+        from opencsi.auth.browser_launch import BrowserLaunch, BrowserLaunchStatus
+
+        clock = _Clock()
+        service = self._failing(
+            clock, auto_recover_browser=True, browser_recover_cooldown=600.0
+        )
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            return_value=BrowserLaunch(BrowserLaunchStatus.NO_BROWSER_FOUND),
+        ) as launch:
+            for _ in range(5):
+                service.refresh_now(block=True)
+            self.assertEqual(launch.call_count, 1, "the cooldown did not hold")
+
+            clock.advance(601.0)
+            service.refresh_now(block=True)
+            self.assertEqual(launch.call_count, 2, "the cooldown never expired")
+
+    def test_a_failing_launch_does_not_break_the_service(self) -> None:
+        """Recovery is best-effort; the state must stay honest."""
+        clock = _Clock()
+        service = self._failing(clock, auto_recover_browser=True)
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            side_effect=OSError("boom"),
+        ):
+            snap = service.refresh_now(block=True)
+
+        self.assertIs(snap.state, MonitorState.BROWSER_UNAVAILABLE)
+
+    def test_a_successful_recovery_retries_in_the_same_cycle(self) -> None:
+        """Otherwise the run that fixed the problem still reports failure.
+
+        The browser needs a moment to answer on its port, so the fetch that
+        triggered the recovery cannot be the one that benefits from it. Without
+        the retry, `opencsi tray --once` would exit 10 on the very run that
+        restored the session, and a scheduled task would look like it failed.
+        """
+        from opencsi.auth.browser_launch import BrowserLaunch, BrowserLaunchStatus
+
+        clock = _Clock()
+        client = _Client()
+        service = _service(client, clock=clock, auto_recover_browser=True)
+        # Fail once (no browser), then succeed -- as a real recovery does.
+        client._error = CdpUnavailableError("no endpoint")
+
+        calls = {"n": 0}
+
+        def _fail_then_succeed(refresh=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise CdpUnavailableError("no endpoint")
+            return _snapshot()
+
+        client.get_my_tools = _fail_then_succeed
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            return_value=BrowserLaunch(BrowserLaunchStatus.LAUNCHED, browser="chrome"),
+        ) as launch:
+            snap = service.refresh_now(block=True)
+
+        launch.assert_called_once()
+        self.assertIs(snap.state, MonitorState.OK, "the retry did not happen")
+
+    def test_the_retry_happens_at_most_once(self) -> None:
+        """A browser that starts but still yields no cookie must not loop."""
+        from opencsi.auth.browser_launch import BrowserLaunch, BrowserLaunchStatus
+
+        clock = _Clock()
+        client = _Client(error=CdpUnavailableError("still nothing"))
+        service = _service(client, clock=clock, auto_recover_browser=True)
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            return_value=BrowserLaunch(BrowserLaunchStatus.LAUNCHED, browser="chrome"),
+        ) as launch:
+            snap = service.refresh_now(block=True)
+
+        self.assertEqual(launch.call_count, 1, "the recovery looped")
+        self.assertIs(snap.state, MonitorState.BROWSER_UNAVAILABLE)
+
+    def test_a_failed_launch_is_not_retried_in_the_same_cycle(self) -> None:
+        """Retrying a failed launch would repeat the failure and double the work."""
+        from opencsi.auth.browser_launch import BrowserLaunch, BrowserLaunchStatus
+
+        clock = _Clock()
+        client = _Client(error=CdpUnavailableError("no endpoint"))
+        service = _service(client, clock=clock, auto_recover_browser=True)
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            return_value=BrowserLaunch(BrowserLaunchStatus.NO_BROWSER_FOUND),
+        ) as launch:
+            service.refresh_now(block=True)
+
+        self.assertEqual(launch.call_count, 1)
+
+    def test_recovery_is_only_for_the_browser_state(self) -> None:
+        """A network outage must not make the tool start a browser."""
+        clock = _Clock()
+        client = _Client(error=NetworkError("down"))
+        service = _service(client, clock=clock, auto_recover_browser=True)
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser"
+        ) as launch:
+            snap = service.refresh_now(block=True)
+
+        launch.assert_not_called()
+        self.assertIs(snap.state, MonitorState.OFFLINE)
 
     def test_an_unexpected_exception_does_not_escape_the_worker(self) -> None:
         """A tray must never die because a library raised something odd."""

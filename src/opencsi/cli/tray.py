@@ -70,6 +70,14 @@ def register(subparsers) -> None:  # noqa: ANN001 - argparse plumbing
         action="store_true",
         help="skip the single-instance check (for debugging)",
     )
+    behavior.add_argument(
+        "--auto-recover-browser",
+        action="store_true",
+        help=(
+            "start a browser automatically when the credential source is gone "
+            "(off by default: it puts a window on your desktop)"
+        ),
+    )
 
     startup = parser.add_argument_group("start at sign-in")
     startup.add_argument(
@@ -113,6 +121,7 @@ def run(ctx: CliContext) -> int:
     config = MonitorConfig(
         refresh_interval=float(args.interval),
         renew_margin=float(args.renew_margin),
+        auto_recover_browser=bool(args.auto_recover_browser),
     )
 
     if args.once:
