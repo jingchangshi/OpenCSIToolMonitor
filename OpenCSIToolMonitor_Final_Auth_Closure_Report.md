@@ -20,9 +20,9 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 | 2 | **QR → openCsiTool auth** | `BROWSERLESS_LOGIN_ACHIEVABLE` | Credential of exactly the shape a scan returns established and verified a session. **No browser engine at any point.** |
 | 3 | **Silent renewal** | `WORKING` — verified live, both binaries | `RENEWED`, `Server accepted it : yes`, exit 0. Persists across processes. |
 | 4 | **Browserless OAuth** | `PURE_HTTP_OAUTH_FEASIBLE` | Independently reproduced three times (twice by me, once by a separate investigation). |
-| 5 | **Hidden auth runtime** | `IMPLEMENTED` / **`VISIBLE_FALLBACK` on this machine** | Chrome 153 here rejects `--headless=new`; the host detects that and says so truthfully. |
+| 5 | **Hidden auth runtime** | `IMPLEMENTED` / **`VISIBLE_FALLBACK` on this machine** | Chrome 153 here rejects `--headless=new`; the host detects that and says so truthfully. Profile persistence proven; the full renew cycle is **not** — see below. |
 | 6 | **Windows tray** | `WORKING` | `--once` returns real data; `--check` builds a 7-item menu; QR login wired. |
-| 7 | **Startup** | `WORKING` — full round-trip verified | Frozen binary resolves its own sibling. Registry install/remove verified and reverted. |
+| 7 | **Startup** | `WORKING` — full round-trip verified | Frozen binary resolves its own sibling, and reports `frozen-cli-tray` rather than claiming to be the tray. Registry install/remove verified and reverted. |
 | 8 | **CI** | `WRITTEN` / **never run on a CI runner** | Workflow is complete and every step was rehearsed locally; no GitHub runner executed it. |
 
 ### What is *not* claimed
@@ -36,6 +36,12 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 - **The consent path was not exercised against a never-approved account.** The
   `CONSENT_REQUIRED` branch is unit-tested and its endpoint is deliberately never
   called; the live first-authorization flow is untested.
+- **§65's renew → restart → renew cycle was not executed.** The auth-host profile
+  holds zero cookies because no first sign-in has ever been completed in it, so
+  there is nothing for a renewal to renew. What *was* proven is the property the
+  cycle depends on — profile persistence — by a repeated A/B measurement
+  (`tools/probe_auth_host_persistence.py`). The distinction matters: persistence
+  is necessary for the cycle, not equivalent to it.
 
 ---
 
@@ -43,10 +49,10 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 
 ```text
 starting HEAD   0637051  docs: make §12 usable, since that is the section a user actually reads
-ending HEAD     01ad527  report: final auth closure, with the incomplete items named as incomplete
+ending HEAD     362e407  probe: make the auth-host persistence measurement decisive, and fix its model
 ```
 
-Thirteen commits, each a real work item:
+Eighteen commits, each a real work item:
 
 ```text
 56d5974  auth: separate GitCode success from openCsiTool success
@@ -62,19 +68,24 @@ adb0437  renew: persist the minted session into the browser
 c979a98  tray: register the tray binary, derived from the running build
 2a6b5da  research: probes and the investigation that reversed the browser-bound claim
 01ad527  report: final auth closure, with the incomplete items named as incomplete
+2fce6a6  report: correct the before/after hashes and the diffstat scope
+b2dcf98  tray: report which context the startup command was derived in, and test it
+af05536  auth-host: close the browser gracefully, or stop() destroys the session
+ddd7724  build: pin line endings, since a whole-file rewrite already corrupted four
+362e407  probe: make the auth-host persistence measurement decisive, and fix its model
 ```
 
 ```text
-38 files changed, 9879 insertions(+), 565 deletions(-)   (excluding this report and docs/goal.md)
+43 files changed, 10315 insertions(+), 112 deletions(-)   (excluding this report and docs/goal.md)
 ```
 
-Code and tests only — this report and `docs/goal.md` account for the remaining
-~3100 lines of the 40-file total.
+Code, tests, tools and docs — this report and `docs/goal.md` account for the
+remaining lines of the 45-file total.
 
 | Metric | Before | After |
 | --- | --- | --- |
-| pytest | 750 passed, 1 skipped, 125 subtests | **824 passed, 1 skipped, 162 subtests** |
-| unittest | Ran 751, OK (skipped=1) | **Ran 825, OK (skipped=1)** |
+| pytest | 750 passed, 1 skipped, 125 subtests | **840 passed, 1 skipped, 182 subtests** |
+| unittest | Ran 751, OK (skipped=1) | **Ran 841, OK (skipped=1)** |
 
 The behavioural change, stated as the user experiences it:
 
@@ -83,11 +94,13 @@ BEFORE
   QR  -> GitCode login -> stop -> "now go use a browser"
   renewal -> only works while a browser is running and readable
   tray startup -> registry pointed at a binary that did not exist
+  auth host restart -> the GitCode session was gone, silently, forcing a re-scan
 
 AFTER
   QR  -> GitCode login -> openCsiTool session, established and verified, no browser
   renewal -> plain HTTP; result written back into the browser so the next process sees it
   tray startup -> registry points at the tray binary, derived from the running build
+  auth host restart -> the session survives; stop() flushes before it terminates
 ```
 
 ---
@@ -457,14 +470,24 @@ error anywhere.
 
 ### The fix
 
-`StartupStatus` now records where the command came from, and the three shapes are
-distinguished explicitly:
+`StartupStatus` now records where the command came from, and the four labels
+distinguish contexts that are genuinely different facts:
 
 ```text
-SOURCE_FROZEN_TRAY        running as opencsi-tray.exe -> its own sibling
-SOURCE_FROZEN_CLI         running as opencsi.exe     -> the tray next to it
-SOURCE_SOURCE_INSTALL     running from source        -> the console script
+SOURCE_FROZEN_TRAY        this process *is* opencsi-tray.exe
+SOURCE_FROZEN_CLI_TRAY    this process is opencsi.exe; the tray beside it was found
+SOURCE_FROZEN_CLI         this process is opencsi.exe; no tray exists, so use `tray`
+SOURCE_SOURCE_INSTALL     running from a checkout
 ```
+
+There are four labels for three contexts because the frozen CLI has two outcomes,
+and collapsing them was itself a defect. The frozen CLI with a sibling present
+reported `derived from: frozen-tray`, but `frozen-tray` is documented as describing
+*this build*, and `_is_frozen_tray()` was `False` in exactly that case — so
+`opencsi.exe tray --startup-status` printed a false statement about the running
+process, in the one output a user consults to find out what will start at sign-in.
+An invariant test now asserts that only a process that really is the tray binary
+may report `frozen-tray`.
 
 `matches_this_build` reports whether the registered command is the binary the user
 is currently running. `opencsi tray --startup-status` prints `derived from: <source>`
@@ -472,16 +495,39 @@ and warns when it is not.
 
 ### The three commands, verified live
 
+All three running contexts, each reporting its own shape. §73 §9 asks for exactly
+these three:
+
 ```text
-$ opencsi.exe tray --startup-status
+SOURCE INSTALL  (python -m opencsi.cli.app tray --startup-status)
+start at sign-in: disabled
+would run: ...\pythonw.exe -m opencsi.tray
+derived from: source
+
+FROZEN CLI      (opencsi.exe tray --startup-status)
+start at sign-in: disabled
+would run: D:\workspace\OpenCSIToolMonitor\dist\opencsi-tray.exe
+derived from: frozen-cli-tray
+
+FROZEN TRAY     (opencsi-tray.exe --startup-status)
 start at sign-in: disabled
 would run: D:\workspace\OpenCSIToolMonitor\dist\opencsi-tray.exe
 derived from: frozen-tray
+```
 
+Note the two frozen cases name the *same* command but report *different* sources,
+because they are different facts: the CLI found a tray beside it, while the tray
+binary is itself. Reporting both as `frozen-tray` — which is what shipped first —
+told a user running `opencsi.exe` something untrue about their own process.
+
+The install/remove round trip, on the frozen CLI:
+
+```text
 $ opencsi.exe tray --install-startup
 The tray will start when you sign in.
 command: D:\workspace\OpenCSIToolMonitor\dist\opencsi-tray.exe
-derived from: frozen-tray
+derived from: frozen-cli-tray
+(the tray binary beside this CLI, not the CLI itself)
 
 $ Get-ItemProperty HKCU:\...\Run -Name OpenCSIToolMonitor
 D:\workspace\OpenCSIToolMonitor\dist\opencsi-tray.exe      <-- the tray, not the CLI
@@ -492,12 +538,67 @@ the machine was left as found.
 
 ---
 
+## 9b. The auth host destroyed the session it existed to preserve
+
+Found by running §65's persistence cycle rather than by reading the code.
+
+`AuthBrowserHost.stop()` terminated the browser with `taskkill /F`. Chromium keeps
+its cookie store in memory and flushes to the profile's SQLite database on a delay,
+so a hard kill discards every cookie written since the last flush. The GitCode
+session reaches that profile through a CDP cookie write — so `stop()` was deleting
+the exact credential the hidden-auth-host design was built to carry across
+restarts, and doing it silently. The next renewal would find no session and tell the
+user to sign in again, with nothing connecting that to a `stop()` that ran hours
+earlier.
+
+`stop()` now calls `Browser.close` first and only falls back to the kill when the
+browser ignores it, logging a warning when it has to — because the whole reason this
+was hard to see is that the loss was silent.
+
+### Two measurement errors on the way to that conclusion
+
+Both are recorded because the second nearly produced a wrong answer that looked
+like a right one.
+
+1. **The first marker had no `expires`.** A cookie without an expiry is a *session*
+   cookie, and Chromium never writes those to its persistent store — by design,
+   however the browser is closed. The probe was therefore measuring the cookie type,
+   not the close method. The real openCsiTool token carries an expiry (~58 minutes),
+   so an expiring marker is also the faithful model.
+
+2. **A constant marker cannot tell whose write it is seeing.** An intermediate
+   harness appeared to show the marker surviving a graceful close and not a kill,
+   which looked like confirmation. It was an artefact: that harness wrote a stale
+   value first, so the "surviving" reads were the *previous* trial's already-flushed
+   value. A unique nonce per trial removed the ambiguity.
+
+With both fixed, and both methods measured repeatedly rather than once — survival
+depends on when the periodic flush fires, so a single run can pass or fail for
+reasons unrelated to the close method:
+
+```text
+graceful close (stop(), as shipped) : 3/3 survived
+hard kill (the original stop())     : 0/3 survived
+```
+
+The probe reports the unfavourable outcomes honestly too: `BOTH_SURVIVE` says the run
+does not demonstrate the fix is needed, and `INCONCLUSIVE` says survival varied
+within a method, so more trials are required before concluding anything.
+
+`AuthBrowserHost` also had no test file at all. `tests/test_auth_host.py` now pins
+the ordering that makes the flush happen, the kill fallback, the warning, and the
+`describe()` rule about reporting the observed mode rather than the requested one.
+The ordering test was confirmed to fail against the kill-first code before being
+kept.
+
+---
+
 ## 10. Tests
 
 | Surface | Command | Result |
 | --- | --- | --- |
-| pytest | `python -m pytest` | **824 passed, 1 skipped, 162 subtests passed** |
-| unittest | `python -m unittest discover -s tests -t tests` | **Ran 825, OK (skipped=1)** |
+| pytest | `python -m pytest` | **840 passed, 1 skipped, 182 subtests passed** |
+| unittest | `python -m unittest discover -s tests -t tests` | **Ran 841, OK (skipped=1)** |
 | Windows (live) | the seven commands in §1 | all as recorded |
 | packaging | `python tools/build_exe.py` | both binaries built, **and executed** |
 | live probes | `tools/probe_*.py` | verdicts recorded below |
@@ -528,12 +629,14 @@ Defects 2 and 3 are the reason §69 exists: the source tree was green throughout
 | `tests/test_http_oauth.py` | 36 (+7 subtests) | the three-request flow, refusals, secret safety, fallback chain, **browser persistence** |
 | `tests/test_qr_login_semantics.py` | 22 (+8 subtests) | `LoginStage`, exit 34, JSON shape, consent handling |
 | `tests/test_proxy_handling.py` | 12 | proxy flags, transport messages, the deliberate default asymmetry |
+| `tests/test_auth_host.py` | 8 | graceful-close ordering, kill fallback, the flush-loss warning, `describe()` honesty |
+| `tests/test_tray.py::StartupCommandContextTest` | 6 | §35's three contexts, plus the source-label invariant |
 
 ### Every regression test was verified to bite
 
 A regression test that passes against the broken code proves nothing. Each new test
 was run against a temporarily reverted fix and confirmed to **fail**, then the fix
-was restored. Two examples, verbatim from that check:
+was restored. Three examples, verbatim from that check:
 
 ```text
 reverted to the unconditional invalidate()
@@ -552,6 +655,19 @@ FAILED .../test_a_session_cookie_without_an_expiry_passes_none
 OK: the tests fail without the browser write, so they cover it
 ```
 
+```text
+reverted stop() to kill-first
+FAILED .../GracefulStopTest::test_stop_closes_gracefully_before_killing
+OK: the tests fail against the kill-first code, so they cover it
+```
+
+```text
+reverted the frozen-CLI label to frozen-tray
+FAILED .../test_the_frozen_cli_registers_the_sibling_tray
+SUBFAILED .../test_the_source_label_never_claims_a_context_that_is_not_running
+OK: the tests fail against the mislabelled code, so they cover it
+```
+
 The secret scan was checked the same way: synthetic JWT / cookie / token literals
 were planted and all three patterns caught them, then the files were removed.
 
@@ -562,6 +678,7 @@ were planted and all three patterns caught them, then the files were removed.
 | `tools/probe_oauth_browserless.py` | `PURE_HTTP_OAUTH_FEASIBLE` |
 | `tools/probe_qr_browserless_login.py` | `BROWSERLESS_LOGIN_ACHIEVABLE` |
 | `tools/probe_cookie_write.py` | `COOKIE_WRITE_AVAILABLE` |
+| `tools/probe_auth_host_persistence.py` | `GRACEFUL_CLOSE_REQUIRED` (3/3 vs 0/3); full renew cycle `SKIPPED` |
 
 Each probe declares its safety posture in its docstring, and
 `tests/test_packaging.py` enforces that — a probe that mutates state must say so
@@ -663,6 +780,23 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
   credential store, and why a browserless renewal must write its cookie *back* into
   the browser rather than to a file.
 
+### A limit discovered in the auth host, and what it means
+
+`stop()` now closes the browser gracefully so Chromium flushes its cookie store.
+Measured: a persistent cookie survived a graceful close 3/3 and a hard kill 0/3.
+
+What this does *not* fix: the flush is periodic, so the guarantee is "a graceful
+close flushes", not "every write is durable the instant it is made". A crash, a
+power loss, or a `taskkill` from outside this program can still lose cookies written
+since the last flush. Stating it as "the session always survives" would be the same
+class of overclaim as the browser-bound conclusion this report already corrects —
+the mechanism is now right, and the residual window is real.
+
+Not yet measured, and therefore not claimed: whether a *renewal* followed
+immediately by `stop()` always persists. The probe writes, waits a beat, then
+closes; the production path calls `stop()` from a shutdown handler whose timing
+relative to a just-completed renewal was not exercised.
+
 ---
 
 ## Appendix: secret scan
@@ -671,13 +805,16 @@ Mandated names: `access_token`, `refresh_token`, `xauth_token`, `scene_id`,
 `token`, `Cookie`, `Authorization`, `virtualKey`.
 
 ```text
-scanned 124 tracked files
-REVIEW: 19 value-shaped literals next to credential names
+scanned 140 tracked files
+REVIEW: value-shaped literals next to credential names
 ```
 
-All 19 inspected individually. Every one is either a **cookie name constant**
+Every one inspected individually. Each is either a **cookie name constant**
 (`GITCODE_ACCESS_TOKEN`), a **JSON field path** (`tokens_by_request`), or a
 **synthetic test fixture** (`SUPER_SECRET_COOKIE_123`, `TOKENVALUE0123456789`).
+The fixtures are deliberately absurd strings: a scan whose only hits are obviously
+fake values is a scan that was checked, whereas a scan with zero hits anywhere might
+simply not be looking.
 
 ```text
 Real credential values found: 0
