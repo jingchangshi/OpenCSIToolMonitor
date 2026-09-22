@@ -55,10 +55,10 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 
 ```text
 starting HEAD   0637051  docs: make §12 usable, since that is the section a user actually reads
-ending HEAD     b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 asks
+ending HEAD     5a092e7  fix(auth-host): stop the headless probe leaking a browser per call
 ```
 
-Twenty-two commits, each a real work item:
+Twenty-four commits, each a real work item:
 
 ```text
 56d5974  auth: separate GitCode success from openCsiTool success
@@ -83,10 +83,12 @@ eb61b0a  report: record the auth-host defect, and correct three claims that were
 6ad9d80  docs: correct the older report's browser-bound conclusion, per section 48
 3698407  docs: point the older report at the newer conclusion
 b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 asks
+3bfb3c7  report: section 9c, and correct a verdict row that was no longer true
+5a092e7  fix(auth-host): stop the headless probe leaking a browser per call
 ```
 
 ```text
-45 files changed, 10745 insertions(+), 143 deletions(-)   (excluding this report and docs/goal.md)
+45 files changed, 10928 insertions(+), 143 deletions(-)   (excluding this report and docs/goal.md)
 ```
 
 Code, tests, tools and docs — this report and `docs/goal.md` account for the
@@ -94,8 +96,8 @@ remaining lines of the 45-file total.
 
 | Metric | Before | After |
 | --- | --- | --- |
-| pytest | 750 passed, 1 skipped, 125 subtests | **848 passed, 1 skipped, 182 subtests** |
-| unittest | Ran 751, OK (skipped=1) | **Ran 849, OK (skipped=1)** |
+| pytest | 750 passed, 1 skipped, 125 subtests | **852 passed, 1 skipped, 182 subtests** |
+| unittest | Ran 751, OK (skipped=1) | **Ran 853, OK (skipped=1)** |
 
 The behavioural change, stated as the user experiences it:
 
@@ -718,6 +720,41 @@ narrow and mechanical: a filter that matches by substring across a shared resour
 will eventually match something that is not yours, so kill by exact profile path
 and nothing else.
 
+### The probe was leaking a browser per call
+
+That cleanup also surfaced a real defect, which is the one useful thing to come out
+of it. `_headless_supported` was leaking an entire Chromium process tree on every
+invocation — **eleven orphaned processes per call**, each holding a
+`HeadlessChrome*` profile in `%TEMP%`.
+
+The mechanism is worth stating because the obvious fix does not work.
+`subprocess.run(timeout=…)` kills the process it started, and the process it
+started is only a **launcher**: Chromium hands the real work to a child and exits,
+so by the time the timeout fires the PID is already gone and `taskkill /T` on it
+finds nothing to walk. Chromium does name the child's profile
+`HeadlessChrome<launcher pid>`, so the orphans are reachable by profile path even
+though the parent link is not.
+
+The cleanup now uses both mechanisms — `taskkill /T` while the launcher is alive,
+and a profile-path sweep for when it is not — with the sweep matching only the
+launcher's own PID, so it cannot reach a browser the user is running. Measured
+after the fix: zero orphans across repeated runs.
+
+Two details are pinned by tests rather than trusted:
+
+- The cleanup moved into a `finally`. The timeout is the **normal** path on this
+  build, so cleanup placed after the `try` would skip exactly the case that leaks.
+  The test for this was verified to fail when the call is removed.
+- The sweep uses PowerShell's `Get-CimInstance`, **not `wmic`**. The first version
+  used `wmic`, which is removed on Windows 11; it raised `FileNotFoundError` inside
+  an `except OSError` block, the handler swallowed it, and the cleanup reported
+  success while killing nothing. A test asserts `wmic` is absent from the argv,
+  because the failure mode of that mistake is silence.
+
+This defect is a fair illustration of the report's own thesis. It was invisible to
+the test suite, invisible in code review, and would have shipped as a slow resource
+leak that only shows up after the tray has been retrying for a while.
+
 ---
 
 ## 10. Tests
@@ -727,8 +764,8 @@ Every number below is from a run on this machine, with the binaries that exist i
 
 | Surface | Command | Result |
 | --- | --- | --- |
-| pytest | `python -m pytest` | **848 passed, 1 skipped, 182 subtests passed** |
-| unittest | `python -m unittest discover -s tests -t tests` | **Ran 849, OK (skipped=1)** |
+| pytest | `python -m pytest` | **852 passed, 1 skipped, 182 subtests passed** |
+| unittest | `python -m unittest discover -s tests -t tests` | **Ran 853, OK (skipped=1)** |
 | Windows (live) | the seven commands in §1 | all as recorded |
 | packaging | `python tools/build_exe.py` | both binaries built, **and executed** |
 | live probes | `tools/probe_*.py` | verdicts recorded below |
