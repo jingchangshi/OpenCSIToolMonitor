@@ -42,6 +42,25 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
   cycle depends on — profile persistence — by a repeated A/B measurement
   (`tools/probe_auth_host_persistence.py`). The distinction matters: persistence
   is necessary for the cycle, not equivalent to it.
+
+  Re-measured directly on the current build, from a confirmed cold start (the
+  host's own port 9224 answering `False` beforehand, so `STARTED` cannot be a
+  previously-running engine being adopted):
+
+  ```text
+  cycle 1  ensure_running -> STARTED / HEADLESS / describe: "hidden Chromium
+                            authentication engine (no user-visible window)"
+           profile identity files: 3
+  stop     engine processes: 8 -> 0        profile still on disk: yes
+  cycle 2  ensure_running -> STARTED / HEADLESS
+           profile identity files: 3      files lost across restart: none
+  ```
+
+  And the reason the renew halves cannot run, asked the way the product asks
+  rather than by reading a file the running browser has locked: over CDP against
+  the host's own endpoint, `Storage.getCookies` returns **0 cookies**. That is the
+  concrete state — not "renewal failed", but "there has never been a session in
+  this profile to renew".
 - **§30's post-reboot flow was not observed across a real sign-out.** The hidden
   engine itself is verified: the monitor brings it up with no browser started by
   hand, it reports `HEADLESS`, and no window appears. What was not done is a
@@ -481,6 +500,25 @@ visible fallback *as part of starting* and report it afterwards, so a caller tha
 inspected the result and declined had already put the window on screen.
 `visible_fallback=False` refuses it before the launch, which is the only point
 where refusing changes anything.
+
+### §61's "last-good snapshot survives auth/network failure", measured live
+
+The unit tests cover this against a fake client. It was also driven through the
+real `MonitorService._handle_failure`, starting from a snapshot that genuinely held
+numbers, so the tray's promise — a transient failure changes the *state*, not the
+data — is checked against the code that actually runs:
+
+```text
+network failure   OK -> OFFLINE      total_tokens 1234 -> 1234   requests 56 -> 56
+                  has_data True -> True   last_error recorded   backoff scheduled
+auth failure      OK -> AUTH_ERROR   total_tokens 1234 -> 1234   requests 56 -> 56
+                  has_data True -> True   last_error recorded   backoff scheduled
+```
+
+Both failure classes keep the numbers *and* report a state that is not `OK`. That
+second half is the one worth stating: preserving the data while claiming health
+would be the opposite bug, and it is the one a "keeps the last good data" test
+would pass.
 
 ### Why the QR action is offered *first* in `BROWSER_UNAVAILABLE`
 
