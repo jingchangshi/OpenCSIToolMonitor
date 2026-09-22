@@ -30,11 +30,11 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | Windows 11 托盘 v1 | **完成，实测验证** | `opencsi tray --once` 打印真实快照；`--check` 报告 `tray: ok`，7 个菜单项（含「开机自启动」） |
 | 浏览器缺失时用户可自救 | **完成，实测验证** | 杀掉 Chrome 后单条命令即恢复：`state: OK`，`EXIT=0`（见 §10 缺陷 8） |
 | GitCode 授权页未确认时的正确报告 | **完成，实测（见 §10 缺陷 10 的边界说明）** | 真实站点确认了授权页会让旧代码报 `TIMEOUT`、且点「授权」即签发新 token；新状态的判定逻辑由离线脚本验证（真实站点无法按需复现该页面） |
-| 测试 | **完成** | **745 项测试**（744 通过、1 跳过、123 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
+| 测试 | **完成** | **745 项测试**（744 通过、1 跳过、125 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
 | 规范提交 | **完成** | 46 个触碰源码/测试的提交（§11 完整列出） |
-| 实测发现并修复的缺陷 | **完成** | 16 个（§10 完整列出），通过两种方式发现：**运行真实产物**，以及修好一个缺陷后追问**"还有哪里会这样"**。缺陷 9–16 各自带一行显式的「发现方式」；缺陷 1–8 在正文里说明来源 |
+| 实测发现并修复的缺陷 | **完成** | 17 个（§10 完整列出），通过两种方式发现：**运行真实产物**，以及修好一个缺陷后追问**"还有哪里会这样"**。缺陷 9–17 各自带一行显式的「发现方式」；缺陷 1–8 在正文里说明来源 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
@@ -431,11 +431,11 @@ EXIT=0
 
 ## 9. 测试
 
-**745 项测试：744 通过，1 跳过，123 个 subtest 通过。**
+**745 项测试：744 通过，1 跳过，125 个 subtest 通过。**
 
 ```
 $ pytest
-744 passed, 1 skipped, 123 subtests passed in 41.06s
+744 passed, 1 skipped, 125 subtests passed in 39.25s
 
 $ python -m unittest discover -s tests -q
 Ran 745 tests in 39.621s
@@ -504,7 +504,7 @@ total 2
 `install_logging_redaction` 都已应用在续期/扫码路径上。`scene_id` 与扫码载荷在 `repr` 中
 被脱敏。verbose 日志只打印请求**路径**——绝不打印 query string，绝不打印 cookie。
 
-### 本轮发现并修复的十六个真实缺陷
+### 本轮发现并修复的十七个真实缺陷
 
 1. **图标卡在"续期中"。** `_maybe_renew` 在成功时直接返回，没有离开 `RENEWING`，导致托盘
    在一次已经成功的续期之后仍显示续期状态长达 5 分钟。由一个实测探针发现：在一个已经续期
@@ -851,7 +851,31 @@ catch-all 不是映射而是分支，无法用穷尽性断言，因此改为**�
 验证：删掉 `QrLoginStatus.TIMEOUT` 的映射 → `no exit code decided for: ['TIMEOUT']`；
 把 `CONSENT_REQUIRED` 从显式分支移除 → 两个测试同时失败。
 
-### 缺陷 1–16 的共同形态
+### 缺陷 17：README 里三处描述的是**重载**，而代码做的是**续期**
+
+**发现方式：追问"代码改对了，文档改干净了吗"。** §14 明确要求修正"登录一次后就不用再登录"
+这个错误假设。本轮回头**逐条核对** README 是否真的改到位，而不是只看它是否被改过。
+
+三处都成立于初始提交 `4826150`，此后从未随认证层演进更新：
+
+1. **FAQ「会话过期了怎么办」** 写的是"Cookie 有效期约 0.97 小时。过期后重新登录即可。
+   本工具会在 Cookie 快过期时主动重新读取一次。"——这正好是本项目要纠正的那个误解：
+   重读浏览器 Cookie 救不活已过期的会话，因为浏览器里那份同时也过期了。
+2. **专用配置目录的说明** 写的是"之后 Cookie 会保存在这个目录里，后续使用就不用再登录了"。
+   真正长期保留的是 **GitCode SSO 登录态**，它签发的 openCsiTool Cookie 仍然每小时过期。
+3. **「重试策略」** 写的是"遇到 401 时，**只重新读取一次凭据**然后重试一次"——这是会话层
+   出现**之前**的行为。代码现在走 `SessionManager.reload_then_renew()`：先重载，只有重载
+   没拿到新 token 时才付出一次 OAuth 往返。
+
+第 1 处尤其值得记录：它使**同一个文件内部自相矛盾**——同文的 `--renew` 一节（约 290 行之前）
+正确地写了"续期成功的判据是旧 token ≠ 新 token 且新过期时间更晚"，而 FAQ 却告诉读者
+"过期后重新登录即可"。先读 FAQ 的人会拿到错误的模型，而 FAQ 恰恰是遇到问题时最先看的地方。
+
+第 3 处的修法做了**验证而非仅仅重读代码**：`test_reload_alone_can_satisfy_recovery` 断言
+重载路径的导航次数为 **0**，`test_reload_falls_through_to_renewal` 断言重载拿到同一个 token
+时 OAuth 往返**确实发生**。改后的 README 描述的是这两条断言所钉住的顺序。
+
+### 缺陷 1–17 的共同形态
 
 缺陷 4、5、6 是"测试检查声明而非产物"；缺陷 7 与 9 是"测试只覆盖了其中一个入口点"；
 缺陷 8 是"测试只覆盖了状态映射，没覆盖该状态下**动作能否达成目的**"；缺陷 10、11、12 是
@@ -888,14 +912,14 @@ catch-all 不是映射而是分支，无法用穷尽性断言，因此改为**�
 
 ## 11. 提交
 
-自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 46 个**，下表完整列出（最旧在前，
-覆盖 `cf34c1b` 到 `71e7e54`）。全部以
+自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 47 个**，下表完整列出（最旧在前，
+覆盖 `cf34c1b` 到 `ea735a4`）。全部以
 `opencsi contributors <contributors@opencsi.invalid>` 署名。
 
 判定标准是机械的，共四个目录：
 
 ```bash
-git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 46 行，即下表
+git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 47 行，即下表
 ```
 
 `tools/` 之所以算在内，是因为 `tests/test_packaging.py` 的 `LiveProbeTest` 会断言
@@ -963,6 +987,7 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 46 行，即�
 | `8ee38e0` | test(cli): guard the QR exit-code map the way the renewal one is guarded |
 | `f400c90` | test(tray): pin which monitor states may reach the exit-code catch-all |
 | `71e7e54` | fix(tools): make the soak see renewals it did not perform itself |
+| `ea735a4` | research: prove the openCsiTool OAuth leg is browser-bound, not cookie-bound |
 
 ---
 
