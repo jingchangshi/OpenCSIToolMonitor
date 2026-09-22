@@ -74,6 +74,7 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 ```text
 starting HEAD   0637051  docs: make §12 usable, since that is the section a user actually reads
 ending HEAD     407752e  docs(auth-host): the old probe did not hang -- it started a browser
+baa1f3a  fix(auth): say why renewal is available and still will not work
 ```
 
 `ending HEAD` names the last commit that changed **source, tests or tools**, not
@@ -81,7 +82,7 @@ the true tip. A report cannot contain its own SHA — writing it would change th
 hash — so the anchor is the last behavioural change, which is what a reader needs
 to check out.
 
-Twenty-six commits below, each a real work item; the commits that carry this
+Twenty-seven commits below, each a real work item; the commits that carry this
 report are additional and are not listed, for the same reason:
 
 ```text
@@ -114,7 +115,7 @@ b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 a
 ```
 
 ```text
-45 files changed, 11210 insertions(+), 143 deletions(-)   (excluding this report and docs/goal.md)
+48 files changed, 11359 insertions(+), 146 deletions(-)   (excluding this report and docs/goal.md)
 ```
 
 Code, tests, tools and docs — this report and `docs/goal.md` account for the
@@ -122,8 +123,8 @@ remaining lines of the 45-file total.
 
 | Metric | Before | After |
 | --- | --- | --- |
-| pytest | 750 passed, 1 skipped, 125 subtests | **857 passed, 1 skipped, 182 subtests** |
-| unittest | Ran 751, OK (skipped=1) | **Ran 858, OK (skipped=1)** |
+| pytest | 750 passed, 1 skipped, 125 subtests | **860 passed, 1 skipped, 182 subtests** |
+| unittest | Ran 751, OK (skipped=1) | **Ran 861, OK (skipped=1)** |
 
 The behavioural change, stated as the user experiences it:
 
@@ -890,8 +891,8 @@ Every number below is from a run on this machine, with the binaries that exist i
 
 | Surface | Command | Result |
 | --- | --- | --- |
-| pytest | `python -m pytest` | **857 passed, 1 skipped, 182 subtests passed** |
-| unittest | `python -m unittest discover -s tests -t tests` | **Ran 858, OK (skipped=1)** |
+| pytest | `python -m pytest` | **860 passed, 1 skipped, 182 subtests passed** |
+| unittest | `python -m unittest discover -s tests -t tests` | **Ran 861, OK (skipped=1)** |
 | Windows (live) | the seven commands in §1 | all as recorded |
 | packaging | `python tools/build_exe.py` | both binaries built, **and executed** |
 | live probes | `tools/probe_*.py` | verdicts recorded below |
@@ -1132,6 +1133,55 @@ The narrow lesson: a symptom that looks like a defect can be a documented
 contract, and the tests encoding that contract are the thing to read *before*
 changing the code. Here they were the only thing standing between a plausible fix
 and a real regression.
+
+### The defect §64 found, which only reading two outputs together could find
+
+Running the four commands §64 names on the frozen binaries produced this pair:
+
+```text
+$ opencsi.exe login --status
+Silent renewal       : available
+
+$ opencsi.exe login --renew
+Outcome : OAUTH_FAILED / TIMEOUT
+```
+
+Both were individually correct — the capability check asks whether the machinery
+is *reachable*, and the round trip can still fail. What was wrong is that the
+explanation already existed and never reached the user. `renewal_capability`
+returns a `reason` string, and `--status` printed it on exactly one branch:
+`if not capability.available`. The moment availability became true the reason was
+discarded, so the user saw "available" and nothing else.
+
+Measured, not inferred: the phrase `GitCode SSO cookie` appears **nowhere** in
+`--status` output, while the probe had returned `False` for precisely that cookie.
+So the tool said the feature works, and the sentence saying it would ask for a
+sign-in was suppressed by the branch that had just been satisfied.
+
+This is §59's *no conclusion stronger than evidence* failing at the last step —
+not in the probe, which was honest, but in what the probe's answer was allowed to
+say. `RenewalCapability` gained `caveated` (available, and something needs
+saying); `--status` prints the reason as a note, and `doctor` records `WARN`
+rather than `OK`.
+
+`doctor` is the second half of the same defect and the more pointed one, because
+its check was **rewritten once already** for exactly this reason: it reported
+health while the next renewal parked on GitCode's approval page, and the
+troubleshooting guide told users that line meant recovery. The rewrite fixed the
+probe and left the verdict keyed on `available` alone, so a caveated capability
+still printed `ok`.
+
+The `None` branch was over-claiming too: a failed cookie read fell through to
+"GitCode SSO available", asserting presence from a read that established nothing.
+`SsoPresenceTest`'s own docstring says the probe "must not claim an SSO session it
+never looked for" — and its assertion required that literal string, so the test
+was pinning the behaviour its docstring forbids. It now requires the state to read
+as unknown, and separately forbids the opposite error of reporting a failed read
+as a missing cookie.
+
+Worth stating plainly: the unit tests were green throughout. What found this was
+running two commands a user would run, on the frozen build, and reading their
+outputs next to each other.
 
 ### Environment-specific, measured here
 
