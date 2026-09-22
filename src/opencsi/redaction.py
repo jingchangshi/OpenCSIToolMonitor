@@ -162,8 +162,19 @@ def redact_mapping(data: Any, *, _depth: int = 0) -> Any:
             if any(tok.replace("_", "") in flat for tok in containers):
                 if isinstance(v, (dict, list, tuple)):
                     out[k] = redact_mapping(v, _depth=_depth + 1)
-                else:
+                elif isinstance(v, str):
+                    # A container-ish name holding a *string* is still a secret:
+                    # ``{"credential": "..."}`` must never be emitted.
                     out[k] = MASK
+                else:
+                    # ...but a number, bool or None is a count, a duration or a
+                    # flag. This branch used to mask unconditionally, which made
+                    # the tray's documented ``credential_expires_in_seconds``
+                    # emit the string ``"<redacted>"`` instead of a number --
+                    # the same over-masking that the ``credentialish`` branch
+                    # below had already been fixed for, missed here because the
+                    # two branches were written separately. See defect 14.
+                    out[k] = v
             elif credentialish(key):
                 if isinstance(v, (dict, list, tuple)):
                     # Recurse: the container is structure, its leaves are

@@ -466,6 +466,55 @@ class EndToEndRedactionTest(unittest.TestCase):
         self.assertNotIn("SUPER_SECRET_COOKIE_123", rendered)
         self.assertIn(MASK, rendered)
 
+    def test_a_credential_key_holding_a_number_is_not_masked(self) -> None:
+        """The same over-masking the container branch was never fixed for.
+
+        ``credentialish`` keys already let numbers through, with a comment
+        explaining that a number under a credential-ish name is a count or a
+        duration rather than a credential. The ``containers`` branch was written
+        separately and masked everything that was not a dict or list, so the
+        tray's documented ``credential_expires_in_seconds`` field emitted the
+        string ``"<redacted>"`` in place of a number -- a script reading it got
+        a string where the schema promised seconds. Reproduced live:
+
+            {"state": "OK", ..., "credential_expires_in_seconds": "<redacted>"}
+        """
+        from opencsi.formatting import to_json
+
+        rendered = to_json(
+            {
+                "credential_expires_in_seconds": 2422.1,
+                "credential_count": 3,
+                "credential_available": True,
+                "credential_last": None,
+            }
+        )
+        self.assertNotIn(MASK, rendered)
+        self.assertIn("2422.1", rendered)
+
+        payload = json.loads(rendered)
+        self.assertEqual(payload["credential_expires_in_seconds"], 2422.1)
+        self.assertIsInstance(payload["credential_expires_in_seconds"], float)
+
+    def test_relaxing_the_container_branch_still_masks_its_strings(self) -> None:
+        """The relaxation must be by *type*, not a blanket pass-through."""
+        from opencsi.formatting import to_json
+
+        rendered = to_json({"credential": "SUPER_SECRET_COOKIE_123"})
+        self.assertNotIn("SUPER_SECRET_COOKIE_123", rendered)
+        self.assertIn(MASK, rendered)
+
+    def test_the_tray_snapshot_json_carries_a_real_number(self) -> None:
+        """End to end through the serialiser the tray actually uses."""
+        from opencsi.formatting import to_json
+        from opencsi.monitor.service import MonitorSnapshot, MonitorState
+
+        snapshot = MonitorSnapshot(state=MonitorState.OK, credential_expires_in=2422.1)
+        payload = json.loads(to_json(snapshot.as_dict()))
+        self.assertIn("credential_expires_in_seconds", payload)
+        self.assertIsInstance(payload["credential_expires_in_seconds"], (int, float))
+        self.assertNotEqual(payload["credential_expires_in_seconds"], MASK)
+
     def test_deeply_nested_structures_stop_at_the_depth_limit(self) -> None:
         """The depth guard returns MASK rather than recursing forever."""
         from opencsi.redaction import redact_mapping
