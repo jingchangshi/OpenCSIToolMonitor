@@ -1,0 +1,38 @@
+# Line endings, pinned rather than inherited.
+#
+# The repository stores LF. Without this file the working tree's line endings
+# depend on whoever edited a file last, and a tool that rewrites a whole file --
+# PowerShell's `Get-Content -Raw | Set-Content`, most commonly -- silently
+# converts every line. That is not cosmetic here: it turned a 71-line change to
+# auth_host.py into a 1378-line diff, which buries the real change and would make
+# a future `git blame` useless for the exact commit that fixed a session-loss bug.
+#
+# It has happened in this repository already, to these files:
+#   src/opencsi/auth/auth_host.py, src/opencsi/auth/session.py,
+#   src/opencsi/tray/startup.py, src/opencsi/auth/http_oauth.py
+#
+# `text=auto` normalises on commit and checks out per `eol`, so an editor that
+# writes CRLF cannot get it into the history.
+
+* text=auto eol=lf
+
+# Windows batch and PowerShell files are genuinely CRLF: cmd.exe and some
+# PowerShell hosts misparse LF-only line endings in .bat/.cmd, and a broken
+# build script fails in a way that looks like a missing tool.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary. Listed so `text=auto` never tries to normalise them; a PNG or a SQLite
+# profile rewritten as text is unrecoverable.
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.pyd binary
+*.zip binary
+*.whl binary
+*.sqlite binary
+*.db binary
+*.pfx binary
