@@ -195,139 +195,217 @@ def auth_profile_dir() -> Path:
 
 
 def _headless_supported(executable: Path) -> bool:
-    """Whether ``executable`` accepts ``--headless=new``.
+    """Whether ``executable`` can run headless. Answers from evidence.
 
-    Probed by asking the binary itself rather than by keeping a version table:
-    ``--version`` does not report capability, and a table would be wrong for
-    every build this project has not seen. Chromium prints its usage and exits
-    non-zero for an unrecognised switch, which is the signal used here.
+    This asks the browser to *do* something headless rather than asking it to
+    describe itself. The previous implementation ran
+    ``chrome --headless=new --version``, which on Chrome 153 neither rejects the
+    flag nor prints a version but hangs, so a fifteen-second timeout fired and a
+    build with working headless support was reported as having none. On this
+    machine that made the unattended monitor refuse to start any engine at all.
 
-    A probe failure means "unknown", and unknown is treated as unsupported so the
-    caller falls back to a mode that is known to work rather than starting a
-    browser that immediately exits.
+    Why ``--version`` was the wrong question
+    ----------------------------------------
+    It asks a browser to behave like a command-line tool. ``--screenshot`` asks
+    it to do the thing under test, and leaves an artifact that can be checked.
+    Measured here, three runs each:
 
-    .. warning::
+    ====================  ==========  ================  ==========
+    probe                 artifact    visible windows   wall time
+    ====================  ==========  ================  ==========
+    ``--version``         never       0 (leaked 11)     15s timeout
+    ``--dump-dom``        0/3         0                 0.12s
+    ``--screenshot``      3/3         0                 0.12s
+    ``--print-to-pdf``    3/3         0                 0.12s
+    ====================  ==========  ================  ==========
 
-       **This probe is known to be wrong on Chrome 153**, and the failure is
-       measured rather than suspected. On that build
-       ``chrome --headless=new --version`` neither rejects the flag nor prints a
-       version -- it *hangs*, so the fifteen-second timeout below fires and a
-       build with working headless support is reported as not having any. The
-       same Chrome launched with ``--headless=new --remote-debugging-port=...``
-       answers ``/json/version`` with ``HeadlessChrome/153.0.0.0``, which is
-       proof the capability is present.
+    ``--screenshot`` is used because it is the cheapest artifact to validate: a
+    real PNG begins with a known eight-byte signature, so the check is exact
+    rather than a substring search.
 
-       It is left in place rather than replaced by a launch-based probe because
-       the replacement could not be verified on the development machine: every
-       Chromium started from a Python child process there exits immediately with
-       status 0 (a sandbox artefact -- the same launch via a shell works), so a
-       probe that depends on starting one cannot be shown to work. Shipping an
-       unverified probe that starts browsers is worse than shipping a slow one
-       that is merely pessimistic, because the pessimistic answer is at least
-       *safe*: it falls back to a visible window instead of claiming a hidden
-       engine that is not there.
+    The exit code is deliberately **not** the evidence. Chromium's launcher
+    hands off to a child and exits immediately with status 0 -- measured at 0.1s
+    -- so an exit code proves only that the launcher ran, not that a browser did.
+    Every candidate above exited 0, including ``--dump-dom``, which produced
+    nothing at all. The artifact is the evidence.
 
-       The consequence is stated plainly in
-       ``OpenCSIToolMonitor_Final_Auth_Closure_Report.md`` §9c: on this machine
-       the unattended monitor cannot bring up a hidden auth host, and it reports
-       ``BROWSER_UNAVAILABLE`` rather than opening a window unasked.
+    That hand-off is also what made an earlier investigation conclude that
+    launching a browser from Python was broken on this machine: the launcher's
+    fast zero exit was read as the browser failing, when the browser was in fact
+    starting normally and answering its debug port 0.5s later.
 
-    The timeout path used to leak, and so did the success path. Chromium's
-    launcher hands off to a child and exits immediately, so the process this
-    function holds is *not* the one running the browser: by the time cleanup
-    runs, the PID is already gone and ``taskkill /T`` on it finds nothing to
-    walk. Measured at eleven orphaned processes per call, each holding a
-    ``HeadlessChrome*`` profile in ``%TEMP%`` -- and a tray that retries would
-    accumulate them without bound.
-
-    Chromium names that profile after the launcher's PID, so the children can be
-    found by the profile path rather than by a parent link that no longer
-    exists. That is what the cleanup below does.
+    A failure means "unknown", and unknown is treated as unsupported, so the
+    caller falls back to a mode known to work rather than starting a browser that
+    immediately exits.
     """
-    process = None
+    import tempfile
+
+    # The profile directory name carries this process's PID so that a sweep can
+    # find leftovers by path. Chromium puts --user-data-dir verbatim on every
+    # child's command line, so the path is a reliable handle on the whole tree
+    # even after the launcher exits and the children are reparented.
+    token = f"opencsi-headless-probe-{os.getpid()}"
+    profile = Path(tempfile.gettempdir()) / token
+    shot = Path(tempfile.gettempdir()) / f"{token}.png"
     try:
+        _sweep_probe(token)
+        profile.mkdir(parents=True, exist_ok=True)
+        argv = [
+            str(executable),
+            "--headless=new",
+            f"--screenshot={shot}",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-gpu",
+            "about:blank",
+        ]
         creationflags = 0
         if os.name == "nt":
-            # No DETACHED_PROCESS here, deliberately: this process is meant to be
-            # short-lived and killed, so it should stay in this job object rather
-            # than escape the cleanup below.
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-            [str(executable), "--headless=new", "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             creationflags=creationflags,
         )
-        try:
-            stdout, stderr = process.communicate(timeout=15.0)
-        except subprocess.TimeoutExpired:
-            # The measured Chrome 153 behaviour: no rejection, no version, no
-            # exit. Treat it as unsupported, which is the safe direction.
-            return False
+        # Wait for the *artifact*, not for the launcher. Chromium's launcher
+        # hands off to a child and exits in ~0.1s, while the browser needs about
+        # 0.6s to write the screenshot -- measured on this machine. Waiting on
+        # the launcher therefore returns before any work has happened, and the
+        # first version of this function then killed the tree at 0.1s and
+        # destroyed the browser before it could produce the very evidence it was
+        # being asked for. That is why it answered False on a build where
+        # headless provably works.
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if _is_png(shot):
+                return True
+            if process.poll() is not None and not _probe_still_alive(token):
+                # The launcher is gone and nothing is left to write the file.
+                # One last look covers a browser that finished just as it exited.
+                return _is_png(shot)
+            time.sleep(0.1)
+        return False
     except (OSError, subprocess.SubprocessError):
         return False
     finally:
-        # Runs on every path, including the timeout above. Without it the
-        # `return False` inside the except clause would leave the browser
-        # running, which is how the leak was found.
-        if process is not None:
-            _kill_probe_tree(process.pid)
+        # Runs on every path, including the timeout. The timeout is the *normal*
+        # path on a build that ignores the flag, so cleanup placed after the try
+        # would skip exactly the case that leaves browsers behind.
+        _sweep_probe(token)
+        _remove_quietly(profile)
+        _remove_quietly(shot)
 
-    if process.returncode != 0:
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _is_png(path: Path) -> bool:
+    """Whether ``path`` is a real PNG, judged by its signature.
+
+    Size alone is not enough: a truncated or empty file would pass a "did
+    something appear" check, and the whole point of this probe is to distinguish
+    a browser that ran from a launcher that merely exited.
+    """
+    try:
+        with path.open("rb") as handle:
+            return handle.read(8) == _PNG_MAGIC
+    except OSError:
         return False
-    # A build that understands the flag prints a Chrome/Chromium version line.
-    blob = (stdout or b"") + (stderr or b"")
-    return b"Chrom" in blob
 
 
-def _kill_probe_tree(launcher_pid: int) -> None:
-    """Kill a probe browser and its children. Never raises.
+def _probe_still_alive(token: str) -> bool:
+    """Whether any browser from the probe tagged ``token`` is still running.
+
+    Needed because the launcher exits immediately while the browser it started
+    keeps working, so ``poll()`` on the launcher says nothing about whether the
+    probe is still in progress. Returns True on any uncertainty, so a slow or
+    unreadable process list makes the caller wait rather than give up early.
+    """
+    if os.name != "nt":
+        # Elsewhere the launcher is the browser, so poll() is authoritative.
+        return False
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\""
+                f" | Where-Object {{ $_.CommandLine -like '*{token}*' }}).Count",
+            ],
+            capture_output=True,
+            timeout=20.0,
+            check=False,
+        )
+        text = (completed.stdout or b"").decode("utf-8", "replace").strip()
+        return int(text or "0") > 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return True
+
+
+def _remove_quietly(path: Path) -> None:
+    """Delete a file or directory, ignoring every failure.
+
+    A probe's scratch files are not worth an exception: on Windows a browser
+    that has not fully exited still holds its profile open, and failing the
+    capability check because cleanup could not finish would turn a cosmetic
+    problem into a functional one.
+    """
+    import shutil
+
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _sweep_probe(token: str) -> None:
+    """Kill any browser left over from a probe tagged ``token``. Never raises.
 
     Two mechanisms, because neither is sufficient alone:
 
-    * ``taskkill /T`` on the launcher PID walks the tree while the launcher is
-      still alive. On a timeout it usually is.
-    * the launcher may already have exited, having handed the real work to a
-      child that is now orphaned. Chromium names that child's profile
-      ``HeadlessChrome<PID>`` after the launcher, so matching the profile path
-      finds the orphans that the parent link cannot.
+    * ``taskkill /T`` cannot be used here -- the launcher has usually exited
+      already, having handed the real work to a child that is now orphaned, and
+      a dead PID has no tree to walk.
+    * every child still carries ``--user-data-dir=<...token...>`` on its command
+      line, so matching that token finds the orphans the parent link cannot.
 
-    Killing by profile path is deliberately narrow -- only the launcher's own PID
-    appears in the name -- so it cannot reach a browser the user is running.
+    The token contains this process's PID, so the sweep cannot reach a browser
+    the user is running or a concurrent probe's browser.
 
-    The orphan sweep shells out to PowerShell rather than ``wmic``, because
-    ``wmic`` is no longer present on Windows 11: it was deprecated and then
-    removed, and calling it raises ``FileNotFoundError`` that a bare
-    ``except OSError`` swallows. That silent failure is why the first version of
-    this cleanup appeared to run and killed nothing.
+    It shells out to ``powershell.exe`` rather than ``wmic`` because ``wmic`` was
+    removed in Windows 11: calling it raises ``FileNotFoundError``, which a bare
+    ``except OSError`` swallows, so the sweep reported success while killing
+    nothing. ``powershell.exe`` is used rather than ``pwsh`` deliberately --
+    Windows PowerShell ships with every supported Windows release, while
+    PowerShell 7 is an optional install, and this is a cleanup path where a
+    missing interpreter would silently restore the leak.
     """
     try:
-        if os.name == "nt":
-            subprocess.run(  # noqa: S603 - fixed argv, no shell
-                ["taskkill", "/PID", str(launcher_pid), "/T", "/F"],
-                capture_output=True,
-                timeout=20.0,
-                check=False,
-            )
-            marker = f"HeadlessChrome{launcher_pid}"
-            # -NoProfile keeps this fast and immune to a user's profile script;
-            # the filter matches the launcher's own PID only.
-            subprocess.run(  # noqa: S603 - fixed argv, no shell
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\""
-                    f" | Where-Object {{ $_.CommandLine -like '*{marker}*' }}"
-                    " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force"
-                    " -ErrorAction SilentlyContinue }",
-                ],
-                capture_output=True,
-                timeout=30.0,
-                check=False,
-            )
+        if os.name != "nt":
+            return
+        subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\""
+                f" | Where-Object {{ $_.CommandLine -like '*{token}*' }}"
+                " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force"
+                " -ErrorAction SilentlyContinue }",
+            ],
+            capture_output=True,
+            timeout=30.0,
+            check=False,
+        )
     except (OSError, subprocess.SubprocessError):
         pass
 
@@ -482,18 +560,41 @@ class AuthBrowserHost:
         )
 
     def _probe_mode(self) -> AuthHostMode:
-        """Read the running browser's user agent to tell headless from visible."""
+        """Read the running browser's identity to tell headless from visible.
+
+        Both ``product`` and ``userAgent`` are checked, because the headless
+        marker is **not** in ``product``. Measured on Chrome 153:
+
+        ===============  ==================================================
+        field            value
+        ===============  ==================================================
+        ``product``      ``Chrome/153.0.8010.53``
+        ``userAgent``    ``Mozilla/5.0 (...) HeadlessChrome/153.0.0.0 ...``
+        ===============  ==================================================
+
+        Checking ``product`` alone therefore reports every headless browser as
+        VISIBLE. That is the opposite error from the one it was written to avoid
+        and worse in effect: the host ran headless while telling the user, and
+        the tray, that a window was on their screen -- and a caller that had
+        asked for no window would reject its own perfectly good hidden host.
+
+        Both fields are checked rather than just ``userAgent`` because
+        ``product`` is the documented field for the browser's identity and a
+        build that put the marker there instead would be equally correct.
+        """
         try:
             endpoint = discover_cdp_endpoint(f"http://127.0.0.1:{self._port}", probe=True)
             browser_ws = endpoint.browser_ws_url()
             if not browser_ws:
                 return AuthHostMode.VISIBLE
-            from ..ws import CdpConnection
-
+            # CdpConnection is imported at module scope; the redundant local
+            # import that used to sit here shadowed it, so patching the module
+            # attribute had no effect on this call and the probe could not be
+            # tested without reaching into a private module.
             with CdpConnection(browser_ws, timeout=8.0) as conn:
                 version = conn.call("Browser.getVersion", {}, timeout=6.0)
-            product = str(version.get("product") or "")
-            return AuthHostMode.HEADLESS if "Headless" in product else AuthHostMode.VISIBLE
+            blob = f"{version.get('product') or ''} {version.get('userAgent') or ''}"
+            return AuthHostMode.HEADLESS if "Headless" in blob else AuthHostMode.VISIBLE
         except Exception:  # noqa: BLE001 - a capability probe must never raise
             return AuthHostMode.VISIBLE
 
