@@ -54,7 +54,7 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 
 ```text
 starting HEAD   0637051  docs: make §12 usable, since that is the section a user actually reads
-ending HEAD     0a58e44  fix(auth-host): two probes that were wrong in opposite directions
+ending HEAD     407752e  docs(auth-host): the old probe did not hang -- it started a browser
 ```
 
 `ending HEAD` names the last commit that changed **source, tests or tools**, not
@@ -91,10 +91,11 @@ b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 a
 3bfb3c7  report: section 9c, and correct a verdict row that was no longer true
 5a092e7  fix(auth-host): stop the headless probe leaking a browser per call
 0a58e44  fix(auth-host): two probes that were wrong in opposite directions
+407752e  docs(auth-host): the old probe did not hang -- it started a browser
 ```
 
 ```text
-45 files changed, 11187 insertions(+), 143 deletions(-)   (excluding this report and docs/goal.md)
+45 files changed, 11210 insertions(+), 143 deletions(-)   (excluding this report and docs/goal.md)
 ```
 
 Code, tests, tools and docs — this report and `docs/goal.md` account for the
@@ -699,13 +700,24 @@ recording because it is the most instructive pair of defects in this report: bot
 were in code that asks the browser a question, and both were invisible to tests
 that checked the *answers* and never the *questions*.
 
-**The capability probe asked a question that hangs.** `_headless_supported` ran
-`chrome --headless=new --version`. On Chrome 153 that neither rejects the flag nor
-prints a version — it hangs, so the fifteen-second timeout fired and a build with
-working headless support was reported as having none. With
-`visible_fallback=False`, the host then refused to launch at all. The measurement
-that proved headless worked all along: the same binary with
-`--headless=new --remote-debugging-port=…` answers `HeadlessChrome/153.0.0.0`.
+**The capability probe started a browser instead of asking a question.**
+`_headless_supported` ran `chrome --headless=new --version`. I first recorded this
+as a *hang*, and re-measuring showed that was wrong: the probe returns `rc=0` in
+0.12–0.41s, prints **nothing at all**, and starts a real headless browser that
+keeps running. The fifteen-second timeout never fires.
+
+So it was not a capability check that failed. It was an accidental browser launch
+whose empty output made the `b"Chrom" in blob` check fail — and whose leaked
+children (eleven per call) were separately cleaned up as if they were an unrelated
+bug. With `visible_fallback=False`, the resulting "unsupported" verdict made the
+host refuse to launch at all. The measurement that proved headless worked all
+along: the same binary with `--headless=new --remote-debugging-port=…` answers
+`HeadlessChrome/153.0.0.0`.
+
+The likeliest reason the original observation looked like a hang is machine load:
+by then roughly a hundred orphaned browsers from this very probe were running.
+That cannot be proven retroactively, so it is named as the likely cause rather
+than asserted as the cause.
 
 **The mode probe read the field that does not carry the marker.** `_probe_mode`
 read `Browser.getVersion`'s `product` and searched it for `"Headless"`. On this
@@ -748,7 +760,7 @@ produced no output at all.
 
 | probe | artifact | visible windows | wall time |
 | --- | --- | --- | --- |
-| `--version` (old) | never | 0, but leaked 11 processes | 15s timeout |
+| `--version` (old) | never (prints nothing) | 0, but leaked 11 processes | 0.12s, answers False |
 | `--dump-dom` | 0/3 | 0 | 0.12s |
 | `--screenshot` (new) | **3/3** | 0 | 0.12s |
 | `--print-to-pdf` | 3/3 | 0 | 0.12s |
@@ -1009,10 +1021,13 @@ Both are fixed, and both are recorded because the *shape* of the mistake is the
 reusable part: a probe that asks a browser to describe itself can be wrong in
 either direction, and a test suite that checks the answer will never notice.
 
-- **The capability probe hung.** `_headless_supported` asked
-  `chrome --headless=new --version`; on Chrome 153 that hangs, so the timeout
-  fired and a build with working headless support was judged to have none. It now
-  asks the browser to take a screenshot and checks for a real PNG signature.
+- **The capability probe started a browser instead of answering.** It asked
+  `chrome --headless=new --version`; on Chrome 153 that returns `rc=0` in ~0.12s,
+  prints nothing, and leaves a real headless browser running — so the
+  "prints a version" check failed and a build with working headless support was
+  judged to have none. It now asks the browser to take a screenshot and checks for
+  a real PNG signature. (An earlier revision of this report called this a *hang*;
+  re-measurement did not reproduce one.)
 - **The mode probe read the wrong field.** `_probe_mode` searched
   `Browser.getVersion`'s `product` for `"Headless"`, but on this build the marker
   is in `userAgent` (`product` is plain `Chrome/153…`). Every headless browser was
@@ -1025,6 +1040,27 @@ measurement error — Chromium's launcher hands off to a child and exits, so the
 exit code describes the hand-off and not the browser. A control experiment (same
 binary, flag present and absent) shows the flag works and the user agent
 distinguishes them.
+
+### A "fix" of mine that the tests stopped, and why it looked right
+
+While investigating the stale marker on the default profile — port 57208 accepts
+TCP but 404s on `/json/version` and never answers the WebSocket handshake — I
+concluded that `_looks_like_devtools` was wrong to accept a bare TCP accept plus a
+marker match, and changed it to require a real upgrade. Two tests failed
+immediately and the change was reverted.
+
+It was a regression, and the reason is worth recording because the symptom is
+genuinely indistinguishable from a bug at the point of observation: the module
+docstring documents that exact behaviour as *expected* for Chrome 147+, where
+`/json/*` is disabled on the default profile and the browser WebSocket is the only
+route that works; and `tests/fake_devtools.py` models it as "the exact field
+failure". Rejecting it would have broken the Chrome 147+ path the check exists to
+support.
+
+The narrow lesson: a symptom that looks like a defect can be a documented
+contract, and the tests encoding that contract are the thing to read *before*
+changing the code. Here they were the only thing standing between a plausible fix
+and a real regression.
 
 ### Environment-specific, measured here
 
