@@ -58,7 +58,13 @@ starting HEAD   0637051  docs: make §12 usable, since that is the section a use
 ending HEAD     5a092e7  fix(auth-host): stop the headless probe leaking a browser per call
 ```
 
-Twenty-four commits, each a real work item:
+`ending HEAD` names the last commit that changed **source, tests or tools**, not
+the true tip. A report cannot contain its own SHA — writing it would change the
+hash — so the anchor is the last behavioural change, which is what a reader needs
+to check out.
+
+Twenty-four commits below, each a real work item; the commits that carry this
+report are additional and are not listed, for the same reason:
 
 ```text
 56d5974  auth: separate GitCode success from openCsiTool success
