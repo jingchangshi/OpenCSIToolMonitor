@@ -837,6 +837,38 @@ class TrayCliTest(unittest.TestCase):
         self.assertNotEqual(code, EXIT_SERVER_ERROR)
         self.assertEqual(code, _once_exit_code(MonitorState.LOGIN_REQUIRED))
 
+    def test_only_the_states_that_should_fall_through_do(self) -> None:
+        """Pin the catch-all's membership, so a new state must be decided.
+
+        ``_once_exit_code`` ends in an unconditional ``return EXIT_SERVER_ERROR``.
+        That is the same silent fallback that made a new ``QrLoginStatus`` report
+        exit 1 and that let a new ``RenewalStatus`` do the same -- both were
+        fixed this round by asserting their maps exhaustive. This one cannot be
+        asserted that way, because the tail is not a map, so instead the set of
+        states *allowed* to reach it is pinned exactly.
+
+        Adding a monitor state therefore fails here until someone decides, in
+        public, whether the server is really the best explanation for it. That is
+        the decision ``CONSENT_REQUIRED`` needed and very nearly did not get: it
+        was one line away from being reported as a server fault.
+        """
+        from opencsi.cli.tray import _once_exit_code
+        from opencsi.errors import EXIT_SERVER_ERROR
+
+        falls_through = {
+            state for state in MonitorState if _once_exit_code(state) == EXIT_SERVER_ERROR
+        }
+        self.assertEqual(
+            falls_through,
+            {
+                MonitorState.STARTING,
+                MonitorState.REFRESHING,
+                MonitorState.RENEWING,
+                MonitorState.SERVER_ERROR,
+            },
+            "a monitor state reached the catch-all without an explicit decision",
+        )
+
     def test_sign_in_never_fetches_on_its_own_thread(self) -> None:
         """All fetching belongs to the monitor's worker thread.
 
