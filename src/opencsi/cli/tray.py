@@ -153,6 +153,17 @@ def _once(ctx: CliContext, config) -> int:
             ctx.out(f"adoption:     {snapshot.adoption_rate:.1%}")
             if snapshot.data_fresh_time:
                 ctx.out(f"server data:  {snapshot.data_fresh_time}")
+        if snapshot.credential_expires_in is not None:
+            # The JSON form has carried this since the beginning and the tray
+            # menu shows it as "会话 ..."; only the text form omitted it, so a
+            # human running --once could not see the one number that predicts
+            # whether they are about to be asked to sign in again. The formatter
+            # is the tray's own, so both surfaces word a lifetime identically.
+            from ..tray.presenter import format_duration
+
+            ctx.out(
+                f"credential:   {format_duration(snapshot.credential_expires_in)}"
+            )
         if snapshot.last_error:
             ctx.err(f"note: {snapshot.last_error}")
 

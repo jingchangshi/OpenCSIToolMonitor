@@ -875,6 +875,98 @@ class TrayCliTest(unittest.TestCase):
         self.assertIn("deadline", sign_in)
         self.assertIn("time.monotonic() < deadline", sign_in)
 
+    def test_once_text_output_shows_the_credential_lifetime(self) -> None:
+        """The human-readable form must carry what the JSON form already did.
+
+        The tray menu shows the session lifetime as "会话 ...", and `--json` has
+        always emitted `credential_expires_in_seconds`. Only the text form left
+        it out, so the one number that predicts "will I be asked to sign in
+        again soon?" was invisible to a person running `tray --once` while being
+        visible to a script.
+        """
+        from unittest import mock
+
+        from opencsi.cli import tray as tray_cli
+        from opencsi.monitor.service import MonitorSnapshot, MonitorState
+
+        snapshot = MonitorSnapshot(
+            state=MonitorState.OK,
+            total_tokens=1000,
+            requests=5,
+            prs=1,
+            credential_expires_in=1800.0,
+        )
+
+        class _Service:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def refresh_now(self, block=False):
+                return snapshot
+
+        class _Ctx:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def make_client(self):
+                return object()
+
+            def out(self, text: str = "") -> None:
+                self.lines.append(text)
+
+            def err(self, text: str) -> None:
+                self.lines.append(f"ERR {text}")
+
+            def emit(self, payload, render) -> None:
+                render()
+
+        ctx = _Ctx()
+        with mock.patch("opencsi.monitor.MonitorService", _Service):
+            tray_cli._once(ctx, object())
+
+        joined = "\n".join(ctx.lines)
+        self.assertIn("credential:", joined)
+        # 1800s is the tray's own "30m" wording, not a raw second count.
+        self.assertIn("30m", joined)
+
+    def test_once_text_output_omits_the_line_when_the_lifetime_is_unknown(self) -> None:
+        """No credential reading must not be printed as a zero or a blank."""
+        from unittest import mock
+
+        from opencsi.cli import tray as tray_cli
+        from opencsi.monitor.service import MonitorSnapshot, MonitorState
+
+        snapshot = MonitorSnapshot(state=MonitorState.OK, credential_expires_in=None)
+
+        class _Service:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def refresh_now(self, block=False):
+                return snapshot
+
+        class _Ctx:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def make_client(self):
+                return object()
+
+            def out(self, text: str = "") -> None:
+                self.lines.append(text)
+
+            def err(self, text: str) -> None:
+                self.lines.append(f"ERR {text}")
+
+            def emit(self, payload, render) -> None:
+                render()
+
+        ctx = _Ctx()
+        with mock.patch("opencsi.monitor.MonitorService", _Service):
+            tray_cli._once(ctx, object())
+
+        self.assertNotIn("credential:", "\n".join(ctx.lines))
+
 
 class ModuleEntryPointTest(unittest.TestCase):
     """`python -m opencsi.tray` -- the exact command Windows runs at sign-in.
