@@ -20,7 +20,7 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 | 2 | **QR → openCsiTool auth** | `BROWSERLESS_LOGIN_ACHIEVABLE` | Credential of exactly the shape a scan returns established and verified a session. **No browser engine at any point.** |
 | 3 | **Silent renewal** | `WORKING` — verified live, both binaries | `RENEWED`, `Server accepted it : yes`, exit 0. Persists across processes. |
 | 4 | **Browserless OAuth** | `PURE_HTTP_OAUTH_FEASIBLE` | Independently reproduced three times (twice by me, once by a separate investigation). |
-| 5 | **Hidden auth runtime** | `IMPLEMENTED` / **`VISIBLE_FALLBACK` on this machine** | Chrome 153 here rejects `--headless=new`; the host detects that and says so truthfully. Profile persistence proven; the full renew cycle is **not** — see below. |
+| 5 | **Hidden auth runtime** | `IMPLEMENTED` + **now wired into the monitor**; **cannot start on this machine** | Headless works here (`HeadlessChrome/153.0.0.0`), but the capability *probe* misjudges this build, so the host is refused before launch. Profile persistence proven; the full renew cycle is **not** — see §9c and below. |
 | 6 | **Windows tray** | `WORKING` | `--once` returns real data; `--check` builds a 7-item menu; QR login wired. |
 | 7 | **Startup** | `WORKING` — full round-trip verified | Frozen binary resolves its own sibling, and reports `frozen-cli-tray` rather than claiming to be the tray. Registry install/remove verified and reverted. |
 | 8 | **CI** | `WRITTEN` / **never run on a CI runner** | Workflow is complete and every step was rehearsed locally; no GitHub runner executed it. |
@@ -42,6 +42,12 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
   cycle depends on — profile persistence — by a repeated A/B measurement
   (`tools/probe_auth_host_persistence.py`). The distinction matters: persistence
   is necessary for the cycle, not equivalent to it.
+- **§30's post-reboot flow was not observed end to end on this machine.** The
+  monitor now tries the hidden host first and refuses a visible fallback before
+  launching it — both verified — but on this machine the hidden host cannot start,
+  so the flow stops one step short. What is claimed is the wiring and the refusal;
+  what is not is that a hidden engine appears. The two are different, and §9c
+  separates them.
 
 ---
 
@@ -49,10 +55,10 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 
 ```text
 starting HEAD   0637051  docs: make §12 usable, since that is the section a user actually reads
-ending HEAD     362e407  probe: make the auth-host persistence measurement decisive, and fix its model
+ending HEAD     b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 asks
 ```
 
-Eighteen commits, each a real work item:
+Twenty-two commits, each a real work item:
 
 ```text
 56d5974  auth: separate GitCode success from openCsiTool success
@@ -73,10 +79,14 @@ b2dcf98  tray: report which context the startup command was derived in, and test
 af05536  auth-host: close the browser gracefully, or stop() destroys the session
 ddd7724  build: pin line endings, since a whole-file rewrite already corrupted four
 362e407  probe: make the auth-host persistence measurement decisive, and fix its model
+eb61b0a  report: record the auth-host defect, and correct three claims that were wrong
+6ad9d80  docs: correct the older report's browser-bound conclusion, per section 48
+3698407  docs: point the older report at the newer conclusion
+b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 asks
 ```
 
 ```text
-43 files changed, 10315 insertions(+), 112 deletions(-)   (excluding this report and docs/goal.md)
+45 files changed, 10745 insertions(+), 143 deletions(-)   (excluding this report and docs/goal.md)
 ```
 
 Code, tests, tools and docs — this report and `docs/goal.md` account for the
@@ -84,8 +94,8 @@ remaining lines of the 45-file total.
 
 | Metric | Before | After |
 | --- | --- | --- |
-| pytest | 750 passed, 1 skipped, 125 subtests | **840 passed, 1 skipped, 182 subtests** |
-| unittest | Ran 751, OK (skipped=1) | **Ran 841, OK (skipped=1)** |
+| pytest | 750 passed, 1 skipped, 125 subtests | **848 passed, 1 skipped, 182 subtests** |
+| unittest | Ran 751, OK (skipped=1) | **Ran 849, OK (skipped=1)** |
 
 The behavioural change, stated as the user experiences it:
 
@@ -423,8 +433,13 @@ From Windows sign-in to `OK`:
        |
        +-- first tick: read the credential from the browser
        |
-       +-- no token?
-       |     -> state BROWSER_UNAVAILABLE (its own label, not "sign in")
+       +-- no browser answering?
+       |     -> recovery, hidden first (objective §30):
+       |          AuthBrowserHost(headless=True)   <-- no window; refused if it
+       |                                             would fall back to visible
+       |          launch_debug_browser()           <-- only with
+       |                                             --auto-recover-browser
+       |     -> if neither, state BROWSER_UNAVAILABLE (its own label, not "sign in")
        |     -> menu offers, in order:
        |          "扫码登录（无需浏览器）"   <-- default; needs no browser
        |          "Sign in..."             (non-default)
@@ -437,6 +452,21 @@ From Windows sign-in to `OK`:
        v
  5. state OK, tooltip + menu show tokens / requests / adoption
 ```
+
+### The two recoveries have opposite defaults, on purpose
+
+The hidden host is **on** by default and `--no-auth-host` turns it off; the visible
+browser is **off** by default and `--auto-recover-browser` turns it on. That looks
+inconsistent until you ask what each costs the user: a hidden engine puts nothing on
+screen, a window does. §30 asks for the post-reboot case to resolve itself, and
+§61 forbids `BROWSER_UNAVAILABLE` merely because Chrome was not already running —
+but neither licenses opening a window nobody asked for.
+
+Getting this right required a change in `AuthBrowserHost`: it used to open the
+visible fallback *as part of starting* and report it afterwards, so a caller that
+inspected the result and declined had already put the window on screen.
+`visible_fallback=False` refuses it before the launch, which is the only point
+where refusing changes anything.
 
 ### Why the QR action is offered *first* in `BROWSER_UNAVAILABLE`
 
@@ -593,12 +623,112 @@ kept.
 
 ---
 
+## 9c. The hidden auth host was never wired in
+
+§30 gives the flow a signed-in Windows user should get:
+
+```text
+Windows sign-in
+    -> monitor starts
+    -> AuthBrowserHost.ensure_running(hidden=True)
+    -> restore GitCode SSO
+    -> silent renewal
+    -> fetch usage
+    -> tray = OK
+```
+
+and §61 states the acceptance condition: *no `BROWSER_UNAVAILABLE` merely because
+Chrome was not manually started*.
+
+**Neither was true.** `AuthBrowserHost` was written, tested and documented, and
+then called by nothing except `login --qr`. The monitor's only recovery path was
+`launch_debug_browser`, which is opt-in precisely *because it opens a window*. So
+on a freshly signed-in machine the default behaviour was the exact failure §61
+forbids: the tray sat at `BROWSER_UNAVAILABLE`, which reads as "this tool is
+broken" when the truth is "nothing is signed in yet".
+
+This is the same shape as the other defects in this report — a component that
+works, is verified in isolation, and is not connected to the thing that needs it.
+`ensure_running` had a passing test file; nothing asserted that the *monitor*
+ever called it.
+
+### The fix, and the bug the fix's own test found
+
+The monitor now tries the hidden host first and the visible browser second, on
+opt-in. The two recoveries have **opposite defaults**, because they cost the user
+differently: a hidden engine puts nothing on screen, a window does.
+`--no-auth-host` turns the first off.
+
+The first version of this had a defect that its own test caught: the cooldown was
+stamped only after a *successful* hidden attempt, so a host that kept failing was
+respawned on every backoff tick. The stamp is now shared and taken before either
+attempt.
+
+### The ordering problem, which is the interesting part
+
+`ensure_running` opened the visible fallback **as part of starting** and reported
+it afterwards. A caller that inspected the result and declined was therefore
+already too late: the window was on screen, and the only thing left to control was
+what the caller *said* about it. Refusing a window after it has been opened is not
+refusing it.
+
+`AuthBrowserHost` gained `visible_fallback=False`, which declines the fallback
+before the launch. That turns "this caller does not open windows" from a
+description into a fact. A test pins it by removing the guard and confirming the
+test fails; a live probe confirms the behaviour on this desktop — with the guard,
+nothing starts and the state stays `BROWSER_UNAVAILABLE`; without it, a window
+appeared during the probe run.
+
+### What still does not work here, stated plainly
+
+On this machine the hidden path still cannot complete, because
+`_headless_supported` answers "unsupported" for Chrome 153. The probe asks
+`chrome --headless=new --version`, and on that build the combination neither
+rejects the flag nor prints a version — it **hangs**, so the fifteen-second
+timeout fires. Headless itself is fine: the same binary launched with
+`--headless=new --remote-debugging-port=…` answers `/json/version` with
+`HeadlessChrome/153.0.0.0`.
+
+The probe was **left in place rather than replaced**, and that is a deliberate
+choice about evidence rather than a preference. A launch-based replacement could
+not be verified here: every Chromium started from a Python child process on this
+machine exits immediately with status 0 — a sandbox artefact, since the identical
+launch from a shell works — so a probe that depends on starting one cannot be
+shown to work. Shipping an unverified probe that spawns browsers is worse than
+keeping a slow one that is merely pessimistic, because the pessimistic answer
+fails *safe*: it falls back to a visible window instead of claiming a hidden
+engine that is not there.
+
+So §30's flow is now **wired correctly and verified up to the point this machine
+allows**. What is claimed: the monitor tries the hidden host, refuses a visible
+fallback before launching it, rate-limits both, and reports honestly. What is not
+claimed: that a hidden host actually comes up on this machine — it does not, for
+the probe reason above, and the report says so instead of reporting the wiring as
+the outcome.
+
+### A process mistake worth recording
+
+While investigating the probe, a cleanup command used an over-broad process
+filter (`*opencsi*`, `*probe*`) and killed the debug Chrome instance on port 9222
+that every live check in this report depends on. The user's own browser was not
+affected — it runs a different profile and still has its windows — but the
+verification endpoint had to be treated as gone, and roughly a hundred orphaned
+headless processes from the probes were cleaned up afterwards. The lesson is
+narrow and mechanical: a filter that matches by substring across a shared resource
+will eventually match something that is not yours, so kill by exact profile path
+and nothing else.
+
+---
+
 ## 10. Tests
+
+Every number below is from a run on this machine, with the binaries that exist in
+`dist/`. Nothing here is projected or estimated.
 
 | Surface | Command | Result |
 | --- | --- | --- |
-| pytest | `python -m pytest` | **840 passed, 1 skipped, 182 subtests passed** |
-| unittest | `python -m unittest discover -s tests -t tests` | **Ran 841, OK (skipped=1)** |
+| pytest | `python -m pytest` | **848 passed, 1 skipped, 182 subtests passed** |
+| unittest | `python -m unittest discover -s tests -t tests` | **Ran 849, OK (skipped=1)** |
 | Windows (live) | the seven commands in §1 | all as recorded |
 | packaging | `python tools/build_exe.py` | both binaries built, **and executed** |
 | live probes | `tools/probe_*.py` | verdicts recorded below |
@@ -753,14 +883,29 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
 - **The `EMPTY_MOBILE` / `MFA_CHECK` branches were not explored.** Out of scope for
   the main path.
 - **CI has never run on a real runner.**
+- **The hidden auth host cannot actually start on this machine**, so §30's flow is
+  wired but not observed end to end here. The cause is `_headless_supported`, which
+  asks `chrome --headless=new --version`; on Chrome 153 that combination hangs
+  rather than answering, so the timeout fires and the build is judged unsupported.
+  Headless works — the same binary with a debug port answers
+  `HeadlessChrome/153.0.0.0`. The probe was left as-is rather than replaced because
+  a launch-based replacement is unverifiable here: Chromium started from a Python
+  child process on this machine exits immediately with status 0, while the same
+  launch from a shell works. See §9c.
 
 ### Environment-specific, measured here
 
-- **Chrome 153 on this machine rejects `--headless=new`.** The auth host detects
-  this and falls back to a visible window, reporting `headless=False` truthfully.
-  This is a property of this Chrome build, not of the design. The host's
-  `describe()` now reports the mode it *got*, not the flag it *asked for* —
-  previously it claimed "no user-visible window" while showing one.
+- **The headless capability probe misjudges Chrome 153 on this machine.** It asks
+  `chrome --headless=new --version`; that combination neither rejects the flag nor
+  prints a version, it **hangs**, so the fifteen-second timeout fires and a build
+  with working headless support is reported as having none. The capability is
+  present — the same binary with `--headless=new --remote-debugging-port=…`
+  answers `HeadlessChrome/153.0.0.0`. Consequence: the host is refused before
+  launch and a visible window is never opened, which is the safe direction to be
+  wrong in. The probe was not replaced because a launch-based replacement is
+  unverifiable on this machine (see §9c). Separately, the host's `describe()` now
+  reports the mode it *got* rather than the flag it *asked for* — previously it
+  claimed "no user-visible window" while showing one.
 - **The system proxy at `127.0.0.1:7890` breaks `opencsitool.com` and only that
   host.** Measured across 3 hosts × 6 configurations × 3 repeats: `gitcode.com`
   and `web-api.gitcode.com` pass through; `opencsitool.com` fails with
