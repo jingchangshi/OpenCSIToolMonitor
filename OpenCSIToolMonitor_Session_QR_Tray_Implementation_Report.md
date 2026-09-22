@@ -392,6 +392,27 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 建立"*。openCsiTool 自己的 `token` 来自 openCsiTool 自己的 OAuth 回调，而那个回调需要
 浏览器会话。该命令明确陈述这一点，而不是暗示它替代了浏览器路径。
 
+**本轮把这个边界从"提示"升级为"实测结论"**（探针 `tools/probe_oauth_pure_http.py`，
+GET only）。把浏览器 Cookie 装进 `CookieJar` 后用纯 HTTP 跟随 OAuth 入口，两种场景都
+拿不到 `token`：
+
+| 场景 | 装入 Cookie | 最终落点 | 响应 | 拿到 token |
+| --- | --- | --- | --- | --- |
+| 只装 GitCode SSO | 3 | `gitcode.com/oauth/authorize` | 200 | **否** |
+| 装全部浏览器 Cookie（排除 `token`） | 29 | 同上 | 200 | **否** |
+
+两次响应**逐字节相同**：5793 字节、11 个 `<script>`、无重定向、无 `Set-Cookie`。
+因此阻断原因**不是缺某个 Cookie**（29 个全带上也一样），也**不是 CAPTCHA**，而是
+`/oauth/authorize` 是一个**客户端渲染的 SPA 外壳**——"是否自动批准"的判断发生在
+JavaScript 里。结论：`QR_FLOW_REPRODUCIBLE` 只覆盖第一段（GitCode 扫码），**浏览器无法被
+完全移除，只能退化为可选认证后端**，这正是本 Goal 的原始措辞所允许的。详见
+`docs/gitcode-qr-protocol.md` §9.1。
+
+> 记录一个我差点写错的地方：探针最初只在响应体里 `grep` 关键字，看到 `captcha` 就倾向于
+> 把它当成阻断原因。加上"该关键字出现在 `<script>` 内部还是页面标记里"的判定后发现它在
+> script bundle **内部**，是某个库的名字。仅凭"关键字出现过"就宣布阻断原因，与本项目此前
+> 几次"断言自己没有观测过的事实"是同一类错误；探针现在打印**出处**而非仅仅命中。
+
 即使扫码已经可用，`CdpCookieProvider` + `BrowserOAuthRenewer` 这一对仍被保留为主路径
 与回退路径。扫码消除了 GitCode 对浏览器的依赖；它没有消除 openCsiTool 对浏览器的依赖。
 
