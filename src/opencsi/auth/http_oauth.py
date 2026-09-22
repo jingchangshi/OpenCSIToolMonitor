@@ -201,6 +201,108 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class GitCodeCookieSource:
+    """A GitCode session held in memory, with no browser behind it.
+
+    This is what makes a QR login self-contained. The QR flow obtains a real
+    GitCode credential over plain HTTP, and the browserless OAuth flow consumes
+    exactly that -- so routing the credential through a browser profile in
+    between was never necessary. It was an artifact of believing the OAuth leg
+    needed a browser engine.
+
+    It satisfies the one method :class:`HttpOAuthRenewer` reads
+    (``read_all_cookies``), so it is a drop-in for a
+    :class:`~opencsi.auth.cdp.CdpCookieProvider` in that position.
+
+    **The credentials live only in this object's memory.** Nothing is written to
+    disk, no browser profile is touched, and the object is expected to be
+    discarded when the command ends. That is a strictly smaller footprint than
+    the profile-planting bridge it replaces, which had to write a live credential
+    into a browser's cookie store and then clean up after itself.
+
+    It also exposes ``remember_token``, so the renewed openCsiTool session is
+    readable back out through the same interface the provider contract already
+    uses.
+    """
+
+    name = "qr-credentials"
+
+    def __init__(
+        self,
+        *,
+        access_token: str | None = None,
+        refresh_token: str | None = None,
+        username: str | None = None,
+        extra: Mapping[str, str] | None = None,
+    ) -> None:
+        self._records: list[dict[str, Any]] = []
+        for name, value in (
+            ("GITCODE_ACCESS_TOKEN", access_token),
+            ("GITCODE_REFRESH_TOKEN", refresh_token),
+            ("GitCodeUserName", username),
+        ):
+            if not value:
+                continue
+            register_secret(value)
+            self._records.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": ".gitcode.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                    "expires": 0,
+                }
+            )
+        for name, value in (extra or {}).items():
+            if not value:
+                continue
+            register_secret(value)
+            self._records.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": ".gitcode.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                    "expires": 0,
+                }
+            )
+        self._token: str | None = None
+        self._expires_in: float | None = None
+
+    @property
+    def cookie_names(self) -> tuple[str, ...]:
+        return tuple(sorted(str(record["name"]) for record in self._records))
+
+    def read_all_cookies(self, *, timeout: float | None = None) -> list[Mapping[str, Any]]:
+        del timeout
+        return [dict(record) for record in self._records]
+
+    def get_token(self) -> str | None:
+        return self._token
+
+    def peek_token(self) -> str | None:
+        return self._token
+
+    def remember_token(self, token: str, *, expires_in: float | None = None) -> None:
+        """Accept the renewed openCsiTool session."""
+        if not token:
+            return
+        register_secret(token)
+        self._token = token
+        self._expires_in = expires_in
+
+    @property
+    def token_expires_in(self) -> float | None:
+        return self._expires_in
+
+    def __repr__(self) -> str:
+        return f"GitCodeCookieSource(cookies={list(self.cookie_names)}, token=<redacted>)"
+
+
 class _Jar(http.cookiejar.CookieJar):
     """A cookie jar that records nothing outside its own process.
 

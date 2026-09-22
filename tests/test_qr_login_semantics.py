@@ -273,6 +273,7 @@ def login_module_completion(*, identity, bridged: bool):
     return _Completion(
         identity=identity,
         bridged=bridged,
+        renewal=RenewalResult(RenewalStatus.RENEWED) if bridged else None,
         reason=None if identity else "the openCsiTool session was not established",
         next_step=None if identity else "run 'opencsi login'",
     )
@@ -311,64 +312,105 @@ class LoginStageTest(unittest.TestCase):
 
 
 class OAuthCompletionTest(unittest.TestCase):
-    """The second half, driven directly so each stop point is reachable."""
+    """The second half, driven directly so each stop point is reachable.
 
-    def _complete(self, *, bridge_result, renewal=None, identity=None):
+    The browserless route replaced the profile-planting bridge, so these tests
+    drive the *renewal* seam instead of the bridge seam. The properties being
+    asserted are unchanged -- each stop point still reports itself honestly -- but
+    the mechanism that produces them is now plain HTTP, which is why there is no
+    browser or profile anywhere in this class.
+    """
+
+    def _complete(self, *, renewal, identity=None, cookies=("GITCODE_ACCESS_TOKEN",)):
         from opencsi.cli import login as login_module
 
-        class FakeBridge:
+        class FakeSource:
             def __init__(self, **_kwargs) -> None:
                 pass
 
-            def bridge(self, *_args, **_kwargs):
-                return bridge_result
+            @property
+            def cookie_names(self):
+                return cookies
 
-        # Patched on the *source* module, not on ``opencsi.cli.login``: the
-        # bridge is imported inside the function so that a plain ``opencsi
-        # --help`` does not pull the CDP machinery in, which means the name the
-        # command reads is resolved at call time from ``gitcode_bridge``.
+            def get_token(self):
+                return "ocs-token" if identity is not None else None
+
+        class FakeRenewer:
+            name = "http-oauth"
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.last_trace = None
+
+            def renew(self, **_kwargs):
+                return renewal
+
         with unittest.mock.patch(
-            "opencsi.auth.gitcode_bridge.GitCodeBrowserSessionBridge", FakeBridge
+            "opencsi.auth.http_oauth.GitCodeCookieSource", FakeSource
+        ), unittest.mock.patch(
+            "opencsi.auth.http_oauth.HttpOAuthRenewer", FakeRenewer
         ), unittest.mock.patch.object(
-            login_module, "_run_oauth_completion"
-        ) as run_oauth:
-            def fake_oauth(ctx, completion):
-                completion.renewal = renewal
-                completion.identity = identity
-                if identity is None and renewal is None:
-                    completion.reason = "engine unavailable"
-
-            run_oauth.side_effect = fake_oauth
+            login_module, "_verify_session", return_value=identity
+        ):
             ctx = _fake_ctx()
             return login_module._complete_qr_login(ctx, _qr_success())
 
-    def test_a_rejected_credential_stops_before_the_engine(self) -> None:
+    def test_a_rejected_credential_stops_before_verification(self) -> None:
         completion = self._complete(
-            bridge_result=BridgeResult(status=BridgeStatus.REJECTED, verify_status=401)
+            renewal=RenewalResult(RenewalStatus.LOGIN_REQUIRED, requires_interaction=True)
         )
         self.assertIsNone(completion.identity)
-        self.assertIn("rejected", completion.reason or "")
+        self.assertIn("not accepted", completion.reason or "")
+        self.assertEqual(completion.next_step, "run 'opencsi login --qr' again to get a fresh code")
 
     def test_no_credential_stops_immediately(self) -> None:
         from opencsi.cli import login as login_module
 
         empty = QrLoginResult(QrLoginStatus.SUCCEEDED, username="t", _credentials={})
         with unittest.mock.patch.object(
-            login_module, "_run_oauth_completion"
-        ) as run_oauth:
+            login_module, "_verify_session"
+        ) as verify:
             ctx = _fake_ctx()
             completion = login_module._complete_qr_login(ctx, empty)
         self.assertIsNone(completion.identity)
-        run_oauth.assert_not_called()
+        verify.assert_not_called()
 
-    def test_a_verified_bridge_proceeds_to_the_oauth_leg(self) -> None:
+    def test_a_credential_with_no_usable_cookie_is_reported(self) -> None:
+        """GitCode answered, but not with a cookie this flow can spend."""
         completion = self._complete(
-            bridge_result=BridgeResult(status=BridgeStatus.BRIDGED, verify_status=200),
-            renewal=RenewalResult(RenewalStatus.RENEWED, token_changed=True),
+            renewal=RenewalResult(RenewalStatus.RENEWED), cookies=()
+        )
+        self.assertIsNone(completion.identity)
+        self.assertIn("cannot be used", completion.reason or "")
+
+    def test_a_renewed_session_is_verified_and_completes(self) -> None:
+        completion = self._complete(
+            renewal=RenewalResult(RenewalStatus.RENEWED, renewed=True, token_changed=True),
             identity=_StubIdentity(),
         )
         self.assertIsNotNone(completion.identity)
-        self.assertTrue(completion.bridged)
+        self.assertEqual(completion.mechanism, "http-oauth")
+        self.assertFalse(completion.bridged, "the browserless route uses no browser")
+
+    def test_a_consent_requirement_hands_off_to_the_browser_route(self) -> None:
+        """The one case HTTP cannot cover, and it must say so rather than fail."""
+        completion = self._complete(
+            renewal=RenewalResult(
+                RenewalStatus.CONSENT_REQUIRED,
+                requires_interaction=True,
+                detail="GitCode has no existing authorization for this application",
+            )
+        )
+        self.assertIsNone(completion.identity)
+        self.assertIn("approve", completion.next_step or "")
+
+    def test_a_renewed_cookie_the_server_rejects_is_not_success(self) -> None:
+        """The P0 property, at the new seam: issued is not the same as accepted."""
+        completion = self._complete(
+            renewal=RenewalResult(RenewalStatus.RENEWED, renewed=True),
+            identity=None,
+        )
+        self.assertIsNone(completion.identity)
+        self.assertIn("did not accept it", completion.reason or "")
 
 
 def _fake_ctx():
