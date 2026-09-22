@@ -31,6 +31,7 @@ from opencsi.auth.browser_launch import (
     dedicated_profile_dir,
     find_browser,
     launch_debug_browser,
+    open_or_launch,
 )
 
 
@@ -236,6 +237,69 @@ class LaunchTest(unittest.TestCase):
 
         self.assertIs(result.status, BrowserLaunchStatus.FAILED)
         popen.assert_not_called()
+
+
+class OpenOrLaunchTest(unittest.TestCase):
+    """``open_or_launch`` is the entry point interactive sign-in must use.
+
+    It exists so no caller has to remember the ordering, and so the "open a tab"
+    and "start a browser" paths cannot drift apart -- the bug being fixed was
+    precisely a caller reaching for the wrong one.
+    """
+
+    def test_a_running_browser_is_asked_for_a_tab(self) -> None:
+        """Launching is a no-op when a browser is up, so the tab is explicit.
+
+        Chromium forwards a launch for an already-open profile to the existing
+        process without creating a debugging endpoint, so "the browser is
+        running" does not imply "the page is shown". The tab must be requested.
+        """
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            return_value=BrowserLaunch(BrowserLaunchStatus.ALREADY_RUNNING, port=9222),
+        ), mock.patch(
+            "opencsi.auth.browser_launch.open_tab_in_debug_browser", return_value=True
+        ) as open_tab:
+            result = open_or_launch("https://opencsitool.com/myTools")
+
+        open_tab.assert_called_once()
+        self.assertIs(result.status, BrowserLaunchStatus.ALREADY_RUNNING)
+        self.assertTrue(result.ok)
+
+    def test_a_refused_tab_is_reported_rather_than_swallowed(self) -> None:
+        """Silently claiming success is what the old code did."""
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            return_value=BrowserLaunch(BrowserLaunchStatus.ALREADY_RUNNING, port=9222),
+        ), mock.patch(
+            "opencsi.auth.browser_launch.open_tab_in_debug_browser", return_value=False
+        ):
+            result = open_or_launch("https://opencsitool.com/myTools")
+
+        self.assertFalse(result.ok)
+        self.assertIn("refused to open a tab", result.detail or "")
+
+    def test_a_fresh_launch_does_not_open_a_second_tab(self) -> None:
+        """The URL was already passed on the command line."""
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser",
+            return_value=BrowserLaunch(BrowserLaunchStatus.LAUNCHED, port=9222),
+        ), mock.patch(
+            "opencsi.auth.browser_launch.open_tab_in_debug_browser"
+        ) as open_tab:
+            result = open_or_launch("https://opencsitool.com/myTools")
+
+        open_tab.assert_not_called()
+        self.assertTrue(result.ok)
+
+    def test_open_tab_is_false_when_no_endpoint_answers(self) -> None:
+        """A failure to open a tab is a value, not an exception."""
+        from opencsi.auth.browser_launch import open_tab_in_debug_browser
+
+        with mock.patch(
+            "opencsi.auth.cdp.discover_cdp_endpoint", side_effect=OSError("none")
+        ):
+            self.assertFalse(open_tab_in_debug_browser("https://x.invalid"))
 
 
 if __name__ == "__main__":

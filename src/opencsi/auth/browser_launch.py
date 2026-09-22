@@ -230,6 +230,73 @@ def _endpoint_answers(port: int, *, timeout: float = 0.6) -> bool:
         return False
 
 
+def open_tab_in_debug_browser(
+    url: str, *, port: int = DEFAULT_DEBUG_PORT, timeout: float = 5.0
+) -> bool:
+    """Open ``url`` as a **foreground** tab in the running DevTools browser.
+
+    Distinct from :func:`launch_debug_browser`: this assumes a browser is already
+    up and asks it to show a page. Used for interactive sign-in, where the user
+    must actually see and use the tab, so ``background`` is deliberately *not*
+    set -- unlike silent renewal, which must never steal focus.
+
+    Returns whether the tab was created. A ``False`` is not an error worth
+    raising: the caller's next step is to tell the user to open the page
+    themselves, which is exactly what a failure here means.
+    """
+    from ..ws import CdpConnection
+    from .cdp import discover_cdp_endpoint
+
+    try:
+        endpoint = discover_cdp_endpoint(ports=(port,))
+    except Exception:  # noqa: BLE001 - no endpoint is a normal answer
+        return False
+
+    browser_ws = endpoint.browser_ws_url()
+    if not browser_ws:
+        return False
+
+    try:
+        with CdpConnection(browser_ws, timeout=timeout) as conn:
+            result = conn.call(
+                "Target.createTarget",
+                {"url": url},
+                timeout=timeout,
+            )
+            return bool(result.get("targetId"))
+    except Exception as exc:  # noqa: BLE001 - best effort by design
+        log.debug("could not open a tab over CDP: %s", type(exc).__name__)
+        return False
+
+
+def open_or_launch(
+    url: str, *, port: int = DEFAULT_DEBUG_PORT
+) -> BrowserLaunch:
+    """Open ``url`` in a readable browser, starting one if necessary.
+
+    The single entry point interactive sign-in should use. It exists so no
+    caller has to remember the ordering, and so the "open a tab" and "start a
+    browser" paths cannot drift apart -- the bug this whole module fixes was
+    precisely a caller reaching for the wrong one.
+    """
+    result = launch_debug_browser(url, port=port)
+    if result.status is BrowserLaunchStatus.ALREADY_RUNNING:
+        # A browser is up but the page is not necessarily shown: launching is a
+        # no-op in that case, so the tab has to be requested explicitly.
+        if open_tab_in_debug_browser(url, port=port):
+            return result
+        return BrowserLaunch(
+            status=BrowserLaunchStatus.FAILED,
+            port=port,
+            profile=result.profile,
+            detail=(
+                "a DevTools endpoint is running but it refused to open a tab; "
+                f"open {url} in that browser window"
+            ),
+        )
+    return result
+
+
 def launch_debug_browser(
     url: str,
     *,

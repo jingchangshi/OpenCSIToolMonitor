@@ -235,7 +235,7 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
 
 
 def _sign_in(service) -> None:
-    """Open the login page, then watch for the session it establishes.
+    """Open the login page in a readable browser, then watch for the session.
 
     Runs on its own thread (``TrayApp`` starts one), because opening a browser
     and waiting for a login is a tens-of-seconds operation that must not block
@@ -252,16 +252,21 @@ def _sign_in(service) -> None:
     without a lock, so a second thread calling it directly would race the worker
     on both the HTTP call and the bookkeeping. ``refresh_now(block=False)`` hands
     the work to the one thread that owns it.
+
+    The browser is started through ``open_or_launch`` rather than
+    ``webbrowser.open``. The latter starts the *default* browser with no
+    debugging port, so the cookie it receives is invisible to this tool and the
+    user ends up signed in to a session nothing can read.
     """
     import time
-    import webbrowser
 
+    from ..auth.browser_launch import open_or_launch
     from .login import LOGIN_URL
 
     try:
-        webbrowser.open(LOGIN_URL)
-    except Exception:  # noqa: BLE001 - the user can open it themselves
-        pass
+        open_or_launch(LOGIN_URL)
+    except Exception as exc:  # noqa: BLE001 - the user can open it themselves
+        log.warning("could not open a readable browser: %s", type(exc).__name__)
 
     # Bounded: five minutes, then give up and let the normal poll cycle handle
     # it. The tray must not spin forever on a sign-in the user abandoned.
