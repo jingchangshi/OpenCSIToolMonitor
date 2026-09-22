@@ -418,6 +418,8 @@ OK (skipped=1)
 | `tests/test_monitor.py` | `BrowserRecoveryTest`（8 项）：默认不启动浏览器、冷却期生效、同一轮只重试一次、网络故障不触发启动 |
 | `tests/test_monitor.py` | 授权页未确认 → `CONSENT_REQUIRED`（而非 `LOGIN_REQUIRED`），且**真的**触发 attention 回调 |
 | `tests/test_oauth_renewal.py` | 授权页不被误报为 `TIMEOUT`、detail 不含旧有的"slow/unreachable"措辞、检测**提前**结束等待（而不只是在截止时改标签）、探针只返回布尔值不读页面文本、非成功路径同样关闭 target |
+| `tests/test_oauth_renewal.py` | 探针的批准词表必须真的包含真实页面上的 `授权`，且**不含** `取消`（否则"用户点了取消"会被当成"正在等待用户"） |
+| `tests/test_cli_session.py` | `CONSENT_REQUIRED` 的退出码是会话码而非网络码，且消息不再说"SSO 会话没了"；`_RENEWAL_EXIT` 对 `RenewalStatus` **穷尽** |
 | `tests/test_tray.py` | `ChineseUnitTest`、`NotificationTest`、`SignInActionTest`、图标颜色/形状语义 |
 | `tests/test_tray.py` | 每个 `_ATTENTION_STATES` 成员都必须**真的有话可说**（见 §10 缺陷八） |
 | `tests/test_tray.py` | `CONSENT_REQUIRED` 的菜单与 `LOGIN_REQUIRED` **不同**，且提供批准动作而非纯登录 |
