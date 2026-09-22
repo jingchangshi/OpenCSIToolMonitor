@@ -10,6 +10,13 @@ reload*, *session renewal* and *interactive login* that the original single
 """
 
 from .base import CredentialProvider, CredentialStatus
+from .browser_launch import (
+    BrowserLaunch,
+    BrowserLaunchStatus,
+    dedicated_profile_dir,
+    find_browser,
+    launch_debug_browser,
+)
 from .cdp import CdpCookieProvider, CdpEndpoint, discover_cdp_endpoint
 from .gitcode_qr import (
     GitCodeQrAuthenticator,
@@ -41,6 +48,11 @@ from .session import (
 __all__ = [
     "CredentialProvider",
     "CredentialStatus",
+    "BrowserLaunch",
+    "BrowserLaunchStatus",
+    "launch_debug_browser",
+    "find_browser",
+    "dedicated_profile_dir",
     "CdpCookieProvider",
     "CdpEndpoint",
     "discover_cdp_endpoint",
