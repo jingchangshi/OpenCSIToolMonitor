@@ -43,10 +43,10 @@ incomplete, and collapsing them would hide exactly what this report exists to sa
 
 ```text
 starting HEAD   0637051  docs: make §12 usable, since that is the section a user actually reads
-ending HEAD     2a6b5da  research: probes and the investigation that reversed the browser-bound claim
+ending HEAD     01ad527  report: final auth closure, with the incomplete items named as incomplete
 ```
 
-Twelve commits, each a real work item:
+Thirteen commits, each a real work item:
 
 ```text
 56d5974  auth: separate GitCode success from openCsiTool success
@@ -61,11 +61,15 @@ adb0437  renew: persist the minted session into the browser
 0b7d42d  docs: explain that the browser is the credential store, not an auth step
 c979a98  tray: register the tray binary, derived from the running build
 2a6b5da  research: probes and the investigation that reversed the browser-bound claim
+01ad527  report: final auth closure, with the incomplete items named as incomplete
 ```
 
 ```text
-38 files changed, 9879 insertions(+), 565 deletions(-)
+38 files changed, 9879 insertions(+), 565 deletions(-)   (excluding this report and docs/goal.md)
 ```
+
+Code and tests only — this report and `docs/goal.md` account for the remaining
+~3100 lines of the 40-file total.
 
 | Metric | Before | After |
 | --- | --- | --- |
