@@ -26,7 +26,6 @@ import argparse
 import getpass
 import os
 import time
-import webbrowser
 
 from ..auth import (
     BrowserOAuthRenewer,
@@ -487,23 +486,59 @@ def _renew(ctx: CliContext) -> int:
 
 
 # ── browser mode ──────────────────────────────────────────────────────────
+def _open_a_readable_browser(ctx: CliContext) -> None:
+    """Start a browser whose session this tool can read, and say what happened.
+
+    Reports every outcome explicitly. The failure this replaces was silent: the
+    command claimed to have opened a browser, the user signed in, and nothing
+    worked -- with no message connecting the two. A launch that cannot produce a
+    readable browser must say so *before* the user spends a minute signing in.
+
+    A launch failure is not fatal to the command: the wait loop below still runs,
+    so a user who already has a correctly-started browser open is unaffected.
+    """
+    from ..auth.browser_launch import BrowserLaunchStatus, launch_debug_browser
+
+    result = launch_debug_browser(LOGIN_URL)
+
+    if result.status is BrowserLaunchStatus.LAUNCHED:
+        ctx.err(
+            f"started {result.browser} with DevTools on port {result.port} "
+            f"({LOGIN_URL})"
+        )
+        ctx.err("       sign in there, then leave the window open.")
+    elif result.status is BrowserLaunchStatus.ALREADY_RUNNING:
+        ctx.err(f"using the browser already listening on port {result.port}")
+        ctx.err("       sign in there, then leave the window open.")
+    elif result.status is BrowserLaunchStatus.NO_BROWSER_FOUND:
+        ctx.err("could not start a browser automatically: none was found.")
+        ctx.err(
+            f"       open {LOGIN_URL} in Chrome or Edge started with "
+            f"--remote-debugging-port={result.port}, then sign in."
+        )
+    else:
+        ctx.err("could not start a browser the tool can read from.")
+        if result.detail:
+            ctx.err(f"       {result.detail}")
+        ctx.err(f"       {LOGIN_URL}")
+
+
 def _browser(ctx: CliContext) -> int:
     client = ctx.make_client(provider=ctx.make_provider(), renew=False)
     provider = client.credentials
     assert isinstance(provider, CdpCookieProvider)
 
     if not ctx.args.no_browser:
-        try:
-            opened = webbrowser.open(LOGIN_URL)
-        except Exception:
-            opened = False
-        if not opened:
-            ctx.err(
-                f"could not open a browser automatically; open {LOGIN_URL} "
-                "manually and sign in."
-            )
-        else:
-            ctx.err(f"opened {LOGIN_URL} -- sign in there, then leave the tab open.")
+        # Start a browser the tool can actually read from, rather than handing
+        # the URL to the OS default browser.
+        #
+        # This used to be ``webbrowser.open(LOGIN_URL)``, which starts the
+        # user's *default* browser with **no** ``--remote-debugging-port``. The
+        # cookie it then wrote was invisible to this tool, so the command
+        # printed "sign in there, then leave the tab open" and then failed with
+        # the very same "no DevTools endpoint" error it started with. Telling
+        # someone to sign in is only honest if signing in can work.
+        _open_a_readable_browser(ctx)
 
     deadline = time.time() + max(0.0, ctx.args.wait)
     attempts = 0
