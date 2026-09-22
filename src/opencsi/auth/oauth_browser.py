@@ -155,7 +155,6 @@ def _path_of(url: str) -> str:
 _LOGIN_PATH_PREFIXES = ("/login", "/-/oauth/login", "/-/login")
 
 #: The path where GitCode asks the human to *approve* the application.
-#:
 #: This is a third state, distinct from both "still redirecting" and "must sign
 #: in", and it was the cause of a real misdiagnosis. When the SSO session is
 #: alive but the grant has not been approved (a first run, a new browser
@@ -174,6 +173,21 @@ _LOGIN_PATH_PREFIXES = ("/login", "/-/oauth/login", "/-/login")
 #: in flight", because both are ``/oauth/authorize``. Detection therefore asks
 #: the page whether an approve control exists -- see :meth:`_consent_pending`.
 _CONSENT_PATH_PREFIX = "/oauth/authorize"
+
+#: Cookies that mean "GitCode still knows who this is".
+#:
+#: Read by name only, never by value. ``GITCODE_ACCESS_TOKEN`` is the long-lived
+#: one (measured at roughly 179 days); the others are seen alongside it. Any one
+#: of them being present is enough to say the SSO session exists, because the
+#: question is only "would an OAuth round-trip sail through or stop at a login
+#: form".
+_GITCODE_SSO_COOKIES = frozenset(
+    {
+        "GITCODE_ACCESS_TOKEN",
+        "GITCODE_REFRESH_TOKEN",
+        "GitCodeUserName",
+    }
+)
 
 
 class BrowserOAuthRenewer:
@@ -894,6 +908,57 @@ def renewal_capability(
             "the configured CDP URL is a page-level socket; point --cdp at the "
             "browser endpoint from /json/version",
         )
+
+    # Everything above proves the *machinery* is reachable. It does not prove the
+    # thing the reason string used to claim: that the GitCode SSO session is
+    # still there. That claim was wrong in a way this project has already been
+    # bitten by twice -- it said "GitCode SSO available" on a machine where the
+    # very next renewal would park on an approval page, so `doctor` reported
+    # health and `docs/troubleshooting.md` told the user that seeing that line
+    # meant they had recovered.
+    #
+    # The SSO session lives in a long-lived cookie, so it can be checked cheaply
+    # and without performing an OAuth exchange -- which is what a *capability*
+    # check is allowed to do. Only the presence of the cookie is examined; its
+    # value is never read out.
+    sso_present = _has_gitcode_sso(ws)
+    if sso_present is False:
+        return RenewalCapability(
+            True,
+            "the browser can run the OAuth round-trip, but it holds no GitCode "
+            "SSO cookie, so a renewal would ask for a sign-in; sign in at "
+            f"{base_url}/myTools and keep the tab open",
+        )
+
     return RenewalCapability(
         True, "GitCode SSO available; OAuth can be re-run in a background tab"
     )
+
+
+def _has_gitcode_sso(browser_ws: str) -> bool | None:
+    """Whether the browser holds a GitCode SSO cookie. ``None`` if unknown.
+
+    Deliberately tri-state. "I could not tell" must not be reported as "it is
+    missing", because that would turn a transient DevTools hiccup into a
+    confident warning that the user has been signed out -- the same class of
+    error as claiming the session is fine without looking.
+
+    Reads cookie *names* only. No value is returned, logged or stored.
+    """
+    try:
+        with CdpConnection(browser_ws, timeout=5.0) as conn:
+            cookies = conn.call("Storage.getCookies", timeout=5.0).get("cookies", [])
+    except Exception:  # noqa: BLE001 - a capability probe must never raise
+        return None
+
+    if not isinstance(cookies, list):
+        return None
+
+    for cookie in cookies:
+        if not isinstance(cookie, Mapping):
+            continue
+        domain = str(cookie.get("domain") or "").lower()
+        name = str(cookie.get("name") or "")
+        if "gitcode.com" in domain and name in _GITCODE_SSO_COOKIES:
+            return True
+    return False

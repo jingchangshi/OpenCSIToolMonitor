@@ -383,6 +383,80 @@ class RenewalCapabilityConsistencyTest(unittest.TestCase):
         self.assertIn("manual", capability.reason.lower())
 
 
+class SsoPresenceTest(unittest.TestCase):
+    """The capability probe must not claim an SSO session it never looked for.
+
+    It used to. Having established only that a browser-level WebSocket answers,
+    it returned the reason "GitCode SSO available" -- a statement about a cookie
+    it had not read. On a machine where the next renewal would park on GitCode's
+    approval page, `doctor` therefore reported health, and the troubleshooting
+    guide told the user that seeing that line meant they had recovered.
+    """
+
+    def _capability(self, cookies, *, ws="ws://127.0.0.1:9222/devtools/browser/ABC"):
+        """Run the real probe with discovery and cookie reads stubbed."""
+        from unittest import mock
+
+        from opencsi.auth.cdp import CdpCookieProvider
+        from opencsi.auth.oauth_browser import renewal_capability
+
+        class _Endpoint:
+            def browser_ws_url(self):
+                return ws
+
+        provider = CdpCookieProvider("http://127.0.0.1:9222", discover=False, ttl=0.0)
+        with mock.patch(
+            "opencsi.auth.oauth_browser.make_cdp_renewer"
+        ) as make, mock.patch(
+            "opencsi.auth.oauth_browser.CdpConnection"
+        ) as conn_cls:
+            make.return_value._resolve_endpoint.return_value = _Endpoint()
+            conn = conn_cls.return_value.__enter__.return_value
+            conn.call.return_value = {"cookies": cookies}
+            return renewal_capability(provider)
+
+    def test_a_missing_gitcode_sso_cookie_is_reported_honestly(self) -> None:
+        capability = self._capability(
+            [{"name": "token", "domain": "opencsitool.com"}]
+        )
+        self.assertTrue(capability.available, "the machinery is still usable")
+        self.assertNotIn(
+            "GitCode SSO available",
+            capability.reason,
+            "the probe claimed an SSO session it did not find",
+        )
+        self.assertIn("sign-in", capability.reason.lower())
+
+    def test_a_present_gitcode_sso_cookie_keeps_the_optimistic_reason(self) -> None:
+        capability = self._capability(
+            [
+                {"name": "token", "domain": "opencsitool.com"},
+                {"name": "GITCODE_ACCESS_TOKEN", "domain": ".gitcode.com"},
+            ]
+        )
+        self.assertTrue(capability.available)
+        self.assertIn("GitCode SSO available", capability.reason)
+
+    def test_an_unreadable_cookie_jar_does_not_assert_the_user_is_signed_out(self) -> None:
+        """Unknown must not be reported as missing.
+
+        A transient DevTools hiccup would otherwise become a confident warning
+        that the user has been signed out -- the same class of error as claiming
+        the session is fine without looking.
+        """
+        capability = self._capability(None)
+        self.assertTrue(capability.available)
+        self.assertIn("GitCode SSO available", capability.reason)
+
+    def test_the_probe_never_returns_a_cookie_value(self) -> None:
+        """Only names are examined, so nothing secret can reach a report."""
+        capability = self._capability(
+            [{"name": "GITCODE_ACCESS_TOKEN", "domain": ".gitcode.com", "value": "SECRET"}]
+        )
+        self.assertNotIn("SECRET", capability.reason)
+        self.assertNotIn("SECRET", str(capability.as_dict()))
+
+
 class DoctorSessionTest(unittest.TestCase):
     """``doctor`` reports the session lifecycle, not just reachability."""
 
