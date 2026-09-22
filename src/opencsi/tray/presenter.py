@@ -40,6 +40,7 @@ STATE_LABELS_CN: dict[MonitorState, str] = {
     MonitorState.REFRESHING: "刷新中",
     MonitorState.RENEWING: "续期中",
     MonitorState.LOGIN_REQUIRED: "需要登录",
+    MonitorState.BROWSER_UNAVAILABLE: "浏览器未运行",
     MonitorState.OFFLINE: "离线",
     MonitorState.SERVER_ERROR: "服务异常",
     MonitorState.AUTH_ERROR: "会话失效",
@@ -197,7 +198,15 @@ def actions_for(snapshot: MonitorSnapshot, *, auto_refresh: bool = True) -> list
         Action("headline", headline_for(snapshot), enabled=False, default=True)
     ]
 
-    if snapshot.state is MonitorState.LOGIN_REQUIRED:
+    if snapshot.state is MonitorState.BROWSER_UNAVAILABLE:
+        # The honest first action. "Sign in" is not offered because it cannot
+        # work: there is no browser to sign in *to*, so the login page would be
+        # opened without a debugging port and the cookie written where this tool
+        # cannot read it. Starting the browser is the step that unblocks
+        # everything else, and the login flow is offered behind it.
+        items.append(Action("launch_browser", "启动浏览器并登录"))
+        items.append(Action("login", "打开登录页面"))
+    elif snapshot.state is MonitorState.LOGIN_REQUIRED:
         items.append(Action("login", "登录 / Sign in...", default=True))
     elif snapshot.state is MonitorState.AUTH_ERROR:
         items.append(Action("renew", "立即续期"))

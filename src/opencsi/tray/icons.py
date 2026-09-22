@@ -37,6 +37,7 @@ _COLOURS: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "RENEWING": ((0, 120, 212), (255, 255, 255)),
     "STARTING": ((128, 128, 128), (255, 255, 255)),
     "LOGIN_REQUIRED": ((214, 158, 0), (255, 255, 255)),
+    "BROWSER_UNAVAILABLE": ((214, 158, 0), (255, 255, 255)),
     "AUTH_ERROR": ((214, 158, 0), (255, 255, 255)),
     "OFFLINE": ((128, 128, 128), (255, 255, 255)),
     "SERVER_ERROR": ((196, 43, 28), (255, 255, 255)),

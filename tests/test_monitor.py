@@ -225,6 +225,41 @@ class ErrorClassificationTest(unittest.TestCase):
     def test_network_error_maps_to_offline(self) -> None:
         self.assertIs(state_for_error(NetworkError("down")), MonitorState.OFFLINE)
 
+    def test_a_missing_browser_is_not_reported_as_login_required(self) -> None:
+        """The two need different actions, so they need different states.
+
+        Mapping ``CDP_UNAVAILABLE`` to ``LOGIN_REQUIRED`` told the user to sign
+        in when the actual problem was that no readable browser was running.
+        Following that advice could not work -- the login action opened a
+        browser without a debugging port -- so the user was sent round a loop
+        with no exit. The state must name the real obstacle.
+        """
+        from opencsi.errors import CdpUnavailableError
+
+        state = state_for_error(CdpUnavailableError("no endpoint"))
+        self.assertIs(state, MonitorState.BROWSER_UNAVAILABLE)
+        self.assertIsNot(state, MonitorState.LOGIN_REQUIRED)
+
+    def test_no_browser_target_is_also_a_browser_problem(self) -> None:
+        """Same remedy: bring the browser up. Not "sign in"."""
+        from opencsi.errors import NoBrowserTargetError
+
+        state = state_for_error(NoBrowserTargetError("no page"))
+        self.assertIs(state, MonitorState.BROWSER_UNAVAILABLE)
+
+    def test_a_genuinely_missing_cookie_is_still_login_required(self) -> None:
+        """The distinction must not swallow the real sign-in case."""
+        from opencsi.errors import CookieNotFoundError
+
+        state = state_for_error(CookieNotFoundError("no cookie"))
+        self.assertIs(state, MonitorState.LOGIN_REQUIRED)
+
+    def test_the_browser_state_needs_the_user(self) -> None:
+        """It is not a wait-and-see condition: nothing recovers on its own."""
+        from opencsi.monitor.service import _ATTENTION_STATES
+
+        self.assertIn(MonitorState.BROWSER_UNAVAILABLE, _ATTENTION_STATES)
+
     def test_server_error_maps_to_server_error(self) -> None:
         exc = OpenCsiError("boom")
         exc.code = "SERVER_ERROR"

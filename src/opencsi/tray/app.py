@@ -82,12 +82,14 @@ class TrayApp:
         session: SessionManager | None = None,
         on_login: Callable[[], None] | None = None,
         on_open: Callable[[], None] | None = None,
+        on_launch_browser: Callable[[], None] | None = None,
         single_instance: SingleInstance | None = None,
     ) -> None:
         self._service = service
         self._session = session if session is not None else getattr(service, "_session", None)
         self._on_login = on_login
         self._on_open = on_open
+        self._on_launch_browser = on_launch_browser
         self._single = single_instance or SingleInstance()
 
         self._icon: Any = None
@@ -160,6 +162,8 @@ class TrayApp:
             self._refresh_view()
         elif action_id == "login":
             self._trigger_login()
+        elif action_id == "launch_browser":
+            self._trigger_launch_browser()
         elif action_id == "open":
             self._open_browser()
         elif action_id == "copy":
@@ -186,6 +190,26 @@ class TrayApp:
         if self._on_login is not None:
             threading.Thread(
                 target=self._on_login, name="opencsi-login", daemon=True
+            ).start()
+            return
+        self._open_browser()
+
+    def _trigger_launch_browser(self) -> None:
+        """Start a CDP-capable browser, then refresh once it is up.
+
+        Runs on its own thread: starting a browser and waiting for its DevTools
+        port is a multi-second operation, and doing it inline would freeze the
+        icon and may make Windows draw the tray as "not responding".
+
+        The refresh afterwards is what turns this from "a window appeared" into
+        "the tray recovered" -- the user should not have to click Refresh once
+        the browser they were told to start is actually running.
+        """
+        if self._on_launch_browser is not None:
+            threading.Thread(
+                target=self._on_launch_browser,
+                name="opencsi-launch-browser",
+                daemon=True,
             ).start()
             return
         self._open_browser()

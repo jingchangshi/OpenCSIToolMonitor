@@ -233,6 +233,69 @@ class ActionsTest(unittest.TestCase):
         ids = self._ids(_snap(state=MonitorState.SERVER_ERROR))
         self.assertNotIn("login", ids)
 
+    def test_a_missing_browser_offers_starting_one_first(self) -> None:
+        """The fix for a closed loop the user could not escape.
+
+        With no DevTools endpoint, the tray used to say "login required" and
+        offer "Sign in...". Clicking it opened the *default* browser with no
+        debugging port, so the cookie landed somewhere this tool cannot read,
+        and the next poll said "login required" again. Every click reproduced
+        the state it was meant to fix.
+
+        The first action must therefore be the one that actually unblocks the
+        situation: start a browser the tool can read from.
+        """
+        actions = actions_for(_snap(state=MonitorState.BROWSER_UNAVAILABLE))
+        ids = [a.id for a in actions]
+        self.assertIn("launch_browser", ids)
+        # Offered first among the actionable items, because it is the step the
+        # others depend on.
+        actionable = [i for i in ids if i not in ("headline",) and not i.startswith("sep")]
+        self.assertEqual(actionable[0], "launch_browser")
+
+    def test_a_missing_browser_does_not_offer_sign_in_as_the_primary_action(
+        self,
+    ) -> None:
+        """Signing in is still reachable, but never the default click.
+
+        It is not removed: a user who has a correctly-started browser open in
+        another window can still use it. It simply must not be what a stuck user
+        hits first, because that is the click that does nothing.
+        """
+        actions = actions_for(_snap(state=MonitorState.BROWSER_UNAVAILABLE))
+        by_id = {a.id: a for a in actions}
+        self.assertIn("login", by_id)
+        self.assertFalse(by_id["login"].default)
+        self.assertFalse(by_id["launch_browser"].default)
+
+    def test_the_missing_browser_state_has_its_own_label(self) -> None:
+        """It must not read as "sign in" -- that is the whole point."""
+        unavailable = label_cn(_snap(state=MonitorState.BROWSER_UNAVAILABLE))
+        login = label_cn(_snap(state=MonitorState.LOGIN_REQUIRED))
+        self.assertNotEqual(unavailable, login)
+        self.assertTrue(
+            any("\u4e00" <= ch <= "\u9fff" for ch in unavailable),
+            f"no Chinese label: {unavailable!r}",
+        )
+
+    def test_the_missing_browser_state_is_not_drawn_as_login_required(self) -> None:
+        """Amber for both would be fine, but the *tooltip* must differ.
+
+        The two states share the "you must act" colour deliberately -- the icon
+        answers "do I need to do something?", not "what exactly?". What must not
+        be shared is the text, because the text is the instruction.
+        """
+        from opencsi.tray.icons import colours_for
+
+        self.assertEqual(
+            colours_for(MonitorState.BROWSER_UNAVAILABLE.value),
+            colours_for(MonitorState.LOGIN_REQUIRED.value),
+        )
+        self.assertNotEqual(
+            tooltip_for(_snap(state=MonitorState.BROWSER_UNAVAILABLE)),
+            tooltip_for(_snap(state=MonitorState.LOGIN_REQUIRED)),
+        )
+
     def test_quit_is_always_last(self) -> None:
         for state in MonitorState:
             ids = self._ids(_snap(state=state))
@@ -623,6 +686,55 @@ class TrayCliTest(unittest.TestCase):
 
         args = build_parser().parse_args(["tray", "--startup-status"])
         self.assertTrue(args.startup_status)
+
+    def test_once_exit_codes_name_the_cause_not_a_blanket_permission_error(
+        self,
+    ) -> None:
+        """A one-shot's exit code is a public contract; 20 was a catch-all.
+
+        ``_once`` used to fall through to ``return 20`` -- "permission denied" --
+        for every state that was not explicitly listed. A missing browser is not
+        a permissions problem, and a script branching on 20 would look for the
+        wrong fix entirely.
+        """
+        from opencsi.cli.tray import _once_exit_code
+        from opencsi.errors import (
+            EXIT_CDP_UNAVAILABLE,
+            EXIT_NETWORK_ERROR,
+            EXIT_SERVER_ERROR,
+            EXIT_SESSION_EXPIRED,
+        )
+
+        self.assertEqual(_once_exit_code(MonitorState.OK), 0)
+        self.assertEqual(
+            _once_exit_code(MonitorState.BROWSER_UNAVAILABLE), EXIT_CDP_UNAVAILABLE
+        )
+        self.assertEqual(
+            _once_exit_code(MonitorState.LOGIN_REQUIRED), EXIT_SESSION_EXPIRED
+        )
+        self.assertEqual(_once_exit_code(MonitorState.AUTH_ERROR), EXIT_SESSION_EXPIRED)
+        self.assertEqual(_once_exit_code(MonitorState.OFFLINE), EXIT_NETWORK_ERROR)
+        self.assertEqual(
+            _once_exit_code(MonitorState.SERVER_ERROR), EXIT_SERVER_ERROR
+        )
+
+    def test_no_state_shares_an_exit_code_by_accident(self) -> None:
+        """Distinct causes must stay distinguishable, and no state may be 20.
+
+        ``20`` is reserved for a genuine permission denial; no monitor state
+        means that, so reaching it from a state would be a mapping mistake.
+        """
+        from opencsi.cli.tray import _once_exit_code
+
+        codes = {state: _once_exit_code(state) for state in MonitorState}
+        self.assertNotIn(20, set(codes.values()), f"a state fell through: {codes}")
+        for state in (
+            MonitorState.BROWSER_UNAVAILABLE,
+            MonitorState.LOGIN_REQUIRED,
+            MonitorState.OFFLINE,
+            MonitorState.SERVER_ERROR,
+        ):
+            self.assertNotEqual(codes[state], 0, f"{state} reported success")
 
     def test_sign_in_never_fetches_on_its_own_thread(self) -> None:
         """All fetching belongs to the monitor's worker thread.

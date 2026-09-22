@@ -9,10 +9,20 @@ anywhere, and only the last few lines need a Windows desktop.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
-from ..errors import EXIT_USAGE, UsageError
+from ..errors import (
+    EXIT_CDP_UNAVAILABLE,
+    EXIT_NETWORK_ERROR,
+    EXIT_SERVER_ERROR,
+    EXIT_SESSION_EXPIRED,
+    EXIT_USAGE,
+    UsageError,
+)
 from .context import CliContext, add_common_options
+
+log = logging.getLogger("opencsi.cli.tray")
 
 
 def register(subparsers) -> None:  # noqa: ANN001 - argparse plumbing
@@ -138,16 +148,32 @@ def _once(ctx: CliContext, config) -> int:
             ctx.err(f"note: {snapshot.last_error}")
 
     ctx.emit(snapshot.as_dict(), render)
+    return _once_exit_code(snapshot.state)
 
+
+def _once_exit_code(state) -> int:
+    """The exit code a one-shot reports for a monitor state.
+
+    A named function rather than a chain of ``if``s inside the command, because
+    exit codes are a public contract and this mapping is the thing worth testing
+    directly. The previous version ended in a bare ``return 20``, which meant
+    every state nobody had thought about was reported as "permission denied" --
+    including a missing browser, whose real code is 10 and whose remedy is
+    entirely different.
+    """
     from ..monitor import MonitorState
 
-    if snapshot.state is MonitorState.OK:
+    if state is MonitorState.OK:
         return 0
-    if snapshot.state is MonitorState.LOGIN_REQUIRED:
-        return 13
-    if snapshot.state is MonitorState.OFFLINE:
-        return 30
-    return 20
+    if state in (MonitorState.LOGIN_REQUIRED, MonitorState.AUTH_ERROR):
+        return EXIT_SESSION_EXPIRED
+    if state is MonitorState.BROWSER_UNAVAILABLE:
+        return EXIT_CDP_UNAVAILABLE
+    if state is MonitorState.OFFLINE:
+        return EXIT_NETWORK_ERROR
+    # STARTING, REFRESHING, RENEWING and SERVER_ERROR: nothing usable was
+    # produced, and the server is the best available explanation.
+    return EXIT_SERVER_ERROR
 
 
 def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> int:
@@ -191,7 +217,11 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
         )
         return 0
 
-    app = TrayApp(service, on_login=lambda: _sign_in(service))
+    app = TrayApp(
+        service,
+        on_login=lambda: _sign_in(service),
+        on_launch_browser=lambda: _launch_browser_then_refresh(service),
+    )
     try:
         if allow_multiple:
             app._single.acquire = lambda: True  # noqa: SLF001 - debug escape hatch
@@ -241,6 +271,31 @@ def _sign_in(service) -> None:
         service.refresh_now()
         if service.snapshot.has_data:
             return
+
+
+def _launch_browser_then_refresh(service) -> None:
+    """Start a CDP-capable browser, then let the worker pick up the session.
+
+    This is the action offered when the tray is in ``BROWSER_UNAVAILABLE``: the
+    credential source is down, so the fix is to bring it up, not to sign in.
+
+    The refresh is **enqueued**, never performed here -- see :func:`_sign_in`
+    for why. One refresh is enough: the browser has already answered on its
+    DevTools port by the time the launcher returns, so the cookie either exists
+    or the user still has to sign in, and either way the next poll tells the
+    truth. Polling in a loop here would duplicate the worker's job.
+    """
+    from ..auth.browser_launch import launch_debug_browser
+    from .login import LOGIN_URL
+
+    try:
+        result = launch_debug_browser(LOGIN_URL)
+        if result.ok:
+            service.refresh_now()
+        else:
+            log.warning("could not start a usable browser: %s", result.status.value)
+    except Exception as exc:  # noqa: BLE001 - a tray callback must never raise
+        log.warning("browser launch failed: %s", type(exc).__name__)
 
 
 def _startup(ctx: CliContext, args) -> int:

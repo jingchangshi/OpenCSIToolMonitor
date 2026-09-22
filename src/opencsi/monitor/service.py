@@ -66,6 +66,14 @@ class MonitorState(str, Enum):
     REFRESHING = "REFRESHING"
     RENEWING = "RENEWING"
     LOGIN_REQUIRED = "LOGIN_REQUIRED"
+    #: The credential *source* is unreachable: no browser is running with a
+    #: DevTools endpoint. Distinct from ``LOGIN_REQUIRED`` because the remedy is
+    #: different -- and because "sign in" is not something the user can
+    #: successfully do while the browser is down. Conflating the two produced a
+    #: closed loop: the tray said "login required", the login action opened a
+    #: browser with no debugging port, and the next poll said "login required"
+    #: again. Nothing the user could click would ever break the cycle.
+    BROWSER_UNAVAILABLE = "BROWSER_UNAVAILABLE"
     OFFLINE = "OFFLINE"
     SERVER_ERROR = "SERVER_ERROR"
     AUTH_ERROR = "AUTH_ERROR"
@@ -82,8 +90,12 @@ class MonitorState(str, Enum):
 _CODE_STATE: dict[str, MonitorState] = {
     # Authentication: the user must act.
     "OPENCSITOOL_NOT_LOGGED_IN": MonitorState.LOGIN_REQUIRED,
-    "CDP_UNAVAILABLE": MonitorState.LOGIN_REQUIRED,
-    "NO_BROWSER_TARGET": MonitorState.LOGIN_REQUIRED,
+    # The credential *source* is down. The user must still act, but not by
+    # signing in: `opencsi login` cannot succeed with no browser to read from.
+    # Mapping these to LOGIN_REQUIRED is what produced the closed loop described
+    # on ``MonitorState.BROWSER_UNAVAILABLE``.
+    "CDP_UNAVAILABLE": MonitorState.BROWSER_UNAVAILABLE,
+    "NO_BROWSER_TARGET": MonitorState.BROWSER_UNAVAILABLE,
     # The QR endpoint answered in an unrecognised shape: the user still needs to
     # sign in, just by another route, so this is not a server-health problem.
     "QR_PROTOCOL_ERROR": MonitorState.LOGIN_REQUIRED,
@@ -124,6 +136,7 @@ STATE_LABELS: dict[MonitorState, str] = {
     MonitorState.REFRESHING: "Refreshing",
     MonitorState.RENEWING: "Renewing session",
     MonitorState.LOGIN_REQUIRED: "Login required",
+    MonitorState.BROWSER_UNAVAILABLE: "Browser not running",
     MonitorState.OFFLINE: "Offline",
     MonitorState.SERVER_ERROR: "Server error",
     MonitorState.AUTH_ERROR: "Session expired",
@@ -132,8 +145,17 @@ STATE_LABELS: dict[MonitorState, str] = {
 #: States the user must do something about. Deliberately excludes ``OFFLINE``
 #: and ``SERVER_ERROR``: a flaky network is not something to interrupt someone
 #: over, and it usually fixes itself. A session that needs a sign-in does not.
+#:
+#: ``BROWSER_UNAVAILABLE`` is included for the same reason as the other two: the
+#: tool is not collecting anything, and no amount of waiting will change that.
+#: It is the state a user lands in right after a reboot, which is exactly when
+#: they have not yet noticed the tray is doing nothing.
 _ATTENTION_STATES = frozenset(
-    {MonitorState.LOGIN_REQUIRED, MonitorState.AUTH_ERROR}
+    {
+        MonitorState.LOGIN_REQUIRED,
+        MonitorState.AUTH_ERROR,
+        MonitorState.BROWSER_UNAVAILABLE,
+    }
 )
 
 #: States that describe work in progress rather than an outcome. These must not
