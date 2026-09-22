@@ -36,6 +36,15 @@ from .single_instance import SingleInstance
 
 log = logging.getLogger("opencsi.tray")
 
+#: Returned by :meth:`TrayApp.run` when another tray already holds the mutex.
+#:
+#: Named rather than a bare ``2`` because the entry point has to recognise this
+#: specific outcome: it is the one failure that leaves a windowed user with no
+#: icon *and* no message, so it is the one that must raise a dialog. Sharing the
+#: value with ``EXIT_USAGE`` is deliberate -- from a shell, "you asked for
+#: something that cannot happen" is the right reading.
+ALREADY_RUNNING_EXIT = 2
+
 #: Where "Open openCsiTool in browser" points.
 OPENCSITOOL_URL = "https://opencsitool.com/myTools"
 
@@ -430,7 +439,7 @@ class TrayApp:
 
         if blocking and not self._single.acquire():
             log.error("another OpenCSI tray is already running")
-            return 2
+            return ALREADY_RUNNING_EXIT
 
         import pystray
 

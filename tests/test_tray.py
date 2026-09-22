@@ -596,6 +596,99 @@ class SingleInstanceTest(unittest.TestCase):
             self.assertTrue(guard.acquired)
         self.assertFalse(guard.acquired)
 
+    def test_the_already_running_exit_is_a_named_constant(self) -> None:
+        """The entry point must recognise this outcome to show a dialog.
+
+        A bare ``2`` in ``run()`` could not be distinguished from any other
+        return, so the one failure that leaves a windowed user with no icon and
+        no message went unreported. The constant is what makes it addressable.
+        """
+        from opencsi.tray.app import ALREADY_RUNNING_EXIT
+
+        self.assertIsInstance(ALREADY_RUNNING_EXIT, int)
+        source = (Path(__file__).resolve().parent.parent / "src" / "opencsi"
+                  / "tray" / "app.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "return ALREADY_RUNNING_EXIT",
+            source,
+            "run() is back to returning a bare number for the already-running case",
+        )
+
+
+class AlreadyRunningReportTest(unittest.TestCase):
+    """A second launch must say something, not fail silently.
+
+    Reproduced on the real frozen build: with an orphaned tray holding the
+    mutex, double-clicking ``opencsi-tray.exe`` exited 2 while the message went
+    to a log file that does not exist. The user saw no icon and no text.
+    """
+
+    def test_the_message_names_the_recovery_step(self) -> None:
+        from opencsi.tray.__main__ import _already_running_message
+
+        text = _already_running_message()
+        self.assertIn("already running", text.lower())
+        # The user has to be told where to look and how to get out of the state,
+        # because "no icon appeared" is the symptom they are staring at.
+        self.assertIn("notification area", text)
+        self.assertIn("Exit", text)
+
+    def test_a_usable_stderr_is_preferred_over_a_dialog(self) -> None:
+        """A console user must get the message on the stream they are reading.
+
+        And a *test* must not get a modal dialog: gating the box on the platform
+        alone meant every Windows test that ran the entry point blocked forever
+        on a real ``MessageBoxW``, which is how this requirement was found.
+        """
+        from unittest import mock
+
+        from opencsi.tray import __main__ as entry
+
+        printed: list[str] = []
+        fake_stderr = mock.MagicMock()
+        fake_stderr.write = printed.append  # type: ignore[method-assign]
+        box = mock.MagicMock()
+        with mock.patch.object(entry.sys, "stderr", fake_stderr), mock.patch(
+            "ctypes.windll", create=True, new=box
+        ):
+            entry._show_message("something went wrong")
+
+        self.assertTrue(
+            any("something went wrong" in str(item) for item in printed),
+            "the message was swallowed even though stderr was available",
+        )
+        box.user32.MessageBoxW.assert_not_called()
+
+    def test_the_dialog_is_used_when_there_is_no_stderr(self) -> None:
+        """That is the windowed build, and the only case the box is for."""
+        from unittest import mock
+
+        from opencsi.tray import __main__ as entry
+
+        box = mock.MagicMock()
+        with mock.patch.object(entry.sys, "stderr", None), mock.patch.object(
+            entry.sys, "platform", "win32"
+        ), mock.patch("ctypes.windll", create=True, new=box):
+            entry._show_message("nothing to read this")
+
+        box.user32.MessageBoxW.assert_called_once()
+
+    def test_showing_a_message_never_raises(self) -> None:
+        """Diagnostics are best-effort; an exception here would mask the cause."""
+        from unittest import mock
+
+        from opencsi.tray import __main__ as entry
+
+        # No stderr, and the box itself fails: this must still return quietly.
+        with mock.patch.object(entry.sys, "stderr", None), mock.patch.object(
+            entry.sys, "platform", "win32"
+        ), mock.patch(
+            "ctypes.windll",
+            create=True,
+            new=mock.MagicMock(side_effect=OSError("no desktop")),
+        ):
+            entry._show_message("unshowable")
+
 
 class IconTest(unittest.TestCase):
     def test_icons_are_drawn_for_every_state(self) -> None:
