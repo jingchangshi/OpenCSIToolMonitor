@@ -668,6 +668,102 @@ class CdpCookieProvider:
             self._last_hint = self._upgrade_hint(endpoint)
         return []
 
+    def install_token(
+        self,
+        token: str,
+        *,
+        domain: str = ".opencsitool.com",
+        expires_in: float | None = None,
+        timeout: float | None = None,
+    ) -> bool:
+        """Write a session cookie into the browser. Returns whether it landed.
+
+        Why this exists
+        ---------------
+        This project's hard rule is that a credential is never written to disk --
+        the browser *is* the credential store, which is what makes
+        ``opencsi usage`` work as a separate process with no shared state.
+
+        A browserless renewal breaks that arrangement in one specific way: it
+        mints a real session over plain HTTP, so the browser it read the GitCode
+        credential from never learns the new cookie. Without this method the token
+        exists only in the memory of the process that renewed, so
+        ``opencsi login --renew`` succeeds and the next ``opencsi usage`` fails --
+        a partial success reported as a complete one.
+
+        The fix has to be the browser, not a file: writing the cookie to disk
+        would violate the rule above and would put a live credential somewhere the
+        project promised never to put one.
+
+        Scope of the write
+        ------------------
+        Exactly one cookie, named ``token``, on ``.opencsitool.com``. Nothing else
+        is touched, no existing cookie is deleted, and the value is never logged.
+        The cookie is marked ``HttpOnly`` and ``Secure`` because the one being
+        replaced is, and a renewal that quietly downgraded those flags would be a
+        security regression dressed up as a fix.
+
+        Returns ``False`` rather than raising when the browser cannot be reached.
+        The caller has already succeeded at the thing it was asked to do; failing
+        to *persist* is worth reporting, but it must not turn a real renewal into
+        an exception.
+        """
+        if not token:
+            return False
+
+        try:
+            endpoint = self._endpoint or discover_cdp_endpoint(
+                self._explicit, ports=self._ports, probe=self._discover
+            )
+        except OpenCsiError as exc:
+            self._note_failure(exc)
+            return False
+        self._endpoint = endpoint
+
+        browser_ws = endpoint.browser_ws_url()
+        if not browser_ws:
+            self._last_error = CdpUnavailableError.code
+            self._last_detail = "the DevTools endpoint exposed no browser-level socket"
+            return False
+
+        params: dict[str, Any] = {
+            "name": COOKIE_NAME,
+            "value": token,
+            "domain": domain,
+            "path": "/",
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "Lax",
+        }
+        if isinstance(expires_in, (int, float)) and expires_in > 0:
+            # CDP wants an absolute epoch, not a relative lifetime -- passing the
+            # relative number would set an expiry in 1970 and the cookie would be
+            # dropped immediately, which looks exactly like a rejected write.
+            params["expires"] = time.time() + float(expires_in)
+
+        try:
+            with CdpConnection(browser_ws, timeout=timeout or self._timeout) as conn:
+                conn.call("Storage.setCookies", {"cookies": [params]}, timeout=timeout or self._timeout)
+        except (WebSocketError, NetworkError, CdpUnavailableError, OpenCsiError) as exc:
+            self._last_error = getattr(exc, "code", type(exc).__name__)
+            self._last_detail = scrub_text(str(exc))[:200]
+            return False
+
+        # Verify by reading it back rather than trusting the call's return. A
+        # rejected write is silent here -- ``Storage.setCookies`` answers ``{}``
+        # either way -- so an unverified write would let the caller claim
+        # persistence that did not happen.
+        try:
+            cookies = self._all_cookies_via_browser(browser_ws)
+        except (WebSocketError, NetworkError, CdpUnavailableError):
+            return False
+        return any(
+            str(c.get("name")) == COOKIE_NAME
+            and str(c.get("value") or "") == token
+            and domain.lstrip(".") in str(c.get("domain") or "")
+            for c in cookies
+        )
+
     def _all_cookies_via_browser(self, ws_url: str) -> list[Mapping[str, Any]]:
         """Whole cookie store over a browser-level connection."""
         with CdpConnection(ws_url, timeout=self._timeout) as conn:

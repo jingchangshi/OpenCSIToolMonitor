@@ -436,8 +436,9 @@ class HttpOAuthRenewer:
     :class:`~opencsi.auth.session.SessionManager` policy above it is unchanged.
 
     Unlike the browser renewer, this one *does* write the new cookie into the
-    provider, because it is the thing that obtained it -- there is no browser to
-    write it into. The provider is therefore required, not optional.
+    provider, because it is the thing that obtained it. It also hands the cookie
+    to the browser when the provider supports it, so the session survives this
+    process -- see :meth:`_install_into_browser`.
     """
 
     name = "http-oauth"
@@ -461,6 +462,10 @@ class HttpOAuthRenewer:
         #: it and the flag exists to opt back in rather than out.
         self._use_proxy = use_proxy
         self._last_trace: OAuthTrace | None = None
+        #: Whether the last renewal reached the browser. ``None`` means the
+        #: provider has no way to write one, which is a different fact from a
+        #: failed write and is reported as such.
+        self.last_persisted: bool | None = None
 
     # ── the protocol ──────────────────────────────────────────────────────
     @property
@@ -848,23 +853,73 @@ class HttpOAuthRenewer:
         return token or None
 
     def _store_token(self, token: str, jar: http.cookiejar.CookieJar) -> None:
-        """Hand the new cookie to the provider, which owns it from here.
+        """Hand the new cookie to the provider, and persist it into the browser.
 
-        The provider is a live view over a browser profile, so it cannot be
-        "written to" the way a jar can. What it *can* do is cache a value it was
-        given, which is exactly what is needed: the session is now valid and the
-        next read should not go looking for a browser that has no idea about it.
+        Two things have to happen, and they solve different problems:
+
+        1. **Cache it on the provider.** The provider is a live view over a
+           browser profile, so it cannot be "written to" the way a jar can. What
+           it *can* do is cache a value it was given, which is what keeps the
+           rest of *this* process from going back to a browser that has no idea
+           about the new cookie.
+
+        2. **Write it into the browser.** Caching alone only fixes the process
+           that renewed. This project's contract is that a credential is never
+           written to disk -- the browser *is* the credential store -- so a token
+           that lives only in one process's memory means ``opencsi login
+           --renew`` succeeds and the next ``opencsi usage`` fails, which is a
+           partial success reported as a complete one.
+
+        Order matters: the browser write happens after the cache, and its failure
+        is reported but never fatal. The renewal itself genuinely succeeded; only
+        its persistence can fail, and conflating the two would turn a real
+        renewal into an error.
         """
         remember = getattr(self._provider, "remember_token", None)
+        expires_in = self._expires_in(jar)
         if callable(remember):
-            expires_in = self._expires_in(jar)
             try:
                 remember(token, expires_in=expires_in)
-                return
             except TypeError:
                 remember(token)
-                return
-        log.debug("the credential provider cannot cache a token; the session was renewed but not stored")
+        else:
+            log.debug(
+                "the credential provider cannot cache a token; the session was "
+                "renewed but not cached in this process"
+            )
+
+        self._install_into_browser(token, expires_in=expires_in)
+
+    def _install_into_browser(
+        self, token: str, *, expires_in: float | None = None
+    ) -> None:
+        """Write the minted cookie into the browser, so it outlives this process.
+
+        Failure is recorded on :attr:`last_persisted` and logged without the
+        value. It is deliberately not raised: the caller's renewal already
+        succeeded, and the honest report is "renewed, but the browser could not be
+        updated" rather than a failure that hides a working renewal.
+        """
+        install = getattr(self._provider, "install_token", None)
+        if not callable(install):
+            self.last_persisted = None
+            return
+        try:
+            self.last_persisted = bool(install(token, expires_in=expires_in))
+        except TypeError:
+            try:
+                self.last_persisted = bool(install(token))
+            except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+                self.last_persisted = False
+                log.debug("the browser cookie write failed (%s)", type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            self.last_persisted = False
+            log.debug("the browser cookie write failed (%s)", type(exc).__name__)
+        if self.last_persisted is False:
+            log.warning(
+                "the renewed session could not be written into the browser; it is "
+                "valid for this process only"
+            )
 
     def __repr__(self) -> str:
         return (

@@ -25,9 +25,11 @@ them can be produced on demand against a live account.
 
 from __future__ import annotations
 
+import email.utils
 import http.cookiejar
 import http.cookies
 import json
+import time
 import unittest
 import urllib.parse
 from typing import Any, Mapping
@@ -165,6 +167,23 @@ class _StubOpener:
         parsed.load(raw)
         for morsel in parsed.values():
             domain = morsel["domain"] or host
+            # ``Max-Age`` / ``Expires`` must be honoured, not discarded. The real
+            # server sends a ~3600 s cookie, and a stub that always produced a
+            # session cookie would make the expiry path untestable -- which is how
+            # the expiry bug below stayed invisible.
+            expires: int | None = None
+            if morsel["max-age"]:
+                try:
+                    expires = int(time.time()) + int(morsel["max-age"])
+                except (TypeError, ValueError):
+                    expires = None
+            elif morsel["expires"]:
+                try:
+                    expires = int(
+                        email.utils.mktime_tz(email.utils.parsedate_tz(morsel["expires"]))
+                    )
+                except (TypeError, ValueError):
+                    expires = None
             self._jar.set_cookie(
                 http.cookiejar.Cookie(
                     version=0,
@@ -178,8 +197,8 @@ class _StubOpener:
                     path=morsel["path"] or "/",
                     path_specified=bool(morsel["path"]),
                     secure=bool(morsel["secure"]),
-                    expires=None,
-                    discard=True,
+                    expires=expires,
+                    discard=expires is None,
                     comment=None,
                     comment_url=None,
                     rest={},
@@ -623,6 +642,182 @@ class RenewalSurvivesInvalidationTest(unittest.TestCase):
             source,
             "a fresh provider discards the token the renewer just installed",
         )
+
+
+class BrowserPersistenceTest(unittest.TestCase):
+    """A renewed session must outlive the process that renewed it.
+
+    The browser is this project's credential store -- a cookie is never written
+    to disk, which is what makes ``opencsi usage`` work as a separate process.
+    A browserless renewal mints the session over HTTP, so the browser never
+    learns the cookie unless something puts it there. Without that step
+    ``opencsi login --renew`` succeeds and the next ``opencsi usage`` fails: a
+    partial success reported as a complete one.
+    """
+
+    def _renewer(self, provider):
+        renewer = HttpOAuthRenewer(provider, use_proxy=False)
+        _install(
+            renewer,
+            _StubOpener(
+                {
+                    ("opencsitool.com", OAUTH_ENTRY_PATH): (302, {"Location": AUTHORIZE_URL}, b""),
+                    ("web-api.gitcode.com", CHECK_AUTHORIZE_PATH): (
+                        200,
+                        {},
+                        json.dumps({"redirect_uri": CALLBACK_URL}).encode(),
+                    ),
+                    (
+                        "opencsitool.com",
+                        "/opencsitool/rest/v1/oauth2/authorization/callback/gitcode",
+                    ): (
+                        302,
+                        {"Set-Cookie": _set_cookie("token", FAKE_OPENCSITOOL_TOKEN)},
+                        b"",
+                    ),
+                }
+            ),
+        )
+        return renewer
+
+    def test_the_minted_cookie_is_written_into_the_browser(self) -> None:
+        """The property that makes the session survive process exit."""
+        provider = _StubProvider(cookies=gitcode_cookies())
+        installed: list[tuple[str, object]] = []
+
+        def install_token(token, *, expires_in=None):
+            installed.append((token, expires_in))
+            return True
+
+        provider.install_token = install_token
+        renewer = self._renewer(provider)
+        result = renewer.renew()
+
+        self.assertIs(result.status, RenewalStatus.RENEWED)
+        self.assertEqual(
+            [t for t, _ in installed],
+            [FAKE_OPENCSITOOL_TOKEN],
+            "the renewed cookie never reached the browser, so it dies with this process",
+        )
+        self.assertIs(renewer.last_persisted, True)
+
+    def test_the_expiry_is_passed_as_a_relative_lifetime(self) -> None:
+        """CDP wants an absolute epoch; the provider does the conversion.
+
+        Asserted at this boundary because passing the absolute value through here
+        would set an expiry in 1970 and the cookie would be silently dropped --
+        which looks exactly like a rejected write.
+
+        The route sets ``Max-Age`` because the real callback does (a ~3600 s
+        cookie is what the server sends). A cookie with no expiry is a session
+        cookie, and ``None`` is the correct lifetime for it -- which is why the
+        other tests in this class do not assert a number here.
+        """
+        provider = _StubProvider(cookies=gitcode_cookies())
+        seen: list[object] = []
+
+        def install_token(token, *, expires_in=None):
+            seen.append(expires_in)
+            return True
+
+        provider.install_token = install_token
+        renewer = HttpOAuthRenewer(provider, use_proxy=False)
+        _install(
+            renewer,
+            _StubOpener(
+                {
+                    ("opencsitool.com", OAUTH_ENTRY_PATH): (302, {"Location": AUTHORIZE_URL}, b""),
+                    ("web-api.gitcode.com", CHECK_AUTHORIZE_PATH): (
+                        200,
+                        {},
+                        json.dumps({"redirect_uri": CALLBACK_URL}).encode(),
+                    ),
+                    (
+                        "opencsitool.com",
+                        "/opencsitool/rest/v1/oauth2/authorization/callback/gitcode",
+                    ): (
+                        302,
+                        {
+                            "Set-Cookie": (
+                                f"token={FAKE_OPENCSITOOL_TOKEN}; Path=/; "
+                                "Domain=opencsitool.com; HttpOnly; Secure; Max-Age=3599"
+                            )
+                        },
+                        b"",
+                    ),
+                }
+            ),
+        )
+        renewer.renew()
+
+        self.assertEqual(len(seen), 1)
+        self.assertIsInstance(seen[0], (int, float))
+        self.assertGreater(seen[0], 0)
+        # A relative lifetime, not a Unix timestamp.
+        self.assertLess(seen[0], 86400 * 2, "this looks like an absolute epoch, not a lifetime")
+        self.assertAlmostEqual(float(seen[0]), 3599, delta=5)
+
+    def test_a_session_cookie_without_an_expiry_passes_none(self) -> None:
+        """A session cookie must stay a session cookie.
+
+        Inventing a lifetime for it would extend a credential past the point the
+        server intended, which is a security change made silently.
+        """
+        provider = _StubProvider(cookies=gitcode_cookies())
+        seen: list[object] = []
+
+        def install_token(token, *, expires_in=None):
+            seen.append(expires_in)
+            return True
+
+        provider.install_token = install_token
+        self._renewer(provider).renew()
+
+        self.assertEqual(seen, [None])
+
+    def test_a_failed_browser_write_does_not_fail_the_renewal(self) -> None:
+        """The renewal really did succeed; only its persistence failed.
+
+        Reporting the whole thing as a failure would hide a working renewal
+        behind an error about a separate, recoverable step.
+        """
+        provider = _StubProvider(cookies=gitcode_cookies())
+        provider.install_token = lambda token, **kw: False
+        renewer = self._renewer(provider)
+        result = renewer.renew()
+
+        self.assertIs(result.status, RenewalStatus.RENEWED)
+        self.assertIs(renewer.last_persisted, False)
+        # Still cached in-process, so the current run keeps working.
+        self.assertEqual(provider.remembered, [FAKE_OPENCSITOOL_TOKEN])
+
+    def test_a_raising_browser_write_does_not_escape(self) -> None:
+        provider = _StubProvider(cookies=gitcode_cookies())
+
+        def install_token(token, **kw):
+            raise RuntimeError("CDP blew up")
+
+        provider.install_token = install_token
+        renewer = self._renewer(provider)
+        result = renewer.renew()
+
+        self.assertIs(result.status, RenewalStatus.RENEWED)
+        self.assertIs(renewer.last_persisted, False)
+
+    def test_a_provider_that_cannot_write_reports_none_not_false(self) -> None:
+        """``None`` and ``False`` are different facts.
+
+        ``None`` means "this provider has no way to write one" -- a manual
+        provider, or a stub. ``False`` means a write was attempted and failed.
+        Collapsing them would make "not applicable" read as "broken".
+        """
+        provider = _StubProvider(cookies=gitcode_cookies())
+        self.assertFalse(hasattr(provider, "install_token"))
+        renewer = self._renewer(provider)
+        result = renewer.renew()
+
+        self.assertIs(result.status, RenewalStatus.RENEWED)
+        self.assertIsNone(renewer.last_persisted)
 
 
 class _FakeRenewer:
