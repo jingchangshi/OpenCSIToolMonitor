@@ -218,10 +218,19 @@ def actions_for(
         # opened without a debugging port and the cookie written where this tool
         # cannot read it. Starting the browser is the step that unblocks
         # everything else, and the login flow is offered behind it.
+        #
+        # QR login is offered *first* here, because it is the one route that does
+        # not need a browser at all: the credential arrives over plain HTTP and
+        # the OAuth leg is plain HTTP too. On a machine where the browser is the
+        # broken part, offering only browser-based routes is a closed loop.
+        items.append(Action("login_qr", "扫码登录（无需浏览器）", default=True))
         items.append(Action("launch_browser", "启动浏览器并登录"))
         items.append(Action("login", "打开登录页面"))
     elif snapshot.state is MonitorState.LOGIN_REQUIRED:
-        items.append(Action("login", "登录 / Sign in...", default=True))
+        # QR first for the same reason, and because it is the shorter path: no
+        # window to open, no sign-in form to fill in, one scan.
+        items.append(Action("login_qr", "扫码登录 / Scan to sign in...", default=True))
+        items.append(Action("login", "在浏览器中登录"))
     elif snapshot.state is MonitorState.CONSENT_REQUIRED:
         # "Sign in" would be the wrong offer: the SSO session is alive and the
         # user is already authenticated. What is missing is one approval click on
@@ -232,7 +241,8 @@ def actions_for(
         items.append(Action("renew", "重试静默续期"))
     elif snapshot.state is MonitorState.AUTH_ERROR:
         items.append(Action("renew", "立即续期"))
-        items.append(Action("login", "登录 / Sign in..."))
+        items.append(Action("login_qr", "扫码登录 / Scan to sign in..."))
+        items.append(Action("login", "在浏览器中登录"))
     elif snapshot.state is MonitorState.STARTING:
         items.append(Action("refresh", "立即刷新"))
     else:

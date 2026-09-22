@@ -249,6 +249,7 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
     app = TrayApp(
         service,
         on_login=lambda: _sign_in(service),
+        on_login_qr=lambda: _sign_in_qr(service),
         on_launch_browser=lambda: _launch_browser_then_refresh(service),
     )
     try:
@@ -261,6 +262,79 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
     except KeyboardInterrupt:
         service.stop()
         return 0
+
+
+def _sign_in_qr(service) -> None:
+    """Run a QR login from the tray, with no browser involved.
+
+    This is the route that works when the browser is the broken part -- which is
+    exactly the state the menu offers it in. The credential arrives over plain
+    HTTP from the QR flow and the openCsiTool OAuth leg is plain HTTP too, so
+    nothing here needs a browser engine, a profile, or a debugging port.
+
+    Runs on its own thread (``TrayApp`` starts one), because it waits for a human
+    to scan a code.
+
+    The image is saved and opened with the OS viewer rather than drawn in the
+    terminal. It is a WeChat mini-program code whose dots are finer than a
+    terminal cell, so a half-block rendering is not reliably scannable -- the
+    terminal path says so and points at the file, and the tray takes the file
+    route directly.
+
+    The refresh afterwards is **enqueued**, never performed here: all fetching
+    happens on the monitor's worker thread, and calling ``_refresh_once`` from
+    this one would race it on both the HTTP call and the bookkeeping.
+    """
+    import time
+
+    from ..auth.gitcode_qr import GitCodeQrAuthenticator
+    from ..auth.http_oauth import GitCodeCookieSource, HttpOAuthRenewer
+    from ..auth.session import RenewalStatus
+    from ..client import BASE_URL
+
+    log.info("starting a QR login from the tray")
+
+    try:
+        authenticator = GitCodeQrAuthenticator()
+        result = authenticator.login()
+    except Exception as exc:  # noqa: BLE001 - the tray must report, not crash
+        log.warning("the QR login failed: %s", type(exc).__name__)
+        return
+
+    if not result.ok:
+        log.info("the QR login did not complete (%s)", result.status.value)
+        return
+
+    credentials = dict(result.credentials())
+    if not credentials:
+        log.warning("the QR login returned no usable credential")
+        return
+
+    source = GitCodeCookieSource(
+        access_token=credentials.get("access_token"),
+        refresh_token=credentials.get("refresh_token"),
+        username=result.username,
+    )
+    if not source.cookie_names:
+        log.warning("the QR credential held none of the cookies the flow needs")
+        return
+
+    renewer = HttpOAuthRenewer(source, base_url=BASE_URL)
+    renewal = renewer.renew()
+    if renewal.status not in (RenewalStatus.RENEWED, RenewalStatus.ALREADY_VALID):
+        # CONSENT_REQUIRED lands here, and the honest response is to say a human
+        # has to approve the page once -- not to silently try again.
+        log.info("the QR login stopped at %s", renewal.status.value)
+        return
+
+    # The session exists; the worker thread should now pick it up. Enqueued
+    # rather than performed, for the reason in the docstring.
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        service.refresh_now()
+        if service.snapshot.has_data:
+            return
+        time.sleep(5.0)
 
 
 def _sign_in(service) -> None:
@@ -334,20 +408,32 @@ def _launch_browser_then_refresh(service) -> None:
 
 def _startup(ctx: CliContext, args) -> int:
     """Manage the per-user start-at-sign-in entry."""
-    from ..tray.startup import StartupManager, default_command
+    from ..tray.startup import StartupManager, default_command, startup_command
 
     manager = StartupManager()
 
     if args.install_startup:
         status = manager.enable()
         if not status.supported:
-            ctx.err(f"error: starting at sign-in is only available on Windows")
+            ctx.err("error: starting at sign-in is only available on Windows")
             return EXIT_USAGE
         if status.detail and not status.enabled:
             ctx.err(f"error: {status.detail}")
             return 20
         ctx.out("The tray will start when you sign in.")
         ctx.out(f"command: {status.command}")
+        # Say which shape was chosen, because the three are not interchangeable
+        # and the wrong one is the defect this reports on: a frozen CLI that
+        # registers itself starts something that is not the tray.
+        derived, source = startup_command()
+        del derived
+        ctx.out(f"derived from: {source}")
+        if source == "frozen-cli":
+            ctx.err(
+                "note: no opencsi-tray.exe was found next to this executable, so "
+                "sign-in will run the console build. Build the tray binary to "
+                "avoid a console window at sign-in."
+            )
         ctx.out("")
         ctx.out("Remove it with: opencsi tray --remove-startup")
         ctx.out("It also appears in Task Manager > Startup apps.")
@@ -365,6 +451,7 @@ def _startup(ctx: CliContext, args) -> int:
         return 0
 
     status = manager.status()
+
     def render() -> None:
         if not status.supported:
             ctx.out("start at sign-in: not supported on this platform")
@@ -372,8 +459,19 @@ def _startup(ctx: CliContext, args) -> int:
         ctx.out(f"start at sign-in: {'enabled' if status.enabled else 'disabled'}")
         if status.command:
             ctx.out(f"command: {status.command}")
+            # The check that turns a silent misregistration into a visible one.
+            # An entry pointing at the console binary, or at a build that has
+            # since been replaced, looks perfectly healthy in Task Manager.
+            if not status.matches_this_build:
+                ctx.err(
+                    "note: that command is not what this build would register "
+                    f"({default_command()}). Re-run 'opencsi tray "
+                    "--install-startup' to correct it."
+                )
         else:
             ctx.out(f"would run: {default_command()}")
+        if status.source:
+            ctx.out(f"derived from: {status.source}")
         if status.detail:
             ctx.err(f"note: {status.detail}")
 

@@ -90,6 +90,7 @@ class TrayApp:
         *,
         session: SessionManager | None = None,
         on_login: Callable[[], None] | None = None,
+        on_login_qr: Callable[[], None] | None = None,
         on_open: Callable[[], None] | None = None,
         on_launch_browser: Callable[[], None] | None = None,
         single_instance: SingleInstance | None = None,
@@ -97,6 +98,7 @@ class TrayApp:
         self._service = service
         self._session = session if session is not None else getattr(service, "_session", None)
         self._on_login = on_login
+        self._on_login_qr = on_login_qr
         self._on_open = on_open
         self._on_launch_browser = on_launch_browser
         self._single = single_instance or SingleInstance()
@@ -241,6 +243,8 @@ class TrayApp:
             self._toggle_startup()
         elif action_id == "login":
             self._trigger_login()
+        elif action_id == "login_qr":
+            self._trigger_login_qr()
         elif action_id == "launch_browser":
             self._trigger_launch_browser()
         elif action_id == "open":
@@ -269,6 +273,30 @@ class TrayApp:
         if self._on_login is not None:
             threading.Thread(
                 target=self._on_login, name="opencsi-login", daemon=True
+            ).start()
+            return
+        self._open_browser()
+
+    def _trigger_login_qr(self) -> None:
+        """Start a QR login without blocking the message loop.
+
+        Offered before the browser routes because it needs no browser: the
+        credential arrives over plain HTTP from the QR flow, and the openCsiTool
+        OAuth leg is plain HTTP as well. On the machine state this menu item
+        exists for -- ``BROWSER_UNAVAILABLE``, where the browser is the broken
+        part -- a menu of browser-only routes is a closed loop.
+
+        Runs on its own thread for the same reason the browser login does: a QR
+        login waits for a human to scan, which is measured in tens of seconds, and
+        doing that inline would freeze the icon.
+
+        Falls back to opening the login page when no callback is wired, rather
+        than doing nothing. A menu item that only writes to a log file is worse
+        than not offering it, which is the defect the browser login had.
+        """
+        if self._on_login_qr is not None:
+            threading.Thread(
+                target=self._on_login_qr, name="opencsi-login-qr", daemon=True
             ).start()
             return
         self._open_browser()

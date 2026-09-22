@@ -281,6 +281,13 @@ def _qr(ctx: CliContext) -> int:
                     "WeChat mini-program code, and its dots are finer than a "
                     "terminal cell."
                 )
+            # Try to open the viewer, and say so only if it worked. The file path
+            # is printed either way, because an auto-open that silently fails
+            # would leave the user with a caption and no picture -- and the whole
+            # reason the image is written separately is that the terminal drawing
+            # is not reliably scannable.
+            if _open_image(rendered["path"]):
+                ctx.err("(opened it in your image viewer)")
         elif result.mode == "none":
             ctx.err(f"error: could not display the code. {result.detail or ''}")
         ctx.err("")
@@ -969,6 +976,41 @@ def _renew(ctx: CliContext) -> int:
 
 
 # ── browser mode ──────────────────────────────────────────────────────────
+def _open_image(path: str) -> bool:
+    """Open an image in the OS viewer. Returns whether it was launched.
+
+    Best-effort and quiet on failure: the caller prints the path regardless, so a
+    machine with no viewer loses nothing. What must not happen is a claim that the
+    image was opened when it was not -- hence the return value rather than a bare
+    attempt.
+
+    The default *browser* is deliberately not used, even though it would display a
+    PNG. It is the wrong tool for a code the user is about to photograph with a
+    phone, and on a machine where the browser is the broken part -- which is a
+    state this login path is specifically offered in -- it would be a route that
+    does not work.
+    """
+    import subprocess
+    import sys
+
+    try:
+        if sys.platform == "win32":
+            # ``os.startfile`` is the shell's own "open with the default app",
+            # which is what a double-click does.
+            os.startfile(path)  # noqa: S606 - the shell association is the point
+            return True
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            [opener, path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:  # noqa: BLE001 - a missing viewer is not a login failure
+        return False
+
+
 def _open_a_readable_browser(ctx: CliContext) -> None:
     """Start a browser whose session this tool can read, and say what happened.
 

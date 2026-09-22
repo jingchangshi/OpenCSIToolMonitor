@@ -275,16 +275,37 @@ class ActionsTest(unittest.TestCase):
         and the next poll said "login required" again. Every click reproduced
         the state it was meant to fix.
 
-        The first action must therefore be the one that actually unblocks the
-        situation: start a browser the tool can read from.
+        The first action must therefore be one that actually unblocks the
+        situation. There are now two that do, and **QR comes first** because it
+        is the only one that does not depend on the browser that is missing: the
+        credential arrives over plain HTTP from the QR flow and the OAuth leg is
+        plain HTTP too. Offering only browser-based routes in the state where the
+        browser is the broken part is the same closed loop in a new shape.
+
+        ``launch_browser`` stays, and stays available -- a user whose browser is
+        simply not running yet is better served by it than by fetching a phone.
         """
         actions = actions_for(_snap(state=MonitorState.BROWSER_UNAVAILABLE))
         ids = [a.id for a in actions]
         self.assertIn("launch_browser", ids)
-        # Offered first among the actionable items, because it is the step the
-        # others depend on.
+        self.assertIn("login_qr", ids)
         actionable = [i for i in ids if i not in ("headline",) and not i.startswith("sep")]
-        self.assertEqual(actionable[0], "launch_browser")
+        self.assertEqual(actionable[0], "login_qr")
+        self.assertIn("launch_browser", actionable)
+
+    def test_the_qr_route_is_offered_when_the_browser_is_the_broken_part(
+        self,
+    ) -> None:
+        """The property that makes the browserless flow worth having here.
+
+        In ``BROWSER_UNAVAILABLE`` every other actionable route needs a browser.
+        If QR were not offered, the state would have no route that works without
+        first fixing the thing that is broken.
+        """
+        actions = actions_for(_snap(state=MonitorState.BROWSER_UNAVAILABLE))
+        by_id = {a.id: a for a in actions}
+        self.assertIn("login_qr", by_id)
+        self.assertTrue(by_id["login_qr"].default)
 
     def test_a_missing_browser_does_not_offer_sign_in_as_the_primary_action(
         self,
@@ -300,6 +321,8 @@ class ActionsTest(unittest.TestCase):
         self.assertIn("login", by_id)
         self.assertFalse(by_id["login"].default)
         self.assertFalse(by_id["launch_browser"].default)
+        # The default must be the route that needs no browser.
+        self.assertTrue(by_id["login_qr"].default)
 
     def test_the_missing_browser_state_has_its_own_label(self) -> None:
         """It must not read as "sign in" -- that is the whole point."""
