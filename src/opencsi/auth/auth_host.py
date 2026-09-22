@@ -199,28 +199,51 @@ def _headless_supported(executable: Path) -> bool:
 
     This asks the browser to *do* something headless rather than asking it to
     describe itself. The previous implementation ran
-    ``chrome --headless=new --version``, which on Chrome 153 neither rejects the
-    flag nor prints a version but hangs, so a fifteen-second timeout fired and a
-    build with working headless support was reported as having none. On this
-    machine that made the unattended monitor refuse to start any engine at all.
+    ``chrome --headless=new --version`` and returned False on a build where
+    headless provably works, which made the unattended monitor refuse to start
+    any engine at all.
 
-    Why ``--version`` was the wrong question
-    ----------------------------------------
-    It asks a browser to behave like a command-line tool. ``--screenshot`` asks
-    it to do the thing under test, and leaves an artifact that can be checked.
-    Measured here, three runs each:
+    What that probe actually did
+    ----------------------------
+    Measured five times on Chrome 153, with the user's browser running:
+
+    * it returned ``rc=0`` in 0.12-0.41s -- it did **not** hang, and the 15s
+      timeout never fired;
+    * it printed **nothing at all**, so the ``b"Chrom" in blob`` check could
+      only ever fail. That is the whole reason it answered False;
+    * it started a real headless browser and left it running: eleven orphaned
+      processes per call, holding a ``HeadlessChrome*`` profile in ``%TEMP%``.
+
+    So ``--headless=new`` combined with ``--version`` starts a browser and
+    ignores the request to print a version. The probe was not a capability check
+    that failed; it was an accidental browser launch that leaked, read as a
+    capability result.
+
+    An earlier revision of this docstring, and of the closure report, described
+    this as a *hang* in which a fifteen-second timeout fired. Five fresh
+    measurements do not reproduce a hang. The likeliest explanation for the
+    original observation is machine load: at that point in the investigation
+    roughly a hundred orphaned browsers from this very probe were running, which
+    is exactly the condition that would make a launch slow enough to trip the
+    timeout. The correction is recorded rather than quietly dropped, because
+    "it hangs" and "it starts a browser and prints nothing" imply different
+    fixes -- and only the second one explains the leak.
+
+    Why ``--screenshot`` is the replacement
+    ---------------------------------------
+    It asks the browser to do the thing under test and leaves an artifact that
+    can be checked. Measured here, three runs each:
 
     ====================  ==========  ================  ==========
     probe                 artifact    visible windows   wall time
     ====================  ==========  ================  ==========
-    ``--version``         never       0 (leaked 11)     15s timeout
+    ``--version``         never       0 (leaked 11)     0.12s, False
     ``--dump-dom``        0/3         0                 0.12s
     ``--screenshot``      3/3         0                 0.12s
     ``--print-to-pdf``    3/3         0                 0.12s
     ====================  ==========  ================  ==========
 
-    ``--screenshot`` is used because it is the cheapest artifact to validate: a
-    real PNG begins with a known eight-byte signature, so the check is exact
+    A real PNG begins with a known eight-byte signature, so the check is exact
     rather than a substring search.
 
     The exit code is deliberately **not** the evidence. Chromium's launcher
