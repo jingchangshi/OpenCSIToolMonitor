@@ -30,10 +30,10 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | Windows 11 托盘 v1 | **完成，实测验证** | `opencsi tray --once` 打印真实快照；`--check` 报告 `tray: ok`，7 个菜单项（含「开机自启动」） |
 | 浏览器缺失时用户可自救 | **完成，实测验证** | 杀掉 Chrome 后单条命令即恢复：`state: OK`，`EXIT=0`（见 §10 缺陷 8） |
 | GitCode 授权页未确认时的正确报告 | **完成，实测（见 §10 缺陷 10 的边界说明）** | 真实站点确认了授权页会让旧代码报 `TIMEOUT`、且点「授权」即签发新 token；新状态的判定逻辑由离线脚本验证（真实站点无法按需复现该页面） |
-| 测试 | **完成** | **740 项测试**（739 通过、1 跳过、121 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
+| 测试 | **完成** | **742 项测试**（741 通过、1 跳过、123 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
-| 规范提交 | **完成** | 41 个修改源码/测试的提交（§11 完整列出）；其中 14 个修复了通过**运行真实产物**才发现的缺陷 |
+| 规范提交 | **完成** | 43 个修改源码/测试的提交（§11 完整列出）；其中 15 个修复了通过**运行真实产物**才发现的缺陷 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
@@ -52,7 +52,7 @@ a48bce8  test: cover the consent state end to end, and the tray menu it produces
 上一个行为变更提交是：
 
 ```
-cc68bff  fix(redaction): stop masking the tray's credential lifetime as "<redacted>"
+cfaf2a7  feat(tray): show the session lifetime in `tray --once` text output too
 ```
 
 其后都是纯文档提交，包括承载本报告的提交。在这里写出那些提交是循环的——一个提交
@@ -89,7 +89,7 @@ cc68bff  fix(redaction): stop masking the tray's credential lifetime as "<redact
 本阶段由三个真实缺陷驱动。三个缺陷都在修复前被复现，且每个修复都有能在旧代码上
 失败的测试。
 
-后续在真机运行中又发现并修复了十一个（缺陷 4–14，见 §10）。其中缺陷 8 与本节的三个不同：
+后续在真机运行中又发现并修复了十二个（缺陷 4–15，见 §10）。其中缺陷 8 与本节的三个不同：
 它不是"缺少能力"，而是**已有的提示把用户引向了一个不可能完成的动作**。缺陷 10 则更
 进一步——它报出的**分类本身就是错的**：把"等一次点击"说成了"超时，可能网络有问题"。
 
@@ -325,7 +325,7 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 
 **分层。** 一切不需要 Windows 消息循环就能测试的东西都被下沉到 `monitor/` 与
 `tray/presenter.py`，它们是纯的。`app.py` 只负责把已经算好的值交给 pystray。这就是为什么
-740 项测试可以离线运行，而托盘本身在真机上验证。
+742 项测试可以离线运行，而托盘本身在真机上验证。
 
 **状态**（`MonitorState`）：`STARTING`、`OK`、`REFRESHING`、`RENEWING`、
 `LOGIN_REQUIRED`、`CONSENT_REQUIRED`、`BROWSER_UNAVAILABLE`、`OFFLINE`、
@@ -395,14 +395,14 @@ EXIT=0
 
 ## 9. 测试
 
-**740 项测试：739 通过，1 跳过，121 个 subtest 通过。**
+**742 项测试：741 通过，1 跳过，123 个 subtest 通过。**
 
 ```
 $ pytest
-739 passed, 1 skipped, 121 subtests passed in 38.82s
+741 passed, 1 skipped, 123 subtests passed in 41.56s
 
 $ python -m unittest discover -s tests -q
-Ran 740 tests in 37.917s
+Ran 742 tests in 39.840s
 OK (skipped=1)
 ```
 
@@ -432,6 +432,7 @@ OK (skipped=1)
 | `tests/test_tray.py` | 每个 `_ATTENTION_STATES` 成员都必须**真的有话可说**（见 §10 缺陷八） |
 | `tests/test_tray.py` | `CONSENT_REQUIRED` 的菜单与 `LOGIN_REQUIRED` **不同**，且提供批准动作而非纯登录 |
 | `tests/test_redaction.py` | 凭据名下的**数字**不得被脱敏成 `"<redacted>"`（托盘凭据剩余寿命字段），而凭据名下的**字符串**仍必须被掩码 |
+| `tests/test_tray.py` | `tray --once` 的**文本**输出必须带上会话寿命，且未知时**整行省略**（打印 0 会被读成已过期） |
 | `tests/test_browser_launch.py` | 复用而非重复启动、失败不抛异常、`open_or_launch` 的三条分支 |
 | `tests/test_packaging.py` | `DeclaredScriptTest` —— 解析 `[project.scripts]` 并解析每个目标（见 §10） |
 | `tests/test_packaging.py` | `TrayEntryArgumentsTest`（7 项）—— 三种入口点都必须转发参数；**并且回归时快速失败而不是挂起** |
@@ -465,7 +466,7 @@ total 2
 `install_logging_redaction` 都已应用在续期/扫码路径上。`scene_id` 与扫码载荷在 `repr` 中
 被脱敏。verbose 日志只打印请求**路径**——绝不打印 query string，绝不打印 cookie。
 
-### 本轮发现并修复的十四个真实缺陷
+### 本轮发现并修复的十五个真实缺陷
 
 1. **图标卡在"续期中"。** `_maybe_renew` 在成功时直接返回，没有离开 `RENEWING`，导致托盘
    在一次已经成功的续期之后仍显示续期状态长达 5 分钟。由一个实测探针发现：在一个已经续期
@@ -763,15 +764,30 @@ Cookie **名字**，返回三态：
 `'<redacted>' is not an instance of any of (int, float)` 失败。修复后在真实服务上实测为
 `credential_expires_in_seconds = 2344.9`。
 
-### 缺陷 1–14 的共同形态
+### 缺陷 15：`tray --once` 的文本输出漏掉了会话寿命
+
+托盘菜单显示 `会话 32m`，`--json` 从一开始就输出 `credential_expires_in_seconds`，
+唯独**纯文本**输出没有这一行。于是"我是不是快被要求重新登录了"这个唯一的预测性数字，
+脚本能看到、悬停提示能看到，而**人**运行 `tray --once` 时看不到。
+
+这是在检查缺陷 14 的脱敏修复是否留下同类缺口时发现的。脱敏没有缺口——这是**显示遗漏**，
+不是掩码问题——但正是那次检查把它翻了出来。
+
+新行复用托盘自己的 `format_duration`，因此两个界面对时长的措辞一致（`30m`，而不是
+`1800s` 或 `0.5h`）；寿命未知时整行省略，而不是打印 `0` 或留空——那会被读成"已过期"。
+
+两个测试：该行以托盘的措辞出现；值为 `None` 时不出现。删掉该行验证：
+第一个以 `'credential:' not found in 'state: OK'` 失败。
+
+### 缺陷 1–15 的共同形态
 
 缺陷 4、5、6 是"测试检查声明而非产物"；缺陷 7 与 9 是"测试只覆盖了其中一个入口点"；
 缺陷 8 是"测试只覆盖了状态映射，没覆盖该状态下**动作能否达成目的**"；缺陷 10、11、12 是
 "测试只覆盖了错误**分类**，没覆盖该分类是否**描述事实**，以及是否覆盖了**所有**能产生
 该错误的路径与**所有**会消费它的调用方"；缺陷 13 是"状态检查断言了一个**它从未观测过的
-事实**"。
+事实**"；缺陷 14 与 15 是"同一条规则写在两个地方，只修了看见症状的那一处"。
 
-七者其实是同一件事：**测试断言的是代码写了什么，而不是用户能否得到他要的东西。**
+八者其实是同一件事：**测试断言的是代码写了什么，而不是用户能否得到他要的东西。**
 缺陷 8 的每一个子缺陷都在既有测试的射程之外——`_CODE_STATE` 的映射有测试、退出码的
 *唯一性*有测试、`_ATTENTION_STATES` 的*内容*有测试，但没有任何测试问过
 "被报成 `LOGIN_REQUIRED` 之后，用户照着做能不能恢复"。缺陷 10 同样：`TIMEOUT` 这个
@@ -800,14 +816,14 @@ Cookie **名字**，返回三态：
 
 ## 11. 提交
 
-自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 41 个**，下表完整列出（最旧在前，
-覆盖 `cf34c1b` 到 `cc68bff`）。全部以
+自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 43 个**，下表完整列出（最旧在前，
+覆盖 `cf34c1b` 到 `cfaf2a7`）。全部以
 `opencsi contributors <contributors@opencsi.invalid>` 署名。
 
 判定标准是机械的，共四个目录：
 
 ```bash
-git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 41 行，即下表
+git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 43 行，即下表
 ```
 
 `tools/` 之所以算在内，是因为 `tests/test_packaging.py` 的 `LiveProbeTest` 会断言
@@ -817,13 +833,13 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 41 行，即�
 
 表中没有、也不可能有的是**纯文档提交**：它们撰写、修订本报告，修正本报告对自身 SHA 的
 引用，并把报告改写为中文。一个提交无法列出自己的 SHA，所以它们不可能出现在表里；
-`cc68bff` —— 最后一个触碰这四个目录的提交 —— 是 §2 中命名的锚点。
+`cfaf2a7` —— 最后一个触碰这四个目录的提交 —— 是 §2 中命名的锚点。
 
 有两个条目（`ad18b1d`、`1213836`）同时改了 `docs/`，但它们各自还带进了 `tools/` 下的
 探针，因此按上面的标准属于本表；这一点写出来，免得读者以为标准被临时放宽过。
 
 这里刻意**不写"总提交数"**：那个数字每写一次文档提交就会失效，而写它的正是文档提交
-本身。41 则是稳定的——纯文档提交不碰这四个目录，所以这个数字不会被本节自身的修订改变。
+本身。43 则是稳定的——纯文档提交不碰这四个目录，所以这个数字不会被本节自身的修订改变。
 
 因此上表可以被独立复核，而不必相信这段文字。
 
@@ -870,6 +886,8 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 41 行，即�
 | `57ced08` | test(tray): pin the consent state's exit code to the session code |
 | `848faaa` | fix(auth): stop claiming "GitCode SSO available" without looking for it |
 | `cc68bff` | fix(redaction): stop masking the tray's credential lifetime as "<redacted>" |
+| `54904d4` | test(tools): audit every JSON command for over-masking, not just the one I hit |
+| `cfaf2a7` | feat(tray): show the session lifetime in `tray --once` text output too |
 
 ---
 
