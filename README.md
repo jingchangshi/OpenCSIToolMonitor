@@ -589,6 +589,14 @@ opencsi login --manual        # 从 stdin 读 Cookie（getpass）
 那一步需要浏览器会话。** 单靠 GitCode 会话拿不到它。所以 `--qr` 的成功判据是
 "GitCode 已登录"，命令会明确告诉你后面还需要什么。
 
+这个边界是**实测**的，不是推断：把浏览器里的 Cookie（先是只有 3 个 GitCode SSO
+Cookie，后来是**全部 29 个**、唯独排除 openCsiTool 自己的 `token`）装进 `CookieJar`
+后用纯 HTTP 跟随 OAuth 入口，两次都**拿不到** `token`，且响应完全相同 ——
+`/oauth/authorize` 返回的是一个 5793 字节、含 11 个 `<script>` 的**客户端渲染外壳**，
+"是否自动批准"这个判断发生在 JavaScript 里。所以这不是"缺某个 Cookie"，也不是 CAPTCHA，
+而是**浏览器无法被完全移除**。复现：`python tools/probe_oauth_pure_http.py`，
+细节见 [`docs/gitcode-qr-protocol.md`](docs/gitcode-qr-protocol.md) §9.1。
+
 ### `opencsi tray`
 
 Windows 11 通知区域（托盘）常驻监控。
