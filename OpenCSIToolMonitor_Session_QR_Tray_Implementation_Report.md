@@ -22,7 +22,7 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | 目标 | 状态 | 证据 |
 | --- | --- | --- |
 | 拆分 *credential reload* 与 *session renewal* | **完成** | `SessionManager` + 三个协议；提交 `cf34c1b` |
-| 过期会话的静默自动续期 | **完成，实测证明** | 浸泡探针观测到真实过期点 `02:13:34`，`token_changed=True`，服务端接受新会话（`shijingchang`） |
+| 过期会话的静默自动续期 | **完成，实测证明（本轮再次复核）** | 浸泡探针两次观测到真实余量跨越：旧记录 `02:13:34`，本轮 `16:26:51` 从 312s 回到 3600s，`token_changed=True`，服务端接受新会话（`shijingchang`） |
 | 续期触发策略，且不存在无限循环 | **完成** | `expires_in > margin` → 不动作；`<= margin` → 静默续期；401 → 先 reload，再续期一次 |
 | 静默续期不抢占用户焦点 | **完成** | `Target.createTarget` 创建**后台** target，完成后 `Target.closeTarget`；绝不导航用户当前页面 |
 | GitCode 纯 CLI / 扫码登录可行性调研 | **完成** | `docs/gitcode-qr-protocol.md` —— 结论 `QR_FLOW_REPRODUCIBLE` |
@@ -33,7 +33,7 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | 测试 | **完成** | **745 项测试**（744 通过、1 跳过、123 个 subtest），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
-| 规范提交 | **完成** | 45 个修改源码/测试的提交（§11 完整列出）；其中 16 个修复了通过**运行真实产物**才发现的缺陷 |
+| 规范提交 | **完成** | 46 个修改源码/测试的提交（§11 完整列出）；其中 16 个修复了通过**运行真实产物**才发现的缺陷 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
@@ -52,7 +52,7 @@ a48bce8  test: cover the consent state end to end, and the tray menu it produces
 上一个行为变更提交是：
 
 ```
-f400c90  test(tray): pin which monitor states may reach the exit-code catch-all
+71e7e54  fix(tools): make the soak see renewals it did not perform itself
 ```
 
 其后都是纯文档提交，包括承载本报告的提交。在这里写出那些提交是循环的——一个提交
@@ -227,6 +227,41 @@ user interaction and no interactive login required.
 第二个探针 `tools/probe_autonomous_renewal.py` 通过生产的 `MonitorService.tick()` 驱动
 **定时**路径，并使用放宽的余量，断言同样的四条性质，因此定时器驱动的路径被独立于
 直接调用 `renew()` 之外单独覆盖。
+
+### 本轮再次跨越余量线，并暴露了探针自身的一个盲点
+
+本轮重新跑了一次（`--minutes 78 --renewals 2 --interval 20`），结果是
+`INCONCLUSIVE: only 0 of 2 renewals observed`。但**探针自己的日志显示寿命跳了两次**：
+
+```
+[15:21:06] OK               lifetime   2418s
+[15:22:26] OK               lifetime   3557s   <- 跳升，说明签发了新 cookie
+[15:31:47] OK               lifetime   3307s
+[15:33:07] OK               lifetime   3471s   <- 又一次跳升
+```
+
+寿命只可能自行下降，因此**跳升就是新 cookie 已签发的证据**。那两次续期是真的，只是
+不经过探针的包装器——本轮我在跑 soak 的同时还跑了 `doctor` 与 `login --renew`，它们
+经**另一条路径**续了同一个 cookie，计数器因此始终为 0。
+
+探针现在同时统计"跳升"，并把两个数字分开报告。修正后重跑，干净地跨过了余量线：
+
+```
+start lifetime : 613s
+renew margin   : 300s (production value)
+
+[16:24:46] OK               lifetime    372s
+[16:25:46] OK               lifetime    312s   <- 距余量线 12 秒
+[16:26:51] RENEWED  token_changed=True
+[16:26:51] OK               lifetime   3600s   <- 回到满值
+```
+
+会话在**无人触碰**的情况下从 312 秒回到 3600 秒，服务端随后接受该会话
+（`login --status` → `Status : OK`，`Cookie lifetime left : 55m57s`）。
+
+值得记下的是那个 `INCONCLUSIVE` 本身：它**不是**一次失败的 soak，而是一次**成功被
+看不见**的 soak。对一个正常工作的系统给出"无法判定"，与之前修掉的那些状态检查属于
+同一类错误——只是这次错在探针里，而不是产品里。
 
 ---
 
@@ -837,14 +872,14 @@ catch-all 不是映射而是分支，无法用穷尽性断言，因此改为**�
 
 ## 11. 提交
 
-自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 45 个**，下表完整列出（最旧在前，
-覆盖 `cf34c1b` 到 `f400c90`）。全部以
+自 `cf34c1b` 起，**触碰了"测试能够断言的源码"的提交共 46 个**，下表完整列出（最旧在前，
+覆盖 `cf34c1b` 到 `71e7e54`）。全部以
 `opencsi contributors <contributors@opencsi.invalid>` 署名。
 
 判定标准是机械的，共四个目录：
 
 ```bash
-git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 45 行，即下表
+git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 46 行，即下表
 ```
 
 `tools/` 之所以算在内，是因为 `tests/test_packaging.py` 的 `LiveProbeTest` 会断言
@@ -854,13 +889,13 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 45 行，即�
 
 表中没有、也不可能有的是**纯文档提交**：它们撰写、修订本报告，修正本报告对自身 SHA 的
 引用，并把报告改写为中文。一个提交无法列出自己的 SHA，所以它们不可能出现在表里；
-`f400c90` —— 最后一个触碰这四个目录的提交 —— 是 §2 中命名的锚点。
+`71e7e54` —— 最后一个触碰这四个目录的提交 —— 是 §2 中命名的锚点。
 
 有两个条目（`ad18b1d`、`1213836`）同时改了 `docs/`，但它们各自还带进了 `tools/` 下的
 探针，因此按上面的标准属于本表；这一点写出来，免得读者以为标准被临时放宽过。
 
 这里刻意**不写"总提交数"**：那个数字每写一次文档提交就会失效，而写它的正是文档提交
-本身。45 则是稳定的——纯文档提交不碰这四个目录，所以这个数字不会被本节自身的修订改变。
+本身。46 则是稳定的——纯文档提交不碰这四个目录，所以这个数字不会被本节自身的修订改变。
 
 因此上表可以被独立复核，而不必相信这段文字。
 
@@ -911,6 +946,7 @@ git log --oneline cf34c1b~1..HEAD -- src tests packaging tools   # 45 行，即�
 | `cfaf2a7` | feat(tray): show the session lifetime in `tray --once` text output too |
 | `8ee38e0` | test(cli): guard the QR exit-code map the way the renewal one is guarded |
 | `f400c90` | test(tray): pin which monitor states may reach the exit-code catch-all |
+| `71e7e54` | fix(tools): make the soak see renewals it did not perform itself |
 
 ---
 
