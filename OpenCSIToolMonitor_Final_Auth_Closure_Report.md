@@ -915,6 +915,39 @@ which the test suite could see:
 
 Defects 2 and 3 are the reason §69 exists: the source tree was green throughout.
 
+### §66's tray items, and one that looked like a bug and was not
+
+Rebuilt the binaries (§69) and ran them rather than the source. `--check` exits 0
+with `tray: ok` / 7 menu items; `--once` exits 13 with the honest
+`LOGIN_REQUIRED` note. Session lifetime, tooltip and menu were driven through the
+real presenter over four snapshot shapes: the `会话` line appears when an expiry is
+known and is absent when it is not, the menu gains a `renew` action only once
+there is data, and an offline snapshot keeps its numbers *and* gains an explicit
+`离线 - 最后更新 …` marker plus the error text.
+
+**The false alarm is worth recording.** I started a blocking tray, started a
+second one, and the second exited **2** with *"another OpenCSI tray is already
+running"* — correct. Then I terminated the first with `Popen.terminate()` and one
+process remained, which reads exactly like an orphaned tray.
+
+It is not. Two things were wrong with the test, not the product:
+
+- The first attempt used `--check` for the second instance and concluded the
+  single-instance guard did nothing. `--check` deliberately passes
+  `blocking=False` and **skips** the lock, because a health check that a running
+  tray could block cannot answer the question it exists to answer. The guard is on
+  the blocking path, which is what the corrected test exercises.
+- A PyInstaller onefile binary is a **bootloader parent plus a child** running the
+  Python code. Measured directly: pid 45392 (parent) and pid 31436 (child,
+  `ppid=45392`). Killing the parent leaves the child. That is a harness artefact;
+  the documented exit is the menu's Exit item, and `TrayApp.quit()` was driven
+  in-process — it stops the worker and the icon, returns in 0.00s, and a second
+  `quit()` is harmless.
+
+Also checked: there is no `--stop` flag. The message the second instance prints
+already says the supported route — *"right-click that icon and choose Exit
+first"* — so the guidance and the CLI agree.
+
 ### New test files
 
 | File | Tests | Covers |
