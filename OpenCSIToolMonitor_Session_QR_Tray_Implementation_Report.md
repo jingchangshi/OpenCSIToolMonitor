@@ -40,12 +40,42 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
 如实报告为可区分的退出码，而不是假装成功。
 
-另一处必须如实声明的**边界**：**扫码登录只覆盖认证流程的前半段，浏览器无法被完全移除。**
-本轮用探针实测确认：拿到 GitCode 凭据后，openCsiTool 的 `token` 仍必须由浏览器里的
-OAuth 回调签发——`/oauth/authorize` 是客户端渲染的 SPA 外壳，纯 HTTP 客户端（哪怕带上
-浏览器里**全部** 29 个 Cookie）只会拿到外壳。因此本轮的成果是**把浏览器从"必需认证源"
-降级为"可选认证后端"**，而不是消除它。这与本 Goal 的原始措辞一致，细节见 §7 与
-`docs/gitcode-qr-protocol.md` §9.1。
+另一处**边界**（本轮已修正，见下）：扫码登录当时只覆盖认证流程的前半段，openCsiTool
+的 `token` 被认为仍必须由浏览器里的 OAuth 回调签发。
+
+**这条结论在后续一轮工作中被推翻，原文如下，保留以便对照：**
+
+> 本轮用探针实测确认：拿到 GitCode 凭据后，openCsiTool 的 `token` 仍必须由浏览器里的
+> OAuth 回调签发——`/oauth/authorize` 是客户端渲染的 SPA 外壳，纯 HTTP 客户端（哪怕带上
+> 浏览器里**全部** 29 个 Cookie）只会拿到外壳。
+
+**错在哪里。** 上面每一个观测都是准确的，出问题的是从观测到结论的那一步。探针跟随
+重定向，因此必然停在 SPA 外壳上——而"停在这一页"被读成了"不存在通路"。真正的判定发生
+在外壳**背后的一次后端调用**里：`POST https://web-api.gitcode.com/uc/api/v1/oauth/checkOrAuthorize`。
+补上这一步之后，整个 OAuth 段就是纯 HTTP 的，不需要任何浏览器引擎：
+
+```text
+GET  opencsitool.com/opencsitool/rest/v1/oauth2/authorization/gitcode?redirect=%2FmyTools
+  -> 302 gitcode.com/oauth/authorize        (sets gitcode_oauth_session)
+  -> POST web-api.gitcode.com/uc/api/v1/oauth/checkOrAuthorize   (multipart)
+  -> 200 {"redirect_uri": ..., "reauth_required": null}
+  -> GET  that redirect_uri                 (200 + Set-Cookie: token)
+  -> GET  /opencsitool/rest/v1/user/getUserInfo                 (200)
+```
+
+独立复现三次，结论 `PURE_HTTP_OAUTH_FEASIBLE`。实现见 `src/opencsi/auth/http_oauth.py`，
+证据见 `docs/oauth-spa-investigation.md` 与
+`OpenCSIToolMonitor_Final_Auth_Closure_Report.md` §5。
+
+**仍然成立的部分。** 浏览器**交互**依旧需要，且每个账号只需一次：当账号从未授权过时
+`checkOrAuthorize` 返回 401，SPA 加载同意页，需要真人点一次「授权」。本工具不会代为
+批准。但这是**交互**依赖，不是**引擎**依赖——§74 明确要求区分这两者，而当初正是把它们
+混在了一起。
+
+因此本轮的成果**不是**"把浏览器从必需认证源降级为可选认证后端"，而是**把浏览器从
+认证步骤中完全移除，只保留它作为凭据存储的角色**（凭证不落盘，所以浏览器就是保险箱）。
+细节见 `docs/gitcode-qr-protocol.md` §9.1，那里保留了原始结论、删除线，以及同样的
+错误分析。
 
 ---
 
@@ -410,15 +440,24 @@ GET only）。把浏览器 Cookie 装进 `CookieJar` 后用纯 HTTP 跟随 OAuth
 
 两次响应**逐字节相同**：5793 字节、11 个 `<script>`、无重定向、无 `Set-Cookie`。
 因此阻断原因**不是缺某个 Cookie**（29 个全带上也一样），也**不是 CAPTCHA**，而是
-`/oauth/authorize` 是一个**客户端渲染的 SPA 外壳**——"是否自动批准"的判断发生在
-JavaScript 里。结论：`QR_FLOW_REPRODUCIBLE` 只覆盖第一段（GitCode 扫码），**浏览器无法被
-完全移除，只能退化为可选认证后端**，这正是本 Goal 的原始措辞所允许的。详见
-`docs/gitcode-qr-protocol.md` §9.1。
+`/oauth/authorize` 是一个**客户端渲染的 SPA 外壳**。
+
+**当时的结论（后续已推翻）：** `QR_FLOW_REPRODUCIBLE` 只覆盖第一段（GitCode 扫码），
+浏览器无法被完全移除，只能退化为可选认证后端。
+
+**修正：** "判断发生在 JavaScript 里"是对的，但由此推出"纯 HTTP 不可能"是错的。探针
+跟随重定向，所以必然停在外壳上；判定本身发生在外壳背后的一次后端调用
+（`checkOrAuthorize`）里，而那次调用是普通 HTTP POST。补上它之后 OAuth 段完全不需要
+浏览器引擎。详见 `docs/gitcode-qr-protocol.md` §9.1 与
+`OpenCSIToolMonitor_Final_Auth_Closure_Report.md` §5。本报告第 1 节保留了完整对照。
 
 > 记录一个我差点写错的地方：探针最初只在响应体里 `grep` 关键字，看到 `captcha` 就倾向于
 > 把它当成阻断原因。加上"该关键字出现在 `<script>` 内部还是页面标记里"的判定后发现它在
 > script bundle **内部**，是某个库的名字。仅凭"关键字出现过"就宣布阻断原因，与本项目此前
 > 几次"断言自己没有观测过的事实"是同一类错误；探针现在打印**出处**而非仅仅命中。
+>
+> 上面对"浏览器无法移除"的过度结论属于**同一类错误的一个更隐蔽的实例**：这次数据没有
+> 错，错的是从数据到结论的那一步——把"我没能穿过这一页"读成了"没有通路可以穿过"。
 
 即使扫码已经可用，`CdpCookieProvider` + `BrowserOAuthRenewer` 这一对仍被保留为主路径
 与回退路径。扫码消除了 GitCode 对浏览器的依赖；它没有消除 openCsiTool 对浏览器的依赖。
