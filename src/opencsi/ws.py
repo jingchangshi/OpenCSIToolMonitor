@@ -44,6 +44,23 @@ class WebSocketError(NetworkError):
     code = "WEBSOCKET_ERROR"
 
 
+class WebSocketTimeout(WebSocketError):
+    """No frame arrived before the read deadline.
+
+    Split out from :class:`WebSocketError` because the two mean opposite things
+    to a caller. A dropped or refused connection is a failure; a quiet socket is
+    the *normal* state of a healthy CDP session that simply has no events right
+    now. Passive observation -- watching what a page requests, which is what
+    ``CdpConnection.poll_event`` exists for -- would otherwise have to treat its
+    own polling interval as an error.
+
+    It still inherits from :class:`WebSocketError` so every existing ``except``
+    clause keeps catching it and no caller's behaviour changes.
+    """
+
+    code = "WEBSOCKET_TIMEOUT"
+
+
 class WebSocket:
     """A blocking WebSocket client connection."""
 
@@ -167,7 +184,17 @@ class WebSocket:
             try:
                 chunk = self._sock.recv(max(4096, n - len(self._buf)))
             except socket.timeout as exc:
-                raise WebSocketError("timed out waiting for data from the DevTools endpoint") from exc
+                # A read deadline that fires *between* frames is not a broken
+                # connection, so it is reported as a distinct type and callers
+                # that are deliberately polling treat it as "nothing yet". A
+                # timeout *inside* a frame is genuinely a truncated message and
+                # stays a WebSocketError, which is why the distinction is made
+                # here rather than collapsed at the call site.
+                if not self._buf:
+                    raise WebSocketTimeout("no data within the read deadline") from exc
+                raise WebSocketError(
+                    "timed out waiting for data from the DevTools endpoint"
+                ) from exc
             except OSError as exc:
                 raise WebSocketError(f"socket read failed: {type(exc).__name__}") from exc
             if not chunk:
@@ -367,6 +394,45 @@ class CdpConnection:
         """Return and clear buffered CDP events seen while awaiting replies."""
         out, self._events = self._events, []
         return out
+
+    def poll_event(self, *, timeout: float = 0.5) -> dict[str, Any] | None:
+        """Read one CDP event, or return ``None`` if none arrives in ``timeout``.
+
+        :meth:`call` can only surface events that happen to arrive while it is
+        waiting for a *reply*, which is fine for a request/response client and
+        useless for passive observation: capturing what a page does means
+        watching the socket while nothing is in flight. This is that read.
+
+        A timeout is a normal result, not an error -- the caller loops until its
+        own deadline -- so it returns ``None`` rather than raising. Anything
+        already buffered by an earlier :meth:`call` is returned first, so no
+        event can be lost by the ordering of calls.
+        """
+        if self._events:
+            return self._events.pop(0)
+
+        old_timeout = self._ws._sock.gettimeout()
+        try:
+            self._ws._sock.settimeout(max(0.01, timeout))
+            try:
+                raw = self._ws.recv_text()
+            except WebSocketTimeout:
+                return None
+        finally:
+            try:
+                self._ws._sock.settimeout(old_timeout)
+            except Exception:  # noqa: BLE001 - restoring is best-effort
+                pass
+
+        if raw is None:
+            return None
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(obj, dict) or "method" not in obj:
+            return None
+        return obj
 
     def close(self) -> None:
         self._ws.close()

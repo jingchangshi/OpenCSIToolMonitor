@@ -19,12 +19,21 @@ Code Meaning
 31   server error (HTTP 5xx)
 32   business API error (HTTP 200, code != 200)
 33   GitCode QR protocol error (unexpected response shape)
+34   GitCode authenticated but the openCsiTool session is not established
 ==== ==========================================
 
 Codes 0/2/10/11/12/13/20/30/31 come from the project specification.
 Code 32 is an addition: an HTTP 200 carrying a business-level failure
 (``{"code": 500, "message": ...}``) is neither a network nor a transport
 server error, and conflating it with either would mislead scripts.
+
+Code 34 is the same kind of addition, and the reason this module now has a
+*partial success* code at all. ``opencsi login --qr`` used to exit 0 the moment
+GitCode accepted the scan, which claimed an openCsiTool session that did not
+exist: the very next ``opencsi usage`` would still fail. Exiting 0 was wrong in
+both directions -- it told a script the login had worked, and it gave a human
+nothing to act on. GitCode success and openCsiTool success are two different
+facts, so they now get two different exit codes.
 """
 
 from __future__ import annotations
@@ -45,6 +54,12 @@ EXIT_BUSINESS_ERROR = 32
 #: code 31 previously meant both. That is the same conflation that motivated
 #: ``EXIT_BUSINESS_ERROR`` above.
 EXIT_QR_PROTOCOL = 33
+#: GitCode authentication succeeded, but the openCsiTool session it is supposed
+#: to lead to was not established. This is a *partial* success, and it needs its
+#: own code precisely so it cannot be mistaken for either outcome: 0 would claim
+#: ``opencsi usage`` now works (it does not), and any of the failure codes would
+#: throw away the real progress the user made by scanning.
+EXIT_OPENCSITOOL_PENDING = 34
 #: Ctrl-C. Documented in the README alongside the codes above, and now named so
 #: every site that reports an interrupt says the same thing rather than
 #: repeating a literal and drifting apart.

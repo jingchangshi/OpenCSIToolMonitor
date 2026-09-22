@@ -116,9 +116,18 @@ _CODE_STATE: dict[str, MonitorState] = {
     "SESSION_EXPIRED": MonitorState.AUTH_ERROR,
     "BAD_AUTH_HEADER": MonitorState.AUTH_ERROR,
     "PERMISSION_DENIED": MonitorState.AUTH_ERROR,
+    # The browserless renewal flow failed at a step it named. That is an
+    # authentication problem -- the session could not be re-established -- not a
+    # server-health one, and the remedy is the same as for any other failure to
+    # renew: check the GitCode session.
+    "BROWSERLESS_OAUTH_ERROR": MonitorState.AUTH_ERROR,
     # Transport.
     "NETWORK_ERROR": MonitorState.OFFLINE,
     "WEBSOCKET_ERROR": MonitorState.OFFLINE,
+    # A quiet CDP socket is the *normal* state of a healthy session, so this
+    # only reaches the classifier when a caller treated a poll deadline as a
+    # failure. It is a transport condition either way.
+    "WEBSOCKET_TIMEOUT": MonitorState.OFFLINE,
     # The server is reachable but unhappy, or its contract moved.
     "SERVER_ERROR": MonitorState.SERVER_ERROR,
     "BUSINESS_API_ERROR": MonitorState.SERVER_ERROR,

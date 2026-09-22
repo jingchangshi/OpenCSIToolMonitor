@@ -136,6 +136,47 @@ class LoginStatus(str, Enum):
     UNSUPPORTED = "UNSUPPORTED"
 
 
+class LoginStage(str, Enum):
+    """How far a login got, when "did it work?" is not a yes/no question.
+
+    A QR login has two independent halves and they can disagree:
+
+    .. code-block::
+
+        GitCode accepts the scan   ──►  GITCODE_AUTHENTICATED
+                  │
+                  ▼
+        openCsiTool mints its own ``token`` cookie  ──►  OPENCSITOOL_AUTHENTICATED
+
+    The first half is under this tool's control and works over plain HTTP. The
+    second half runs through openCsiTool's own OAuth callback, which needs a
+    GitCode *browser* session, so it can legitimately fail while the first half
+    succeeded.
+
+    ``GITCODE_AUTHENTICATED`` therefore means "real, verified progress, and
+    something still has to happen". Collapsing it into either ``True`` or
+    ``False`` is what produced the defect this enum exists to fix: the CLI
+    reported exit 0 (a lie to scripts) while printing "run opencsi login in a
+    browser" (a contradiction to humans).
+    """
+
+    #: Nothing usable was obtained.
+    NONE = "NONE"
+    #: GitCode knows who the user is; openCsiTool does not.
+    GITCODE_AUTHENTICATED = "GITCODE_AUTHENTICATED"
+    #: The openCsiTool session exists and ``getUserInfo`` succeeded.
+    OPENCSITOOL_AUTHENTICATED = "OPENCSITOOL_AUTHENTICATED"
+    #: openCsiTool authentication was attempted and did not complete. Distinct
+    #: from :attr:`GITCODE_AUTHENTICATED` because it records that the second leg
+    #: was *tried* and why it stopped -- a consent page is not a missing session.
+    OPENCSITOOL_PENDING = "OPENCSITOOL_PENDING"
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether the whole login finished, which is the only exit-0 case."""
+        return self is LoginStage.OPENCSITOOL_AUTHENTICATED
+
+
 @dataclass(frozen=True)
 class RenewalResult:
     """Structured renewal outcome.
@@ -181,15 +222,31 @@ class LoginResult:
     detail: str | None = None
     method: str | None = None
     requires_interaction: bool = True
+    #: How far the login actually got. Defaults to the coarse reading of
+    #: ``status`` so an authenticator written before this field existed keeps
+    #: behaving exactly as it did.
+    stage: LoginStage = LoginStage.NONE
 
     @property
     def ok(self) -> bool:
         return self.status is LoginStatus.SUCCEEDED
 
+    @property
+    def complete(self) -> bool:
+        """Whether the *whole* login finished.
+
+        Deliberately stricter than :attr:`ok`: an authenticator can report
+        ``SUCCEEDED`` for its own half of the flow while the session the caller
+        needs is still missing.
+        """
+        return self.stage.is_complete
+
     def as_dict(self) -> dict[str, object]:
         out: dict[str, object] = {
             "status": self.status.value,
             "ok": self.ok,
+            "stage": self.stage.value,
+            "complete": self.complete,
         }
         if self.method:
             out["method"] = self.method
@@ -239,6 +296,154 @@ class InteractiveAuthenticator(Protocol):
 
     def describe(self) -> str:
         """Short human-readable description of the login mechanism."""
+
+
+#: Renewal statuses that mean "this mechanism cannot help here, so trying the
+#: next one is worthwhile" rather than "renewal failed". The distinction is the
+#: whole reason a fallback chain exists.
+#:
+#: ``LOGIN_REQUIRED`` is deliberately **absent**: if the upstream SSO session is
+#: gone, a second mechanism reading the same session cannot conjure one, and
+#: trying anyway would turn one honest failure into two slow ones.
+_FALLBACK_WORTH_TRYING = frozenset(
+    {
+        RenewalStatus.CDP_UNAVAILABLE,
+        RenewalStatus.UNSUPPORTED,
+        RenewalStatus.OAUTH_FAILED,
+    }
+)
+
+
+class FallbackRenewer:
+    """Try several renewal mechanisms in order, stopping at the first that works.
+
+    Why this exists rather than one renewer
+    ---------------------------------------
+    There are two mechanisms now, and they cover different ground:
+
+    * :class:`~opencsi.auth.http_oauth.HttpOAuthRenewer` -- plain HTTP, no
+      browser engine. Covers renewal and repeat authorization, which is the
+      overwhelming majority of what a long-running monitor does.
+    * :class:`~opencsi.auth.oauth_browser.BrowserOAuthRenewer` -- drives a real
+      browser. Covers the case HTTP cannot: a first-time consent that has to be
+      confirmed, and any environment where the GitCode session is only reachable
+      inside a browser profile.
+
+    Putting the ordering here rather than in each caller means it is decided once
+    and is testable without a browser or a network.
+
+    What it will *not* do
+    ---------------------
+    It does not retry a mechanism whose answer was final. ``CONSENT_REQUIRED``
+    and ``LOGIN_REQUIRED`` stop the chain immediately: both mean a human is
+    needed, and neither is something the next mechanism can fix. Falling through
+    on those would delay a message the user needs, and could mask a genuine
+    consent requirement behind a misleading "renewal failed".
+    """
+
+    def __init__(self, renewers: "list[Any]", *, name: str = "fallback") -> None:
+        self._renewers = [r for r in renewers if r is not None]
+        self.name = name
+        #: Which mechanism actually produced the reported outcome, so a caller
+        #: can say *how* the session was renewed instead of only that it was.
+        self.last_mechanism: str | None = None
+
+    def can_renew(self) -> bool:
+        """Whether *any* mechanism is plausible. Cheap and non-committal."""
+        return any(_can(r) for r in self._renewers)
+
+    def renew(
+        self,
+        *,
+        timeout: float | None = None,
+        before: CredentialProvider | None = None,
+    ) -> RenewalResult:
+        """Try each mechanism in order. Never raises; always reports."""
+        if not self._renewers:
+            return RenewalResult(
+                RenewalStatus.UNSUPPORTED,
+                detail="no renewal mechanism is available",
+            )
+
+        attempts: list[str] = []
+        last: RenewalResult | None = None
+
+        for renewer in self._renewers:
+            label = getattr(renewer, "name", type(renewer).__name__)
+            if not _can(renewer):
+                attempts.append(f"{label}: unavailable")
+                continue
+
+            try:
+                result = renewer.renew(timeout=timeout, before=before)
+            except OpenCsiError as exc:
+                attempts.append(f"{label}: {exc.code}")
+                last = RenewalResult(
+                    RenewalStatus.OAUTH_FAILED, detail=scrub_text(str(exc))[:200]
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 - a mechanism must not crash the chain
+                attempts.append(f"{label}: {type(exc).__name__}")
+                last = RenewalResult(
+                    RenewalStatus.OAUTH_FAILED,
+                    detail=f"{label} failed ({type(exc).__name__})",
+                )
+                continue
+
+            attempts.append(f"{label}: {result.status.value}")
+            self.last_mechanism = label
+            last = result
+
+            if result.ok:
+                # A later mechanism can only do worse than a success, so stop.
+                return result
+            if result.status not in _FALLBACK_WORTH_TRYING:
+                # A final answer: a human is needed, or the session is gone.
+                return result
+
+        if last is None:
+            return RenewalResult(
+                RenewalStatus.UNSUPPORTED,
+                detail="no renewal mechanism could be attempted",
+            )
+        # Every mechanism either was unavailable or failed in a way the next one
+        # might have fixed. Report the last real attempt, annotated with what was
+        # tried, so the user sees the chain rather than only its tail.
+        return RenewalResult(
+            last.status,
+            renewed=last.renewed,
+            requires_interaction=last.requires_interaction,
+            token_changed=last.token_changed,
+            expires_in=last.expires_in,
+            detail=(
+                (last.detail + " ") if last.detail else ""
+            )
+            + f"(tried: {'; '.join(attempts)})",
+        )
+
+    def describe(self) -> str:
+        inner = ", ".join(
+            getattr(r, "name", type(r).__name__) for r in self._renewers
+        )
+        return f"renewal chain: {inner}"
+
+    def __repr__(self) -> str:
+        return f"FallbackRenewer({[getattr(r, 'name', '?') for r in self._renewers]})"
+
+
+def _can(renewer: Any) -> bool:
+    """``can_renew()`` that cannot itself raise.
+
+    A capability probe that throws would abort the chain for a mechanism that
+    might have worked, which is the opposite of what a probe is for.
+    """
+    probe = getattr(renewer, "can_renew", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(probe())
+    except Exception:  # noqa: BLE001 - a probe must never raise
+        return False
 
 
 @dataclass
