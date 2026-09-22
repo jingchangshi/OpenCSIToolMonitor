@@ -601,12 +601,20 @@ opencsi tray --install-startup    # 注册开机自启（写 HKCU Run 键）
 opencsi tray --remove-startup     # 取消开机自启
 opencsi tray --startup-status     # 查看自启状态
 opencsi tray --allow-multiple     # 允许多开（默认单实例）
+opencsi tray --auto-recover-browser  # 浏览器没在跑时自动启动它（默认关闭）
 ```
 
 托盘是**纯 UI**：它直接 import `MonitorService` / `OpenCsiToolClient`，
 不通过 `subprocess` 调 `opencsi usage --json`。因此没有子进程、没有 JSON 二次解析、
 也没有第二份认证逻辑。菜单里的操作只是把请求入队，阻塞工作都在工作线程里做 ——
 否则取一次数据就会把图标卡住。
+
+**`--auto-recover-browser` 为什么默认关闭。** 开机自启的场景下，Windows 会先把托盘拉起来，
+而 Chrome 往往还没运行，于是托盘停在 `浏览器未运行`。打开这个开关后，服务会自己用专用
+配置目录 + 调试端口启动浏览器，并**在同一轮内重试取数**，所以用户什么都不用做。
+但它会在你的桌面上弹出一个窗口 —— 一个监控工具擅自开窗口，是用户有权反感的行为，
+所以这必须由你显式选择，而不是因为它让主流程更顺就替你决定。启动带 600 秒冷却，
+且同一轮只重试一次，避免反复弹窗或死循环。
 
 开机自启用 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`：它是**每用户**的
 （不需要管理员权限、不影响其他账户），而且 Windows 自己的任务管理器"启动"标签页

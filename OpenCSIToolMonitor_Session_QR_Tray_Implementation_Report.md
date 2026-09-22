@@ -28,10 +28,11 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | GitCode 纯 CLI / 扫码登录可行性调研 | **完成** | `docs/gitcode-qr-protocol.md` —— 结论 `QR_FLOW_REPRODUCIBLE` |
 | 实现 CLI 扫码登录 | **完成，实测验证** | `opencsi login --qr` 真实创建了 challenge、写出图片，未扫码时如实返回 `TIMEOUT`（退出码 13） |
 | Windows 11 托盘 v1 | **完成，实测验证** | `opencsi tray --once` 打印真实快照；`--check` 报告 `tray: ok`，6 个菜单项 |
-| 测试 | **完成** | **656 项测试**（655 通过、1 跳过），`pytest` 与 `unittest` 双跑全绿 |
+| 浏览器缺失时用户可自救 | **完成，实测验证** | 杀掉 Chrome 后单条命令即恢复：`state: OK`，`EXIT=0`（见 §10 缺陷 8） |
+| 测试 | **完成** | **695 项测试**（694 通过、1 跳过），`pytest` 与 `unittest` 双跑全绿 |
 | Windows 实机验证 | **完成** | 实测 CLI、扫码、托盘、冻结二进制、入口点 |
 | 文档 | **完成** | 5 份文档 + README + 本报告 |
-| 规范提交 | **完成** | 自 `cf34c1b` 起 29 个提交；其中 3 个修复了通过**运行真实产物**才发现的缺陷 |
+| 规范提交 | **完成** | 自 `cf34c1b` 起 35 个提交；其中 8 个修复了通过**运行真实产物**才发现的缺陷 |
 
 一处必须如实声明的**非结论**：**扫码流程的最后一步无法机器验证。** 它需要真人用手
 机扫描一个微信小程序码。本报告交付的代码证明了该物理动作之前的每一步，并且把超时
@@ -44,7 +45,7 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 最后一个修改**源码或测试**的提交：
 
 ```
-542fe4f  fix(packaging): make the frozen tray honour its own arguments
+442d904  feat(monitor): opt-in automatic recovery from a missing browser
 ```
 
 其后都是纯文档提交，包括承载本报告的提交。在这里写出那些提交是循环的——一个提交
@@ -60,6 +61,11 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 | `dist/opencsi.exe` | 16.3 MB | 命令行版 |
 | `dist/opencsi-tray.exe` | 16.3 MB | 托盘版（无控制台窗口） |
 
+两个二进制都在本轮改动后**重新构建**，并重新跑过实测：杀掉 Chrome 后，
+`dist\opencsi.exe tray --once --no-proxy` 如实报 `BROWSER_UNAVAILABLE` 且退出码 10；
+加上 `--auto-recover-browser` 则报 `state: OK` 并退出 0。窗口化版
+`dist\opencsi-tray.exe --once` 在有限时间内退出并输出快照——缺陷 7 的回归仍然成立。
+
 做成两个二进制是刻意的：PyInstaller 的 `--windowed` 是按二进制设置的开关，而托盘
 程序在开机自启时闪出一个黑色控制台窗口是不可接受的。
 
@@ -69,6 +75,9 @@ OpenCsiToolClient 查询 API。CLI 与托盘负责展示。
 
 本阶段由三个真实缺陷驱动。三个缺陷都在修复前被复现，且每个修复都有能在旧代码上
 失败的测试。
+
+后续在真机运行中又发现并修复了五个（缺陷 4–8，见 §10）。其中缺陷 8 与本节的三个不同：
+它不是"缺少能力"，而是**已有的提示把用户引向了一个不可能完成的动作**。
 
 ### 3.1 会话约 58 分钟后失效，而没有任何机制续期
 
@@ -302,11 +311,18 @@ challenge 是真实向线上服务器创建的，图片是真实写出的，超�
 
 **分层。** 一切不需要 Windows 消息循环就能测试的东西都被下沉到 `monitor/` 与
 `tray/presenter.py`，它们是纯的。`app.py` 只负责把已经算好的值交给 pystray。这就是为什么
-656 项测试可以离线运行，而托盘本身在真机上验证。
+695 项测试可以离线运行，而托盘本身在真机上验证。
 
 **状态**（`MonitorState`）：`STARTING`、`OK`、`REFRESHING`、`RENEWING`、
-`LOGIN_REQUIRED`、`OFFLINE`、`SERVER_ERROR`、`AUTH_ERROR` —— 对应中文标签
-`启动中 / 正常 / 刷新中 / 续期中 / 需要登录 / 离线 / 服务异常 / 会话失效`。
+`LOGIN_REQUIRED`、`BROWSER_UNAVAILABLE`、`OFFLINE`、`SERVER_ERROR`、`AUTH_ERROR`
+—— 对应中文标签
+`启动中 / 正常 / 刷新中 / 续期中 / 需要登录 / 浏览器未运行 / 离线 / 服务异常 / 会话失效`。
+
+**`需要登录` 与 `浏览器未运行` 必须分开。** 前者是 GitCode 登录态没了，后者是持有登录态的
+那个浏览器没在运行；修复动作一个是"重新认证"，另一个是"把进程启动起来"。早先两者被合并，
+于是产生了一个**没有出口的死循环**（见 §10 缺陷八）：托盘说"需要登录"→ 登录动作调用系统
+默认浏览器（没有调试端口）→ Cookie 写进本工具读不到的地方 → 下一次轮询又说"需要登录"。
+现在 `浏览器未运行` 的第一项菜单是 `启动浏览器并登录`，`opencsi login` 也走同一条路径。
 
 **刻意为之的精度不对称。** tooltip 做压缩（`36.3亿 tokens`）；菜单显示精确数字
 （`3,634,063,175 tokens / 26,566 次请求`）。tooltip 受 Windows shell 限制为 127 个字符，
@@ -357,14 +373,14 @@ EXIT=0
 
 ## 9. 测试
 
-**656 项测试：655 通过，1 跳过，49 个 subtest 通过。**
+**695 项测试：694 通过，1 跳过，57 个 subtest 通过。**
 
 ```
 $ pytest
-655 passed, 1 skipped, 49 subtests passed in 36.91s
+694 passed, 1 skipped, 57 subtests passed in 37.70s
 
 $ python -m unittest discover -s tests -q
-Ran 656 tests in 38.734s
+Ran 695 tests in 37.547s
 OK (skipped=1)
 ```
 
@@ -377,10 +393,14 @@ OK (skipped=1)
 | --- | --- |
 | `tests/test_monitor.py` | `AttentionNotificationTest`（8 项）：每次状态转换一个气泡、重复不弹、恢复后重新武装、`tick()` 是公开的 |
 | `tests/test_monitor.py` | `RENEWING` 卡死回归、空操作续期、成功时 `RENEWING` → `OK` |
+| `tests/test_monitor.py` | `BrowserRecoveryTest`（8 项）：默认不启动浏览器、冷却期生效、同一轮只重试一次、网络故障不触发启动 |
 | `tests/test_tray.py` | `ChineseUnitTest`、`NotificationTest`、`SignInActionTest`、图标颜色/形状语义 |
+| `tests/test_tray.py` | 每个 `_ATTENTION_STATES` 成员都必须**真的有话可说**（见 §10 缺陷八） |
+| `tests/test_browser_launch.py` | 复用而非重复启动、失败不抛异常、`open_or_launch` 的三条分支 |
 | `tests/test_packaging.py` | `DeclaredScriptTest` —— 解析 `[project.scripts]` 并解析每个目标（见 §10） |
 | `tests/test_client.py` | 基于 AST 的只读守卫：业务客户端只能到达 `GET` |
 | `tests/test_cli.py` | 输出流被重新配置为 UTF-8；不可表示的字符不会导致崩溃；**每个 `EXIT_*` 常量唯一** |
+
 
 ---
 
@@ -407,7 +427,7 @@ total 2
 `install_logging_redaction` 都已应用在续期/扫码路径上。`scene_id` 与扫码载荷在 `repr` 中
 被脱敏。verbose 日志只打印请求**路径**——绝不打印 query string，绝不打印 cookie。
 
-### 本轮发现并修复的七个真实缺陷
+### 本轮发现并修复的八个真实缺陷
 
 1. **图标卡在"续期中"。** `_maybe_renew` 在成功时直接返回，没有离开 `RENEWING`，导致托盘
    在一次已经成功的续期之后仍显示续期状态长达 5 分钟。由一个实测探针发现：在一个已经续期
@@ -460,6 +480,68 @@ total 2
    回归发生时调用了真正的 GUI 入口点。现在测试同时 stub 托盘入口，因此回归会在毫秒级
    失败。一个复现挂起的测试不是测试。
 
+8. **"浏览器未运行"被当成"需要登录"上报，构成一个没有出口的死循环。** 这是本轮在真机上
+   发现的、也是八个缺陷里唯一一个**用户完全无法自救**的：`CDP_UNAVAILABLE` 与
+   `NO_BROWSER_TARGET` 都映射到 `LOGIN_REQUIRED`，于是托盘让你去登录；而登录动作调用的是
+   `webbrowser.open()`，它启动**系统默认浏览器**、**没有** `--remote-debugging-port`。
+   你登录成功，Cookie 却写进了本工具读不到的地方，下一次轮询又是"需要登录"。
+
+   **点多少次都会回到原点。** 这不是"提示不够精确"，而是**给出的建议不可能被遵循**：
+   在浏览器没有以调试端口启动时，告诉用户"去登录"是无法完成的操作。
+
+   实测复现（Chrome 完全退出）：
+
+   ```
+   $ opencsi login --no-proxy
+   opened https://opencsitool.com/myTools
+   ... no DevTools endpoint found
+   EXIT=10                      ← 与开始时同一个错误
+   ```
+
+   修复分四层，每一层都单独提交：
+
+   * `MonitorState.BROWSER_UNAVAILABLE` 把两种成因分开（`auth/browser_launch.py` 新增）；
+   * 托盘菜单在该状态下第一项是 `启动浏览器并登录`；
+   * `opencsi login` 与托盘的登录项都改走 `open_or_launch`，启动一个**本工具能读**的
+     浏览器（专用 `--user-data-dir` + `--remote-debugging-port`）；
+   * 可选 `--auto-recover-browser` 让开机后的常见情形**自行恢复**（默认关闭——它会往
+     桌面上弹一个窗口，不该擅自替用户决定）。
+
+   修复后实测（先杀掉 Chrome，再执行一条命令）：
+
+   ```
+   $ opencsi tray --once --no-proxy --auto-recover-browser
+   state: OK
+   total tokens: 3,634,402,985
+   requests:     27,758
+   EXIT=0
+   ```
+
+   **顺带暴露出的第二个同类错误**：`tray --once` 的退出码用 `return 20` 兜底，于是所有
+   未被显式列举的状态——包括这个——都被报成"权限不足"。退出码是公开契约，因此现在改成
+   具名函数 `_once_exit_code` 并直接测试，`20` 只保留给真正的权限拒绝。
+
+   **第三个**：`BROWSER_UNAVAILABLE` 加进了 `_ATTENTION_STATES`（决定**何时**弹），但
+   `_notify_attention`（决定**弹什么**）没有对应文案，于是该状态被静默静音——恰恰是刚开机、
+   用户最不会察觉托盘没在工作的时候。现在有一个测试遍历 `_ATTENTION_STATES` 的每个成员，
+   要求每个都产生恰好一个气泡，因此"只加一半"会在测试里立刻失败。
+
+   三个修复都先在旧代码上验证过会失败：`AssertionError: LOGIN_REQUIRED is not
+   BROWSER_UNAVAILABLE`、`AssertionError: 20 != 10`、`AssertionError: 0 != 1`。
+
+### 缺陷 1–8 的共同形态
+
+缺陷 4、5、6 是"测试检查声明而非产物"；缺陷 7 是"测试只覆盖了控制台入口，没覆盖窗口化
+入口"；缺陷 8 是"测试只覆盖了状态映射，没覆盖该状态下**动作能否达成目的**"。
+
+三者其实是同一件事：**测试断言的是代码写了什么，而不是用户能否得到他要的东西。**
+缺陷 8 的每一个子缺陷都在既有测试的射程之外——`_CODE_STATE` 的映射有测试、退出码的
+*唯一性*有测试、`_ATTENTION_STATES` 的*内容*有测试，但没有任何测试问过
+"被报成 `LOGIN_REQUIRED` 之后，用户照着做能不能恢复"。
+
+这也是为什么它只能靠真机运行发现：整条路径（点菜单 → 启动浏览器 → 读 Cookie → 再轮询）
+跨越了进程边界，离线测试套件在构造上就到不了那里。
+
 ### 已处理的打包陷阱
 
 * 可选依赖是**在函数内部惰性 import** 的，因此 `opencsi --help` 与 `opencsi doctor` 在
@@ -474,19 +556,22 @@ total 2
 
 ## 11. 提交
 
-自 `cf34c1b` 起共 **29 个提交**，下表列出其中 **26 个**（最旧在前，覆盖 `cf34c1b`
-到 `12d77aa`）。全部以 `opencsi contributors <contributors@opencsi.invalid>` 署名。
+自 `cf34c1b` 起共 **37 个提交**，下表列出其中 **27 个**（最旧在前，覆盖 `cf34c1b`
+到 `442d904`）。全部以 `opencsi contributors <contributors@opencsi.invalid>` 署名。
 
-被排除的是**三个纯文档提交**：它们撰写、修订本报告，并修正本报告对自身 SHA 的引用。
-一个提交无法列出自己的 SHA，所以它们不可能出现在表里；`542fe4f` —— 最后一个修改源码的
-提交 —— 是 §2 中命名的锚点。
+被排除的是**十个纯文档提交**：它们撰写、修订本报告，修正本报告对自身 SHA 的引用，并把
+报告改写为中文。一个提交无法列出自己的 SHA，所以它们不可能出现在表里；`442d904` ——
+最后一个修改源码或测试的提交 —— 是 §2 中命名的锚点。
+
+判定标准是机械的：对每个提交运行 `git show --name-only`，凡是没有触碰
+`src/`、`tests/`、`packaging/` 三者中任何一个的，都归入"纯文档"。因此上表可以被独立复核，
+而不必相信这段文字。
 
 | SHA | Subject |
 | --- | --- |
 | `cf34c1b` | refactor: separate credential reload from session renewal |
 | `48f05a4` | feat: add silent browser OAuth session renewal |
 | `5197a67` | feat: add login --status and login --renew, and teach doctor about renewal |
-| `ad18b1d` | research: document the GitCode QR login protocol |
 | `5ee2200` | feat: add a pure-HTTP GitCode QR login and terminal QR rendering |
 | `faaf8c0` | feat: add the Windows 11 notification-area tray |
 | `ad61bfb` | fix: report a cold-start renewal as renewed, not as already-valid or timed out |
@@ -497,18 +582,20 @@ total 2
 | `addcaa0` | fix(tray): make the "Sign in..." menu item actually sign you in |
 | `3c9926d` | fix(tray): keep the sign-in poll off the monitor's worker thread |
 | `22733e3` | fix(monitor): stop stranding the icon on "Renewing", and notify once |
-| `1213836` | docs: document the autonomous renewal path and the notification policy |
 | `23c1d10` | test(tray): cover the notification path and split a mis-nested test class |
 | `033b5d4` | feat(tray): show usage in Chinese units, and keep the menu exact |
 | `6344683` | fix(packaging): stop the frozen EXE mangling Chinese output |
 | `a81e7eb` | fix(tray): add the missing opencsi-monitor entry point |
-| `80d1f14` | docs: correct the test count in the architecture overview |
 | `ded9f93` | test(client): assert the read-only promise structurally, not just behaviourally |
 | `73b10f0` | test(tray): lock the icon's colour and shape semantics |
-| `5ab3ad3` | docs: refresh the architecture test count to 651 |
 | `39967ad` | fix(errors): stop the QR protocol error borrowing the server-error code |
 | `542fe4f` | fix(packaging): make the frozen tray honour its own arguments |
-| `12d77aa` | docs: record the frozen tray's arguments and the two new exit codes |
+| `3ab6cb1` | feat(auth): add a browser launcher, so "start a browser" is actionable |
+| `8d02ba1` | fix(monitor): stop reporting a missing browser as "login required" |
+| `7776f4a` | fix(cli): make `opencsi login` start a browser the tool can actually read |
+| `64f7a97` | fix(tray): make the tray's sign-in open a browser it can read too |
+| `5253d3f` | fix(tray): give the browser-unavailable state something to say |
+| `442d904` | feat(monitor): opt-in automatic recovery from a missing browser |
 
 ---
 
