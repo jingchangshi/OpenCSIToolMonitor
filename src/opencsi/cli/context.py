@@ -226,6 +226,37 @@ class CliContext:
             )
         return False
 
+    def _stored_provider_from(
+        self, provider: CredentialProvider
+    ) -> "StoredOpenCsiCredentialProvider | None":
+        """The secure-store provider inside ``provider``, if it is there.
+
+        ``make_renewer`` receives whatever ``make_provider`` returned, which may be
+        a bare :class:`StoredOpenCsiCredentialProvider` or a
+        :class:`CompositeCredentialProvider` wrapping one alongside a browser.
+        The write half of the store is needed in both cases, and the caller must
+        not have to know which shape it got.
+
+        Returns ``None`` -- rather than falling back to opening the store afresh --
+        when the active provider is *not* store-backed. That distinction is the
+        whole point: an explicitly chosen browser must not have its session
+        written into a stored identity, and a second, independent handle on the
+        same file would make that mistake invisible.
+
+        Introspection is confined here so the private ``_providers`` attribute is
+        read in exactly one place.
+        """
+        from ..auth.stored import StoredOpenCsiCredentialProvider
+
+        if isinstance(provider, StoredOpenCsiCredentialProvider):
+            return provider
+        members = getattr(provider, "_providers", None)
+        if isinstance(members, (list, tuple)):
+            for member in members:
+                if isinstance(member, StoredOpenCsiCredentialProvider):
+                    return member
+        return None
+
     def make_renewer(
         self, provider: CredentialProvider, *, base_url: str
     ) -> "SessionRenewer | None":
@@ -281,9 +312,35 @@ class CliContext:
         ):
             stored_source = self.make_stored_source()
             if stored_source is not None:
+                # The renewer needs a *sink* as well as a source: it writes the
+                # minted session back through `remember_token`. A bare
+                # StoredGitCodeCredentialSource has no such method, and the
+                # renewer reaches for it with `getattr`, so passing the source
+                # alone renewed successfully and persisted nothing -- the next
+                # process kept reading the old token. The adapter pairs the
+                # read-only source with the store's writing half.
+                #
+                # Both halves come from the same `open_default_store()` call that
+                # built the active provider, so the session is written to the very
+                # file this process reads.
+                stored_sink = self._stored_provider_from(provider)
+                if stored_sink is None:
+                    # `--cdp` / env / auto-discovery chose a browser as the active
+                    # identity, so there is no stored provider to be its sink.
+                    # Handing it the store would write a session minted for
+                    # whatever browser is running into a stored identity that had
+                    # nothing to do with it. Source stays read-only instead: the
+                    # browser path keeps using itself as its own sink below.
+                    stored_renewer_source = stored_source
+                else:
+                    from ..auth.stored import StoredOAuthCredentialAdapter
+
+                    stored_renewer_source = StoredOAuthCredentialAdapter(
+                        stored_source, stored_sink
+                    )
                 http_renewers.append(
                     HttpOAuthRenewer(
-                        stored_source,
+                        stored_renewer_source,
                         base_url=base_url,
                         timeout=timeout,
                         use_proxy=use_proxy,

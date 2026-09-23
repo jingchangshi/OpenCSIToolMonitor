@@ -174,6 +174,113 @@ class StoredGitCodeCredentialSource:
         return f"StoredGitCodeCredentialSource({self._store!r})"
 
 
+class StoredOAuthCredentialAdapter:
+    """GitCode source **and** openCsiTool sink, for ``HttpOAuthRenewer``.
+
+    Why this exists
+    ---------------
+    ``HttpOAuthRenewer`` takes one ``provider`` and expects it to be two things:
+    the GitCode credential *source* it reads through ``read_all_cookies()``, and
+    the new openCsiTool session's *sink*, written through ``remember_token()`` and
+    ``install_token()``. Both are fetched with ``getattr`` and simply skipped when
+    absent, so a provider with only half the interface renews successfully and
+    keeps nothing.
+
+    ``CdpCookieProvider`` has both halves because a browser profile really is both.
+    The secure store splits them on purpose -- :class:`StoredGitCodeCredentialSource`
+    is read-only, and :class:`StoredOpenCsiCredentialProvider` is the only thing
+    that writes -- so passing the source alone to the renewer silently dropped
+    every renewed session. This adapter restores the pairing without changing
+    ``HttpOAuthRenewer``'s constructor, which the CDP, QR and browser paths all
+    depend on.
+
+    Why not give the source a ``remember_token``
+    --------------------------------------------
+    That is the smaller diff and it is the wrong one. A GitCode credential source
+    that writes openCsiTool sessions stops being read-only, and the class exists
+    precisely to keep an upstream credential from being overwritten as a side
+    effect of an unrelated renewal. Keeping the roles in one adapter and the
+    responsibilities in two classes means the read-only property stays checkable.
+
+    The sink and the client must share a store
+    ------------------------------------------
+    This only helps if ``sink`` wrote to the same store the ``OpenCsiToolClient``
+    reads. :meth:`CliContext.make_renewer` constructs both from one
+    ``open_default_store()`` call for that reason; two adapters over two stores
+    would renew into a file nothing reads.
+    """
+
+    name = "stored-oauth"
+
+    def __init__(
+        self,
+        source: StoredGitCodeCredentialSource,
+        sink: StoredOpenCsiCredentialProvider,
+    ) -> None:
+        self._source = source
+        self._sink = sink
+
+    # -- reads: straight through to the GitCode source ----------------------
+
+    def read_all_cookies(self, *, timeout: float | None = None) -> list[Mapping[str, Any]]:
+        return self._source.read_all_cookies(timeout=timeout)
+
+    @property
+    def cookie_names(self) -> tuple[str, ...]:
+        return self._source.cookie_names
+
+    def status(self) -> CredentialStatus:
+        return self._source.status()
+
+    @property
+    def last_error(self) -> str | None:
+        return self._source.last_error
+
+    # -- writes: forwarded to the openCsiTool sink --------------------------
+
+    def remember_token(self, token: str, *, expires_in: float | None = None) -> None:
+        """Cache and persist the minted session.
+
+        ``HttpOAuthRenewer`` calls this with the renewed cookie, and it is the
+        *only* thing that makes ``RENEWED`` mean "the next process can use it"
+        rather than "the server issued one".
+        """
+        self._sink.remember_token(token, expires_in=expires_in)
+
+    def install_token(self, token: str, *, expires_in: float | None = None) -> bool:
+        """Same write, reached through the renewer's browser-install seam.
+
+        The renewer calls ``install_token`` when it wants to push the cookie into
+        a long-lived store. For a browser that means the profile; here it is the
+        secure store, and it is already durable, so this is the same operation as
+        :meth:`remember_token` rather than a second write.
+
+        The return value is forwarded rather than dropped. The renewer records
+        ``bool(install_token(...))`` as "was it persisted", so swallowing the
+        result here would make a durable renewal report itself as
+        process-local -- the same wrong answer as the missing-sink defect, reached
+        by a different route.
+        """
+        return bool(self._sink.install_token(token, expires_in=expires_in))
+
+    # -- provider protocol, so it can sit where a provider is expected ------
+
+    def get_token(self) -> str | None:
+        return self._sink.get_token()
+
+    def peek_token(self) -> str | None:
+        return self._sink.peek_token()
+
+    def invalidate(self) -> None:
+        self._sink.invalidate()
+
+    def __repr__(self) -> str:
+        # Deliberately opaque: the default repr would print the source and sink,
+        # whose own reprs are safe, but the adapter is the object most likely to
+        # be logged at a call site, so it names its parts and nothing else.
+        return "StoredOAuthCredentialAdapter(source=stored-gitcode, sink=secure-store)"
+
+
 class StoredOpenCsiCredentialProvider:
     """The openCsiTool session, read from -- and written to -- the durable store.
 
@@ -322,8 +429,16 @@ class StoredOpenCsiCredentialProvider:
         ``HttpOAuthRenewer`` looks for ``install_token`` when writing a session
         *back* into a source; ``CdpCookieProvider`` exposes both names. Providing
         both keeps the renewer's existing branching correct without editing it.
+
+        Returns ``True`` on a successful write, because the renewer records
+        ``bool(install(...))`` as "was it persisted". A bare ``None`` return --
+        which is what this used to do by falling through to ``remember_token`` --
+        made a *successful* store write report as a failed one, and the renewer
+        warned that the session "is valid for this process only" while the file on
+        disk was already correct.
         """
         self.remember_token(token, expires_in=expires_in)
+        return bool(token)
 
     # ── diagnostics ───────────────────────────────────────────────────────
     def status(self) -> CredentialStatus:
