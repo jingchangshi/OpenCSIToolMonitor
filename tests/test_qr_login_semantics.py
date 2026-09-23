@@ -39,7 +39,7 @@ from opencsi.auth.gitcode_bridge import (
 from opencsi.auth.gitcode_qr import QrLoginResult, QrLoginStatus
 from opencsi.auth.session import LoginStage, RenewalResult, RenewalStatus
 from opencsi.cli.app import main
-from opencsi.errors import EXIT_OPENCSITOOL_PENDING
+from opencsi.errors import EXIT_NOT_PERSISTED, EXIT_OPENCSITOOL_PENDING
 
 #: Synthetic GitCode tokens. Shaped like real ones, never real ones.
 FAKE_ACCESS = "ACCESS" + "a1b2c3d4e5f6" * 8
@@ -223,10 +223,45 @@ class QrSuccessSemanticsTest(unittest.TestCase):
         self.assertIn(str(EXIT_OPENCSITOOL_PENDING), err)
 
     def test_a_verified_session_is_exit_zero(self) -> None:
-        completion = login_module_completion(identity=_StubIdentity(), bridged=True)
+        completion = login_module_completion(
+            identity=_StubIdentity(), bridged=True, persisted=True
+        )
         code, out, _err = self._run_qr(qr_result=_qr_success(), completion=completion)
         self.assertEqual(code, 0)
         self.assertIn("openCsiTool session established and verified", out)
+
+    def test_a_verified_session_that_was_not_stored_is_not_exit_zero(self) -> None:
+        """The second half of the original defect, and the one this round adds.
+
+        A session that works only in the process that created it is not a
+        completed login: ``opencsi usage`` in a new terminal still fails. Exit 0
+        would promise exactly that it works, so the command must say otherwise --
+        without pretending the authentication itself failed, because it did not.
+        """
+        completion = login_module_completion(
+            identity=_StubIdentity(), bridged=True, persisted=False
+        )
+        code, out, err = self._run_qr(qr_result=_qr_success(), completion=completion)
+        self.assertEqual(code, EXIT_NOT_PERSISTED)
+        self.assertNotEqual(code, 0)
+        self.assertIn("established and verified", out)
+        self.assertIn("next process", err)
+        self.assertIn(str(EXIT_NOT_PERSISTED), err)
+
+    def test_the_json_document_reports_persistence_separately_from_success(self) -> None:
+        """A script must be able to tell "works now" from "works from now on"."""
+        import json
+
+        completion = login_module_completion(
+            identity=_StubIdentity(), bridged=True, persisted=False
+        )
+        _code, out, _err = self._run_qr(
+            qr_result=_qr_success(), completion=completion, json_output=True
+        )
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"], "the session is real for this process")
+        self.assertFalse(payload["persistence"]["durable"])
+        self.assertEqual(payload["exit_code"], EXIT_NOT_PERSISTED)
 
     def test_a_failed_qr_scan_keeps_its_own_exit_code(self) -> None:
         failed = QrLoginResult(QrLoginStatus.TIMEOUT, detail="no scan")
@@ -254,7 +289,9 @@ class QrSuccessSemanticsTest(unittest.TestCase):
     def test_a_completed_login_says_the_stage_is_complete(self) -> None:
         import json
 
-        completion = login_module_completion(identity=_StubIdentity(), bridged=True)
+        completion = login_module_completion(
+            identity=_StubIdentity(), bridged=True, persisted=True
+        )
         _code, out, _err = self._run_qr(
             qr_result=_qr_success(), completion=completion, json_output=True
         )
@@ -263,11 +300,18 @@ class QrSuccessSemanticsTest(unittest.TestCase):
         self.assertTrue(payload["complete"])
         self.assertEqual(payload["stage"], LoginStage.OPENCSITOOL_AUTHENTICATED.value)
         self.assertEqual(payload["exit_code"], 0)
+        self.assertTrue(payload["persistence"]["durable"])
         self.assertTrue(payload["openscitool_session"]["established"])
 
 
-def login_module_completion(*, identity, bridged: bool):
-    """Build the ``_Completion`` the QR command reads. Keeps tests declarative."""
+def login_module_completion(*, identity, bridged: bool, persisted: bool = True):
+    """Build the ``_Completion`` the QR command reads. Keeps tests declarative.
+
+    ``persisted`` defaults to ``True`` so that a test about a *different* subject
+    -- the stage, the JSON shape, a failed scan -- does not have to restate the
+    persistence contract to reach the branch it is testing. The tests that are
+    *about* persistence pass it explicitly.
+    """
     from opencsi.cli.login import _Completion
 
     return _Completion(
@@ -276,6 +320,8 @@ def login_module_completion(*, identity, bridged: bool):
         renewal=RenewalResult(RenewalStatus.RENEWED) if bridged else None,
         reason=None if identity else "the openCsiTool session was not established",
         next_step=None if identity else "run 'opencsi login'",
+        gitcode_persisted=bool(identity) and persisted,
+        session_persisted=bool(identity) and persisted,
     )
 
 

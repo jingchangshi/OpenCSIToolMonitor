@@ -60,6 +60,16 @@ EXIT_QR_PROTOCOL = 33
 #: ``opencsi usage`` now works (it does not), and any of the failure codes would
 #: throw away the real progress the user made by scanning.
 EXIT_OPENCSITOOL_PENDING = 34
+#: The session was established and verified, but could not be stored durably, so
+#: the *next* process will not have it. This is the failure mode that made the
+#: original browserless login useless, and it must never be reported as a plain
+#: success: exit 0 tells a script "you are signed in from now on", and here that
+#: is false the moment this process ends.
+#:
+#: Distinct from ``EXIT_NOT_LOGGED_IN`` because the user is, right now, signed in
+#: -- the fault is in persistence, not in authentication, and the two need
+#: different fixes.
+EXIT_NOT_PERSISTED = 35
 #: Ctrl-C. Documented in the README alongside the codes above, and now named so
 #: every site that reports an interrupt says the same thing rather than
 #: repeating a literal and drifting apart.

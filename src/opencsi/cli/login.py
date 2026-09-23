@@ -43,6 +43,7 @@ from ..client import BASE_URL
 from ..errors import (
     EXIT_INTERRUPTED,
     EXIT_NETWORK_ERROR,
+    EXIT_NOT_PERSISTED,
     EXIT_OPENCSITOOL_PENDING,
     EXIT_QR_PROTOCOL,
     EXIT_SESSION_EXPIRED,
@@ -53,7 +54,13 @@ from ..errors import (
 )
 from ..formatting import format_relative_seconds, render_kv, section
 from ..redaction import register_secret, scrub_text
-from .context import ENV_BASE_URL, ENV_CDP_URL, CliContext, add_common_options
+from .context import (
+    ENV_BASE_URL,
+    ENV_CDP_URL,
+    ENV_NO_STORE,
+    CliContext,
+    add_common_options,
+)
 
 LOGIN_URL = "https://opencsitool.com/myTools"
 POLL_INTERVAL = 2.0
@@ -353,9 +360,17 @@ def _qr(ctx: CliContext) -> int:
 
     ctx.emit(payload, render_success)
 
-    if completion.identity is not None:
+    if completion.identity is None:
+        return EXIT_OPENCSITOOL_PENDING
+    if completion.persisted:
         return 0
-    return EXIT_OPENCSITOOL_PENDING
+    # The session is real and the server confirmed it, but the next process will
+    # not have it. A plain 0 would tell a script "you are signed in from now on",
+    # and that is false the moment this command exits -- which is precisely the
+    # defect that made the original browserless login useless. A failure code
+    # would be equally wrong: the user *is* signed in right now, and the fault is
+    # in storage, not in authentication.
+    return EXIT_NOT_PERSISTED
 
 
 @dataclass
@@ -389,6 +404,24 @@ class _Completion:
     bridged: bool = False
     #: The bridge outcome, when the browser route was taken.
     bridge: BridgeResult | None = None
+    #: Whether the GitCode credential was written to the durable store.
+    gitcode_persisted: bool = False
+    #: Whether the openCsiTool session was written to the durable store.
+    session_persisted: bool = False
+    #: Why persistence failed, when it did. Never contains a credential.
+    persist_error: str | None = None
+    #: Where the credential was stored, for the report. Not a secret.
+    store_path: str | None = None
+
+    @property
+    def persisted(self) -> bool:
+        """Whether everything needed by the next process is on disk.
+
+        This is the difference between "signed in until this command exits" and
+        "signed in". A run that established and verified a session but stored
+        nothing is reported as partial, not as success.
+        """
+        return self.gitcode_persisted and self.session_persisted
 
 
 def _complete_qr_login(ctx: CliContext, result) -> "_Completion":
@@ -446,6 +479,29 @@ def _complete_qr_login(ctx: CliContext, result) -> "_Completion":
         completion.next_step = "run 'opencsi login --qr' again to get a fresh code"
         return completion
 
+    # ── persist the GitCode credential first ──────────────────────────────
+    # Order matters. The GitCode credential is what makes every *later* renewal
+    # possible without another scan, so it is written before the leg that can
+    # fail. If the openCsiTool half then needs a consent click, or the network
+    # drops, the scan the user just performed is still not wasted -- a second
+    # attempt renews from the store with no QR code at all.
+    store = _open_store(ctx)
+    if store is not None:
+        try:
+            from ..auth.store import StoredGitCodeCredential
+
+            store.save_gitcode(
+                StoredGitCodeCredential(
+                    access_token=credentials["access_token"],
+                    refresh_token=credentials.get("refresh_token"),
+                    username=result.username,
+                )
+            )
+            completion.gitcode_persisted = True
+            completion.store_path = _store_path(store)
+        except Exception as exc:  # noqa: BLE001 - a storage fault must be reported, not raised
+            completion.persist_error = _persist_reason(exc)
+
     base_url = (
         getattr(ctx.args, "base_url", None) or os.environ.get(ENV_BASE_URL) or BASE_URL
     )
@@ -471,6 +527,16 @@ def _complete_qr_login(ctx: CliContext, result) -> "_Completion":
                 "not accept it, so the login is not complete."
             )
             completion.next_step = "run 'opencsi login' to sign in through a browser"
+            return completion
+        # ── persist the session, now that the server has confirmed it ─────
+        # Written *after* verification on purpose: storing a cookie the server
+        # rejects would leave the next process holding a credential that looks
+        # valid and fails on first use, which is harder to diagnose than having
+        # nothing stored at all.
+        if store is not None and token:
+            completion.session_persisted = _persist_session(
+                completion, store, token, renewal.expires_in
+            )
         return completion
 
     if renewal.status is RenewalStatus.CONSENT_REQUIRED:
@@ -504,6 +570,76 @@ def _complete_qr_login(ctx: CliContext, result) -> "_Completion":
     completion.reason = renewal.detail or "the openCsiTool OAuth step did not complete"
     completion.next_step = "run 'opencsi login' to sign in through a browser"
     return completion
+
+
+def _open_store(ctx: CliContext):
+    """The durable credential store, or ``None`` when there is none to use.
+
+    ``None`` covers two situations that must not be conflated in the *report*
+    but are the same here: this platform has no secure store, or the user asked
+    for the store to be ignored with ``--no-store``. Both mean "this run will not
+    persist", which is what the caller acts on.
+
+    Returning ``None`` rather than a weaker store is deliberate. A plaintext
+    fallback would put a live credential in the clear on a machine whose owner
+    believed it was encrypted -- worse than not persisting, because the failure
+    would be silent.
+    """
+    if getattr(ctx.args, "no_store", False) or os.environ.get(ENV_NO_STORE):
+        return None
+    try:
+        from ..auth.windows_store import open_default_store
+
+        return open_default_store()
+    except Exception:  # noqa: BLE001 - a missing store is not a login failure
+        return None
+
+
+def _store_path(store) -> str | None:
+    """Where the store keeps its file, for the report. Never a secret."""
+    path = getattr(store, "path", None)
+    return str(path) if path is not None else None
+
+
+def _persist_reason(exc: BaseException) -> str:
+    """A short, secret-free reason a write failed.
+
+    The exception's own message is used where it is already scrubbed --
+    :class:`~opencsi.auth.store.CredentialStoreError` scrubs on construction --
+    and only the class name otherwise, because an arbitrary exception's text is
+    not something this code can vouch for.
+    """
+    from ..auth.store import CredentialStoreError
+
+    if isinstance(exc, CredentialStoreError):
+        return str(exc)
+    return f"{type(exc).__name__} while writing the credential store"
+
+
+def _persist_session(
+    completion: "_Completion", store, token: str, expires_in: float | None
+) -> bool:
+    """Write the verified session to the store. Returns whether it worked.
+
+    A failure is recorded on ``completion`` rather than raised. This runs after
+    the user has already scanned a code and the server has already confirmed the
+    session, so turning a storage fault into an exception would throw away a
+    success that is real -- it would just not survive the process.
+    """
+    try:
+        from ..auth.store import StoredOpenCsiCredential
+
+        store.save_opencsi(
+            StoredOpenCsiCredential(
+                token=token,
+                expires_at=(time.time() + expires_in) if expires_in else None,
+            )
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - reported through the completion
+        if completion.persist_error is None:
+            completion.persist_error = _persist_reason(exc)
+        return False
 
 
 def _verify_session(ctx: CliContext, base_url: str, token: str):
@@ -714,9 +850,22 @@ def _qr_payload(
             "reason": completion.reason,
             "next_step": completion.next_step,
         },
+        # Whether the next process will have this session. Reported separately
+        # from ``ok`` because the two can disagree: a verified session that was
+        # not stored is a real success for *this* process and a failure for the
+        # next one, and collapsing them was the original defect.
+        "persistence": {
+            "gitcode_credential_saved": completion.gitcode_persisted,
+            "opencsi_session_saved": completion.session_persisted,
+            "durable": completion.persisted,
+            "store_path": completion.store_path,
+            "error": completion.persist_error,
+        },
     }
-    if established:
+    if established and completion.persisted:
         payload["exit_code"] = 0
+    elif established:
+        payload["exit_code"] = EXIT_NOT_PERSISTED
     else:
         payload["exit_code"] = EXIT_OPENCSITOOL_PENDING
     return payload
@@ -742,8 +891,30 @@ def _render_completion(ctx: CliContext, completion: "_Completion") -> None:
             ctx.out(render_kv([("Renewed via", completion.mechanism)]))
             if not completion.bridged:
                 ctx.out(render_kv([("Browser", "not used")]))
+        # Say whether this survives the process. "Your next command will work"
+        # is the promise exit 0 makes, so it is stated rather than implied.
+        if completion.persisted:
+            ctx.out(render_kv([("Stored", completion.store_path or "securely")]))
+        else:
+            ctx.out(
+                render_kv(
+                    [("Stored", "no -- the next command will need to sign in again")]
+                )
+            )
         ctx.blank()
-        ctx.out("Try: opencsi usage")
+        if completion.persisted:
+            ctx.out("Try: opencsi usage")
+        else:
+            ctx.err(
+                "warning: the session works now, but it could not be saved, so "
+                "the next process will have to sign in again."
+            )
+            if completion.persist_error:
+                ctx.err(f"       {completion.persist_error}")
+            ctx.err(
+                "       this command exits "
+                f"{EXIT_NOT_PERSISTED} rather than 0 to say so."
+            )
         return
 
     ctx.err("")
