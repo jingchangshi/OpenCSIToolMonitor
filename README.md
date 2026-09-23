@@ -169,6 +169,30 @@ opencsi usage
 opencsi tools
 ```
 
+### 首次登录：扫码一次，之后不再需要浏览器
+
+```bash
+opencsi login --qr      # 微信扫码；成功后凭据加密落盘
+opencsi usage           # 新进程直接可用，不需要 Chrome/Edge
+```
+
+凭据存在 `%LOCALAPPDATA%\OpenCSI\credentials.dat`，由 Windows DPAPI 以
+`CurrentUser` 作用域加密。明文只在内存里出现，没有明文临时文件，非 Windows
+平台也没有明文兜底。
+
+`opencsi login --qr` 只有在凭据**确实落盘**之后才返回 0。会话有效但写盘失败时
+退出码是 `35`，因为下一个进程会失败 —— 用户必须知道。
+
+查看或清除：
+
+```bash
+opencsi doctor            # "credential store" 一行：后端、路径、内容
+opencsi logout            # 只清 openCsiTool 会话，保留 GitCode 凭据
+opencsi logout --all      # 连 GitCode 凭据一起清（下次需要重新扫码）
+```
+
+`logout` 只清本机，**不会**调用远端 revoke。
+
 典型输出：
 
 ```

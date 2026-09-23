@@ -24,6 +24,79 @@
 
 ---
 
+## 持久凭据存储（Windows DPAPI）
+
+一次登录之后，凭据不再只活在当前进程里。
+
+```text
+%LOCALAPPDATA%\OpenCSI\credentials.dat
+```
+
+| 项目 | 取值 |
+| --- | --- |
+| 加密 | Windows DPAPI（`CryptProtectData` / `CryptUnprotectData`） |
+| 作用域 | **`CurrentUser`** —— Windows 用户 A 读不到用户 B 的凭据 |
+| 明文 | **只存在于内存**；没有明文临时文件 |
+| 写入 | 内存序列化 → 加密 → `credentials.dat.tmp` → `os.replace`（原子替换） |
+| 非 Windows | **没有存储**，也没有明文兜底 |
+
+非 Windows 上 `open_default_store()` 返回 `None`，走浏览器路径。故意不做明文
+兜底：在用户以为加密的机器上写入明文凭据，比没有存储更糟。
+
+### 两个半边，分别保存
+
+```text
+StoredGitCodeCredential   access_token / refresh_token / username
+StoredOpenCsiCredential   token / expires_at
+```
+
+`save_gitcode()` 与 `save_opencsi()` 是分开的，**不会互相覆盖**。这一点很关键：
+续期之后只更新 openCsiTool 那一半，GitCode 的 refresh token 必须原样保留，否则
+下一次续期就没有东西可用了。
+
+### 什么时候写
+
+```text
+login --qr
+    扫码成功 → save_gitcode()          ← OAuth 之前就写
+    getUserInfo 200 → save_opencsi()   ← 验证之后才写
+```
+
+`login --qr` 只有在**两半都落盘**之后才返回 0。会话有效但写盘失败时退出码是
+`35`（`EXIT_NOT_PERSISTED`），不是 0 —— 用户必须知道"下一个进程会失败"。
+
+### `invalidate()` 只清缓存
+
+一次 401 不会删除持久凭据。删掉意味着用户要重新扫码，而 401 更可能只是
+openCsiTool 的 1 小时 Cookie 到期 —— 那正是存储要解决的问题。
+
+### 查看与清除
+
+```bash
+opencsi doctor                    # 含 "credential store" 一行：后端、路径、内容
+opencsi login --status            # 会话状态；凭据来源显示 secure-store
+opencsi logout                    # 只清 openCsiTool 会话，保留 GitCode 凭据
+opencsi logout --forget-gitcode   # 连 GitCode 凭据一起清
+opencsi logout --all              # 同上
+```
+
+`logout` **不会**调用远端 revoke，只清本机。`--no-store` 是用法错误（退出码 2）：
+它等于说"没有可清的东西"，而不是假装清掉了什么。
+
+### 存储损坏时
+
+不会崩，也不会自动删除：
+
+```text
+credential store: fail -- <路径>: CryptUnprotectData failed (error 87); …
+  hint: the file was left in place; run 'opencsi login --qr' to sign in again
+```
+
+损坏的文件是用户手上唯一一份可用的 refresh token，悄悄删掉会把一个可恢复的
+问题变成必须重新扫码。
+
+---
+
 ## 凭据的来源
 
 `CredentialProvider` 协议只有一个核心问题：**"Cookie 值是什么？"**

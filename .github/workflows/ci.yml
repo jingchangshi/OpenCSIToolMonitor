@@ -421,6 +421,15 @@ jobs:
             throw "the store path points into the unpacked bundle: $($row.detail)"
           }
 
+          # Actions wraps every pwsh step and ends it with `exit $LASTEXITCODE`,
+          # so the step inherits the *last native command's* status -- here 1,
+          # from a `doctor` that failed its session check exactly as expected.
+          # Without this the step fails while every assertion above passed, and
+          # the log shows a bare "exit code 1" with no explanation. Every
+          # assertion that matters has already thrown by this point.
+          $global:LASTEXITCODE = 0
+          exit 0
+
       - name: The frozen CLI refuses to clear a store it does not have
         shell: pwsh
         run: |
@@ -437,6 +446,11 @@ jobs:
           if ($logoutExit -eq 0) {
             throw "logout --no-store should refuse, not silently report success"
           }
+          # Same reason as the store step above: Actions ends the step with
+          # `exit $LASTEXITCODE`, and the refusal we just asserted is a non-zero
+          # status. Reaching here means the refusal happened, which is the pass.
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: The frozen CLI can list its own commands
         shell: pwsh
