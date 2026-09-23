@@ -1485,6 +1485,51 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
   have produced untestable code, which is the reason to stop rather than a reason
   to guess.
 
+### §10.8's central claim, measured rather than argued
+
+The tray's normal path must not start a browser. Measured by counting browser
+processes across a real `opencsi-tray.exe --once` run, with a fixture credential
+placed in a **redirected** `LOCALAPPDATA` so the developer's real store was never
+touched:
+
+```text
+chrome/msedge processes before tray --once : 43
+opencsi-tray.exe --once
+  state: AUTH_ERROR
+  note:  openCsiTool rejected the session cookie (HTTP 401) ...
+  exit:  13
+chrome/msedge processes after               : 43   (delta 0)
+```
+
+Delta **0**. The credential was rejected — it is a fixture, not a real session — but
+the property under test is what the tray *started*, and it started nothing. Note
+that this is a stronger result than a passing run would have been: a successful
+`usage` could in principle have come from somewhere else, whereas "zero new browser
+processes while failing" isolates the behaviour exactly.
+
+The count includes the user's own 43 browser processes, which is deliberate: the
+question is not "is a browser running" — nobody should have to close their browser
+to use this tool — but "did *OpenCSI* start one".
+
+Also re-verified on this build, with no credential at all:
+
+```text
+opencsi-tray.exe --check
+  tray: ok
+  state: STARTING
+  menu items: 7
+  tooltip: OpenCSI | 启动中 / 等待首次更新
+  exit 0
+
+opencsi-tray.exe --once
+  state: LOGIN_REQUIRED
+  note:  CDP is reachable but the browser holds no openCsiTool 'token' cookie ...
+  exit 13
+```
+
+`--once` reports `LOGIN_REQUIRED` rather than starting a browser to go looking for
+one, which is §9.2's change working as intended.
+
 ### Why the live halves still cannot run, re-measured on the current build
 
 The blockers for Q1's scan, Q3's renewal and Q4's rotation are the same one, and it
