@@ -178,6 +178,9 @@ class ProxyFlagSurfaceTest(unittest.TestCase):
             cdp = None
             base_url = None
             json = False
+            # Never let a stand-in args object reach the developer's real store;
+            # see tests/test_repository_hygiene.py, which enforces this.
+            no_store = True
 
         import contextlib
         import io

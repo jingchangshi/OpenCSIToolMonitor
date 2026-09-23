@@ -463,8 +463,20 @@ def _fake_ctx():
     """A minimal CliContext for the completion helper.
 
     Built by hand rather than through argparse because ``_complete_qr_login``
-    reads exactly four attributes, and constructing a real context would couple
-    these tests to the whole option surface.
+    reads only a handful of attributes, and constructing a real context would
+    couple these tests to the whole option surface.
+
+    ``no_store`` is **required**, not optional. ``_complete_qr_login`` persists
+    the credential through ``ctx.make_stored_provider()``, which decides whether a
+    store exists by reading ``getattr(args, "no_store", False)``. Leaving the
+    attribute off therefore does not mean "no store" -- it means "the real one",
+    and these tests were writing their ``ACCESSa1b2c3...`` fixture into the
+    developer's actual ``%LOCALAPPDATA%\\OpenCSI\\credentials.dat``. That was
+    discovered by noticing a *test* username in a real store, and confirmed by
+    watching the file's mtime change while the suite ran.
+
+    The store the persistence tests actually exercise is injected explicitly, at
+    the ``_open_store`` seam, rather than reached through this fallback.
     """
     from opencsi.cli.context import CliContext
 
@@ -473,6 +485,8 @@ def _fake_ctx():
         base_url = None
         json = False
         no_proxy = False
+        # Never touch the real credential store from a test.
+        no_store = True
 
     return CliContext(args=_Args(), stdout=io.StringIO(), stderr=io.StringIO())
 

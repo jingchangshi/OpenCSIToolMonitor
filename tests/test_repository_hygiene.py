@@ -262,5 +262,87 @@ class GeneratedFileTest(unittest.TestCase):
         self.assertEqual(offenders, [], f"generated files are tracked: {offenders}")
 
 
+class NoTestTouchesTheRealCredentialStoreTest(unittest.TestCase):
+    """No test may read or write the developer's real credential store.
+
+    This is the one leak that has no visible symptom until it matters. A test that
+    forgets ``no_store`` on a hand-built ``args`` object does not fail -- it opens
+    ``%LOCALAPPDATA%\\OpenCSI\\credentials.dat``, which is the real file, and
+    writes its fixture into it. Nothing goes red. What happens instead is that a
+    developer later runs ``opencsi login --renew`` and gets a confusing failure
+    against a credential named ``tester`` that they never created.
+
+    That is not hypothetical: it is what this test was written after. The fixture
+    was found in a real store, and the leak was confirmed by watching the file's
+    mtime change while ``tests/test_qr_login_semantics.py`` ran.
+
+    Checked structurally rather than behaviourally, because the behavioural
+    version -- run the suite, hash the store -- is slow and would only catch the
+    leak on a machine that has a store at all. What is asserted instead is the
+    rule that makes the leak impossible: a test that builds its own ``args`` must
+    say ``no_store``.
+    """
+
+    def test_hand_built_args_objects_declare_no_store(self) -> None:
+        """Any test-local ``_Args``/``args`` class must set ``no_store``.
+
+        Only classes that look like a CLI args stand-in are examined: they are
+        identified by carrying at least two attributes the real parser defines, so
+        an unrelated helper class named ``Args`` is not swept up.
+        """
+        import ast
+
+        #: Attributes the real parser sets on every command. A class carrying two
+        #: or more of them is standing in for `args`.
+        cli_attributes = {
+            "json",
+            "cdp",
+            "base_url",
+            "no_proxy",
+            "no_store",
+            "ports",
+            "timeout",
+            "renew_timeout",
+            "store_ttl",
+        }
+
+        offenders: list[str] = []
+        for path in sorted((ROOT / "tests").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                assigned = {
+                    t.id
+                    for stmt in node.body
+                    if isinstance(stmt, ast.Assign)
+                    for t in stmt.targets
+                    if isinstance(t, ast.Name)
+                }
+                if len(assigned & cli_attributes) < 2:
+                    continue
+                if "no_store" not in assigned:
+                    offenders.append(
+                        f"{path.name}:{node.lineno} class {node.name} "
+                        f"(has {sorted(assigned & cli_attributes)})"
+                    )
+
+        self.assertEqual(
+            offenders,
+            [],
+            "these stand-in args objects do not set no_store, so any code path "
+            "reading a credential store will open the developer's real one:\n"
+            + "\n".join(f"  {o}" for o in offenders),
+        )
+
+    def test_the_store_path_is_not_inside_the_repository(self) -> None:
+        """A store inside the checkout would be committed eventually."""
+        from opencsi.auth.windows_store import default_path
+
+        text = str(default_path()).replace("\\", "/").lower()
+        self.assertNotIn("opencsitoolmonitor", text)
+        self.assertNotIn("/workspace/", text)
+
+
 if __name__ == "__main__":
     unittest.main()
