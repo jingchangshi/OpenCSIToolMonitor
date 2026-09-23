@@ -868,6 +868,77 @@ class RenewalCapability:
         }
 
 
+def _stored_renewal_capability(
+    provider: CredentialProvider,
+) -> "RenewalCapability | None":
+    """Whether a store-backed provider can renew over plain HTTP.
+
+    Returns ``None`` when the provider has nothing to do with the secure store, so
+    the caller falls through to the browser check. A ``None`` here means "not my
+    question", not "no" -- collapsing the two would make this function answer
+    "unavailable" for a browser provider, which is exactly the conflation that hid
+    the store case.
+
+    The probe is deliberately *not* a live refresh. Asking GitCode would spend a
+    rotation to answer a status question, and with rotation in play that is a real
+    side effect. What is checked is the precondition the HTTP renewer actually
+    needs: a stored GitCode credential with an access token, reachable through the
+    same store the session is read from.
+    """
+    from .stored import StoredGitCodeCredentialSource, StoredOpenCsiCredentialProvider
+
+    store = None
+    for member in _provider_members(provider):
+        if isinstance(member, StoredOpenCsiCredentialProvider):
+            store = member.store
+            break
+    if store is None:
+        return None
+
+    try:
+        source = StoredGitCodeCredentialSource(store)
+        credential = source._credential()  # noqa: SLF001 - the source is the accessor
+    except Exception as exc:  # noqa: BLE001 - a status probe must never raise
+        return RenewalCapability(
+            False, f"the secure store could not be read ({type(exc).__name__})"
+        )
+
+    if credential is None or not getattr(credential, "access_token", None):
+        return RenewalCapability(
+            False,
+            "no GitCode credential is stored, so there is nothing to renew the "
+            "openCsiTool session against; run 'opencsi login --qr'",
+        )
+
+    if not getattr(credential, "refresh_token", None):
+        # Renewable right now, but not indefinitely: once the access token dies
+        # there is no way to extend it, and the user will need a scan. Said as a
+        # caveat rather than a failure, because renewal does work today.
+        return RenewalCapability(
+            True,
+            (
+                "renewable over HTTP from the stored GitCode credential, but no "
+                "refresh token is stored, so this will need a QR scan once the "
+                "GitCode token expires"
+            ),
+            caveated=True,
+        )
+
+    return RenewalCapability(
+        True,
+        "renewable over plain HTTP from the stored GitCode credential",
+    )
+
+
+def _provider_members(provider: CredentialProvider) -> list:
+    """``provider`` and, for a composite, everything it wraps."""
+    members = [provider]
+    inner = getattr(provider, "_providers", None)
+    if isinstance(inner, (list, tuple)):
+        members.extend(inner)
+    return members
+
+
 def renewal_capability(
     provider: CredentialProvider,
     *,
@@ -886,12 +957,24 @@ def renewal_capability(
     A renewer needs the *browser-level* WebSocket so it can open a background
     tab. Checking that here turns "renewal mysteriously fails later" into a clear
     diagnosis now.
+
+    The secure store is asked first, and deliberately so. This function used to
+    know only about ``CdpCookieProvider`` and answered "unavailable -- a manually
+    supplied token has no GitCode SSO session" for everything else. Once the store
+    became the normal credential source that was simply false: ``opencsi login
+    --renew`` renews a stored credential over plain HTTP with no browser, while
+    ``--status`` said the feature was unavailable and named the wrong reason.
+    Measured on this machine before the fix.
     """
+    stored = _stored_renewal_capability(provider)
+    if stored is not None:
+        return stored
+
     if not isinstance(provider, CdpCookieProvider):
         return RenewalCapability(
             False,
             f"the {getattr(provider, 'name', 'unknown')} credential cannot renew "
-            "itself; a manually supplied token has no GitCode SSO session",
+            "itself; it has no stored GitCode credential and no browser session",
         )
 
     try:

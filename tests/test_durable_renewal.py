@@ -564,5 +564,76 @@ class LateBoundTest(unittest.TestCase):
         self.assertEqual(store.load().opencsi.token, FAKE_OPENCSITOOL_TOKEN)
 
 
+class RenewalCapabilityTest(unittest.TestCase):
+    """``--status`` and ``doctor`` must report the store path as renewable.
+
+    ``renewal_capability`` knew only about ``CdpCookieProvider``. Once the secure
+    store became the normal source, a stored credential was reported "unavailable
+    -- a manually supplied token has no GitCode SSO session", which is both false
+    and the wrong reason. Measured live before the fix, on a machine where
+    ``login --renew`` then succeeded.
+    """
+
+    def test_a_stored_credential_reports_renewable(self) -> None:
+        from opencsi.auth.oauth_browser import renewal_capability
+
+        store = store_with()
+        with patch_store(store):
+            ctx = context_for(store)
+            provider = ctx.make_provider()
+            capability = renewal_capability(provider)
+
+        self.assertTrue(
+            capability.available,
+            f"a stored credential was reported as unable to renew: {capability.reason}",
+        )
+        self.assertNotIn("manually supplied token", capability.reason)
+
+    def test_a_stored_credential_without_a_refresh_token_is_caveated(self) -> None:
+        """Renewable now, but not indefinitely -- said as a caveat, not a failure."""
+        from opencsi.auth.oauth_browser import renewal_capability
+
+        store = store_with(refresh=None)
+        with patch_store(store):
+            ctx = context_for(store)
+            provider = ctx.make_provider()
+            capability = renewal_capability(provider)
+
+        self.assertTrue(capability.available)
+        self.assertTrue(
+            capability.caveated,
+            "a credential with no refresh token reported no caveat, so the user "
+            "would not know a QR scan is coming",
+        )
+
+    def test_an_empty_store_reports_unavailable_with_a_real_reason(self) -> None:
+        from opencsi.auth.oauth_browser import renewal_capability
+
+        store = MemoryCredentialStore()  # nothing stored at all
+        with patch_store(store):
+            ctx = context_for(store)
+            provider = ctx.make_provider()
+            capability = renewal_capability(provider)
+
+        self.assertFalse(capability.available)
+        self.assertIn("login --qr", capability.reason)
+
+    def test_a_manual_token_is_still_not_renewable(self) -> None:
+        """The browser-free path must not make a pasted token look renewable."""
+        from opencsi.auth.manual import ManualCookieProvider
+        from opencsi.auth.oauth_browser import renewal_capability
+
+        store = store_with()
+        with patch_store(store):
+            manual = ManualCookieProvider("pasted-token-abcdefghijklmnop")
+            capability = renewal_capability(manual)
+
+        self.assertFalse(
+            capability.available,
+            "a manually pasted token was reported as renewable against a stored "
+            "identity it has nothing to do with",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
