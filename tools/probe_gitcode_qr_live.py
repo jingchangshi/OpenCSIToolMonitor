@@ -149,7 +149,12 @@ def main() -> int:
         emit(f"    script srcs ({len(srcs)}):")
         for s in srcs:
             emit(f"      {mask(s)}")
-        emit(f"    html sample: {mask(re.sub(r'\\s+', ' ', html))[:400]}")
+        # Hoisted out of the f-string: Python before 3.12 rejects a backslash
+        # inside an f-string *expression*, and `r'\s+'` is one. Not a style
+        # choice -- on 3.10 this file failed to parse at all, so the probe could
+        # not even be inspected for its safety posture.
+        collapsed = re.sub(r"\s+", " ", html)
+        emit(f"    html sample: {mask(collapsed)[:400]}")
 
     # ---------------------------------------------------------------- step 3
     emit("\n[3] GET status-poll with BOGUS scene_id (harmless, no state change)")

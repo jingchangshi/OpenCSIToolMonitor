@@ -79,7 +79,11 @@ def main() -> int:
                 print(f"    json keys: {list(j) if isinstance(j, dict) else type(j).__name__}")
                 print(f"    body (masked): {mask(json.dumps(j, ensure_ascii=False))[:300]}")
             except Exception:
-                print(f"    body (masked): {mask(re.sub(r'\\s+', ' ', txt))[:300]}")
+                # Hoisted out of the f-string for the same reason as in
+                # probe_gitcode_qr_live.py: `r'\s+'` inside an f-string
+                # expression is a SyntaxError before Python 3.12.
+                collapsed = re.sub(r"\s+", " ", txt)
+                print(f"    body (masked): {mask(collapsed)[:300]}")
     print("\nNOTE: no POST/PUT/DELETE issued. No secret values printed.")
     return 0
 

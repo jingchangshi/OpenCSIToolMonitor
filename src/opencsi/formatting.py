@@ -148,10 +148,18 @@ def format_server_time(value: str | None, *, fmt: str = "%Y-%m-%d %H:%M") -> str
 
     A value that is not ISO-8601 (the plain ``YYYY-MM-DD HH:mm:ss`` form the API
     also uses) is returned unchanged rather than reinterpreted.
+
+    The trailing ``Z`` is normalised before parsing, because
+    :meth:`datetime.fromisoformat` did not accept it until Python 3.11. Without
+    this the function silently fell into its ``except ValueError`` branch on 3.10
+    and returned the raw string, so the same input rendered differently depending
+    on the interpreter -- a formatting bug that looks like a data bug.
     """
     if value is None or value == "":
         return PLACEHOLDER
     text = str(value).strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:

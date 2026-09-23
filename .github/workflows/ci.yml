@@ -170,6 +170,28 @@ jobs:
           sys.exit(main(['--help']))
           "
 
+  # Syntax is version-dependent and the matrix jobs only discover it late, one
+  # interpreter at a time and buried in a 1000-test log. Two probe scripts used an
+  # f-string containing `r'\s+'` inside the expression part, which is a
+  # SyntaxError before Python 3.12: on 3.10/3.11 those files failed to *parse*, so
+  # the tests that read them for their safety posture errored instead of passing.
+  #
+  # Compiling every file against the oldest supported interpreter first gives a
+  # one-line answer. 3.10 is the floor because pyproject declares
+  # `requires-python = ">=3.10"`.
+  oldest-supported-syntax:
+    name: every file compiles on Python 3.10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Compile every Python file
+        run: |
+          python -m compileall -q src tools tests
+          echo "compiled cleanly on $(python -V)"
+
   # ── 3. no credentials may ever be committed ──────────────────────────────
   secret-scan:
     name: secret scan

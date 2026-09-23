@@ -206,6 +206,21 @@ class ScalarFormattingTest(unittest.TestCase):
         # A half-hour offset must not be truncated to whole hours.
         self.assertEqual(format_server_time("2026-09-19T21:40:27+05:30"), "2026-09-19 21:40 UTC+5:30")
 
+    def test_a_zulu_timestamp_formats_identically_on_every_python(self) -> None:
+        """``fromisoformat`` did not accept a trailing ``Z`` until 3.11.
+
+        On 3.10 that raised ValueError, fell into the caller's except branch and
+        returned the *raw string* -- so the same server value rendered as
+        ``2026-09-19T21:40:27Z`` on one interpreter and ``2026-09-19 21:40 UTC+0``
+        on another. A formatting difference that depends on the Python version
+        reads as a data bug, and this asserts it cannot come back.
+        """
+        self.assertEqual(format_server_time("2026-09-19T21:40:27Z"), "2026-09-19 21:40 UTC+0")
+        # Lower-case z is accepted by the same rule.
+        self.assertEqual(format_server_time("2026-09-19T21:40:27z"), "2026-09-19 21:40 UTC+0")
+        # And it must not disturb a value that only ends in a Z-like letter.
+        self.assertEqual(format_server_time("not a date"), "not a date")
+
     def test_format_server_time_does_not_reinterpret_a_plain_timestamp(self) -> None:
         """A naive timestamp carries no offset, so none is invented."""
         self.assertEqual(format_server_time("2026-08-17 16:28:00"), "2026-08-17 16:28")
