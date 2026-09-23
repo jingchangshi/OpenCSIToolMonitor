@@ -206,6 +206,26 @@ class CliContext:
             return None
         return StoredGitCodeCredentialSource(store)
 
+    def _provider_is_store_backed(self, provider: CredentialProvider) -> bool:
+        """Whether ``provider`` is (or contains) the secure-store provider.
+
+        A composite hides which source answered, so it is looked into. The
+        question being asked is "could this credential have come from the store?",
+        and only the provider itself can answer it -- assuming the store is
+        relevant because the store *exists* is how a pasted token would end up
+        renewing against a stored identity.
+        """
+        from ..auth.stored import StoredOpenCsiCredentialProvider
+
+        if isinstance(provider, StoredOpenCsiCredentialProvider):
+            return True
+        members = getattr(provider, "_providers", None)
+        if isinstance(members, (list, tuple)):
+            return any(
+                isinstance(m, StoredOpenCsiCredentialProvider) for m in members
+            )
+        return False
+
     def make_renewer(
         self, provider: CredentialProvider, *, base_url: str
     ) -> "SessionRenewer | None":
@@ -236,18 +256,39 @@ class CliContext:
         timeout = float(getattr(self.args, "renew_timeout", 45.0) or 45.0)
         use_proxy = not bool(getattr(self.args, "no_proxy", False))
 
+        # A manually supplied token has no upstream session of its own, and it
+        # must never borrow one. Falling through to the store here would renew the
+        # *pasted* token by writing a session minted from a completely unrelated
+        # stored identity -- the request would succeed and the user would be
+        # signed in as someone else. Refusing is the only safe answer.
+        from ..auth.manual import ManualCookieProvider
+
+        if isinstance(provider, ManualCookieProvider):
+            return None
+
         http_renewers: list[Any] = []
 
         # A composite provider hides which source it used, so ask it: when the
         # value came from the store, the store is the credential source to hand
         # the HTTP renewer as well.
-        stored_source = self.make_stored_source()
-        if stored_source is not None:
-            http_renewers.append(
-                HttpOAuthRenewer(
-                    stored_source, base_url=base_url, timeout=timeout, use_proxy=use_proxy
+        #
+        # This is only consulted when the provider itself is store-backed or a
+        # browser. A provider that is neither (see the guard above) never reaches
+        # here, so the store cannot be used as a substitute for a credential the
+        # caller did not present.
+        if self._provider_is_store_backed(provider) or isinstance(
+            provider, CdpCookieProvider
+        ):
+            stored_source = self.make_stored_source()
+            if stored_source is not None:
+                http_renewers.append(
+                    HttpOAuthRenewer(
+                        stored_source,
+                        base_url=base_url,
+                        timeout=timeout,
+                        use_proxy=use_proxy,
+                    )
                 )
-            )
 
         if isinstance(provider, CdpCookieProvider):
             http_renewers.append(
@@ -256,8 +297,7 @@ class CliContext:
                 )
             )
 
-        if not http_renewers and not isinstance(provider, CdpCookieProvider):
-            # A manual token has no upstream session to re-run OAuth against.
+        if not http_renewers:
             return None
 
         browser = BrowserOAuthRenewer(
@@ -565,6 +605,7 @@ def build_parser(prog: str = "opencsi") -> argparse.ArgumentParser:
         contract,
         doctor,
         login,
+        logout,
         logs,
         prices,
         status,
@@ -583,6 +624,7 @@ def build_parser(prog: str = "opencsi") -> argparse.ArgumentParser:
         logs,
         doctor,
         login,
+        logout,
         tray,
         contract,
     ):

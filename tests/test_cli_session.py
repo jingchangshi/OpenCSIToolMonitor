@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def run_cli(
-    argv: list[str], *, client=None, renewer=None, provider=None
+    argv: list[str], *, client=None, renewer=None, provider=None, store=None
 ) -> tuple[int, str, str]:
     """Invoke ``main`` capturing stdout/stderr, optionally faking seams.
 
@@ -51,6 +51,12 @@ def run_cli(
     ``CliContext``, so those are the seams patched here rather than a
     module-level name in ``login`` -- patching a name the command no longer
     reads would make the test pass while the real path stayed broken.
+
+    ``store`` replaces the *stored GitCode source* the renewer reads, which is
+    how a test can present "a store holding someone else's credential" without
+    writing a DPAPI file. It is injected at that seam rather than by patching
+    ``open_default_store`` because the renewal decision is made from
+    ``make_stored_source``, not from the store constructor.
     """
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -60,6 +66,7 @@ def run_cli(
             ctx_module.CliContext.make_client,
             ctx_module.CliContext.make_provider,
             ctx_module.CliContext.make_renewer,
+            ctx_module.CliContext.make_stored_source,
         )
         try:
             if client is not None:
@@ -74,12 +81,19 @@ def run_cli(
                 ctx_module.CliContext.make_renewer = (
                     lambda self, prov, *, base_url: renewer
                 )
+            if store is not None:
+                from opencsi.auth.stored import StoredGitCodeCredentialSource
+
+                ctx_module.CliContext.make_stored_source = (
+                    lambda self: StoredGitCodeCredentialSource(store)
+                )
             code = main(argv)
         finally:
             (
                 ctx_module.CliContext.make_client,
                 ctx_module.CliContext.make_provider,
                 ctx_module.CliContext.make_renewer,
+                ctx_module.CliContext.make_stored_source,
             ) = originals
     return code, out.getvalue(), err.getvalue()
 
@@ -325,7 +339,14 @@ class RenewExitCodeTest(unittest.TestCase):
         self.assertEqual(renewer.calls, 1)
 
     def test_renew_rejects_a_manual_credential(self) -> None:
-        """A pasted token has no SSO session to re-run OAuth against."""
+        """A pasted token has no SSO session to re-run OAuth against.
+
+        The assertion is on "upstream session" rather than the old
+        "browser-backed": the reason a manual token cannot be renewed is that it
+        has no upstream identity, not that renewal needs a browser. A stored
+        GitCode credential renews over plain HTTP, so a message promising a
+        browser would now be wrong about the very path this round adds.
+        """
         from opencsi.auth.manual import ManualCookieProvider
 
         # ``--renew --manual`` is already refused by the argument parser, so
@@ -335,7 +356,40 @@ class RenewExitCodeTest(unittest.TestCase):
             ["login", "--renew"], provider=ManualCookieProvider("TOKENVALUE0123456789")
         )
         self.assertEqual(code, EXIT_USAGE)
-        self.assertIn("browser-backed", err)
+        self.assertIn("upstream session", err)
+
+    def test_a_manual_credential_is_not_renewed_from_the_store(self) -> None:
+        """The dangerous variant: a pasted token plus a populated store.
+
+        Renewing here would mint a session from the *stored* identity and hand it
+        back for the pasted token, so the request would succeed and the user would
+        quietly be signed in as whoever the store belonged to. Refusing is the
+        only safe answer, and it is checked separately from the empty-store case
+        above because that one passes for the wrong reason.
+        """
+        from opencsi.auth.manual import ManualCookieProvider
+        from opencsi.auth.store import (
+            CredentialBundle,
+            MemoryCredentialStore,
+            StoredGitCodeCredential,
+        )
+
+        store = MemoryCredentialStore(
+            CredentialBundle(
+                gitcode=StoredGitCodeCredential(
+                    access_token="stored-access-abcdefghijklmnop",
+                    refresh_token="stored-refresh-abcdefghijklmnop",
+                    username="someone-else",
+                )
+            )
+        )
+        code, _, err = run_cli(
+            ["login", "--renew"],
+            provider=ManualCookieProvider("TOKENVALUE0123456789"),
+            store=store,
+        )
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertIn("upstream session", err)
 
     def test_manual_and_renew_are_mutually_exclusive_at_the_parser(self) -> None:
         code, _, err = run_cli(["login", "--renew", "--manual"])

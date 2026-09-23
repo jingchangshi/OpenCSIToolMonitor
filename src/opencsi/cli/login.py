@@ -1044,20 +1044,23 @@ def _renew(ctx: CliContext) -> int:
     ~58 minutes for a cookie to expire is not a workable way to verify renewal,
     and forcing expiry by tampering with the server's cookie would prove
     nothing about the real flow.
+
+    **The provider no longer has to be a browser.** It used to, because the only
+    way to renew was to re-run OAuth against a GitCode session read out of a
+    browser profile. Now a stored GitCode credential does the same job over plain
+    HTTP, so a store-backed provider is a first-class case rather than an error.
+    The check below is therefore "is there a renewer?", not "is it a browser?" --
+    asking the second question is what previously made the durable path
+    unreachable from this command.
     """
     provider = ctx.make_provider()
-    if not isinstance(provider, CdpCookieProvider):
-        raise UsageError(
-            "--renew needs a browser-backed credential; a manually supplied "
-            "token has no GitCode SSO session to renew against"
-        )
-
     base_url = ctx.args.base_url or "https://opencsitool.com"
     renewer = ctx.make_renewer(provider, base_url=base_url)
     if renewer is None:
         raise UsageError(
-            "--renew needs a browser-backed credential; a manually supplied "
-            "token has no GitCode SSO session to renew against"
+            "--renew needs a credential with an upstream session to renew; a "
+            "manually supplied token has none, and neither does an empty store. "
+            "Sign in first with 'opencsi login --qr'."
         )
     session = SessionManager(provider, renewer=renewer)
 

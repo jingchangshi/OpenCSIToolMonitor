@@ -102,18 +102,45 @@ def _frozen_tray_sibling() -> Path | None:
     only the CLI is still a legitimate build, and registering a path that does
     not exist would make sign-in fail silently -- the one outcome a startup entry
     must never have.
+
+    ``os.path`` is used rather than ``pathlib`` for the same portability reason
+    :func:`_basename` exists: ``Path(r"C:\\App\\opencsi.exe").parent`` is
+    ``Path(".")`` on POSIX, because a backslash is an ordinary character there.
+    That would look for ``opencsi-tray.exe`` in the *current directory* and, on a
+    cross-platform check, quietly report "no sibling" for an install that has
+    one -- which is the silent-wrong-answer this function is written to avoid.
+
+    In a real frozen build this only ever runs on Windows, where both forms agree.
+    Getting it right anyway means the decision can be *tested* from any platform,
+    which is the difference between a covered branch and an assumed one.
     """
     executable = getattr(sys, "executable", None)
     if not executable:
         return None
     try:
-        candidate = Path(executable).resolve().parent / TRAY_BINARY_NAME
-    except OSError:
+        parent = os.path.dirname(executable.replace("\\", "/"))
+        candidate = Path(os.path.join(parent, TRAY_BINARY_NAME))
+    except (OSError, ValueError):
         return None
     try:
         return candidate if candidate.is_file() else None
     except OSError:
         return None
+
+
+def _basename(executable: str) -> str:
+    """The file name from a path that may use either separator.
+
+    ``Path(name).name`` is not enough here. On POSIX, ``Path(r"C:\\App\\x.exe").name``
+    is the *whole string*, because a backslash is an ordinary character there --
+    so a Windows path tested on Linux (which is what the test suite does, and
+    what a cross-platform build would do) reports the full path instead of the
+    file name and every name comparison silently fails.
+
+    Splitting on both separators costs nothing and removes the dependency on
+    which OS is running the check.
+    """
+    return executable.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _is_frozen_tray() -> bool:
@@ -126,7 +153,7 @@ def _is_frozen_tray() -> bool:
     executable = getattr(sys, "executable", None)
     if not executable:
         return False
-    return Path(executable).name.lower() == TRAY_BINARY_NAME.lower()
+    return _basename(executable).lower() == TRAY_BINARY_NAME.lower()
 
 
 def startup_command_for_tray() -> tuple[str, str]:

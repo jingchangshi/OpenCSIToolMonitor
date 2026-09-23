@@ -79,7 +79,20 @@ jobs:
         run: python -m pip install -e . --no-deps
 
       - name: Install test dependencies
-        run: python -m pip install --upgrade pip pytest
+        run: python -m pip install --upgrade pip pytest Pillow
+
+      # Pillow is installed for the *tests*, not for the package. The package
+      # declares no runtime dependency on it -- it is the optional `qr` extra --
+      # but the QR rendering tests inspect a real WeChat code fixture and measure
+      # its dot pitch, which cannot be done without an image library. Without
+      # this, seven of them error with `ModuleNotFoundError: No module named
+      # 'PIL'` on a clean runner, which is what CI was reporting.
+      #
+      # `--no-deps` on the package install above is what keeps that distinction
+      # honest: the package still has to import on an air-gapped machine, and the
+      # `stdlib-only` job is what proves it.
+      - name: Confirm Pillow is available to the rendering tests
+        run: python -c "import PIL; print('Pillow', PIL.__version__)"
 
       # A guard, not a formality: this is the step whose absence caused the
       # failure above, and a silent no-op install would restore it.
@@ -315,11 +328,39 @@ jobs:
         shell: pwsh
         run: |
           $cli = Resolve-Path "dist\opencsi.exe"
-          $out = & $cli.Path login --status 2>&1 | Out-String
+          # `--no-store` makes this a purely local check: the frozen build must
+          # be able to *find* the credential store and report its state without a
+          # signed-in user and without reaching the network. A CI runner has
+          # neither a stored credential nor opencsitool.com, so a check that
+          # required either would fail for reasons that say nothing about the
+          # build.
+          $out = & $cli.Path login --status --no-store 2>&1 | Out-String
           Write-Host $out
-          # `--status` is read-only and must not fail merely because nobody has
-          # signed in on a fresh runner; it reports the absence instead.
           if ($LASTEXITCODE -ne 0) { throw "login --status exited $LASTEXITCODE" }
+
+          # The frozen build must resolve the store path relative to the user's
+          # profile, not to the unpacked bundle. A `_MEIPASS`-relative path would
+          # put credentials somewhere nobody looks, and would look correct here
+          # while silently losing them between runs.
+          $logout = & $cli.Path logout --no-store 2>&1 | Out-String
+          Write-Host $logout
+          # --no-store on logout is a usage error, deliberately: it says there is
+          # nothing to clear rather than pretending to have cleared something.
+          if ($LASTEXITCODE -eq 0) {
+            throw "logout --no-store should refuse, not silently report success"
+          }
+
+      - name: The frozen CLI can list its own commands
+        shell: pwsh
+        run: |
+          $cli = Resolve-Path "dist\opencsi.exe"
+          $out = & $cli.Path --help 2>&1 | Out-String
+          Write-Host $out
+          # Named explicitly because `logout` is new this round and a build that
+          # did not pick up the module would still pass every other check.
+          foreach ($command in @('login', 'logout', 'usage', 'doctor', 'tray')) {
+            if ($out -notmatch "\b$command\b") { throw "the help output omits '$command'" }
+          }
 
       - name: Upload the binaries
         if: always()
