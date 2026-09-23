@@ -15,6 +15,7 @@ API:
 Run: python tools/verify_qr_render.py
 Requires: zxing-cpp and Pillow (verification only -- never runtime deps).
 """
+#: labels: LIVE, GET_ONLY
 
 from __future__ import annotations
 

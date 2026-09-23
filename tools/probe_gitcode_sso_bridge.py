@@ -52,6 +52,7 @@ Labels: LIVE, NETWORK, AUTH_SIDE_EFFECT (it writes cookies into the target
 profile), GET only against every remote API. It never prints a cookie value. It
 is never run by the test suite and is never part of CI.
 """
+#: labels: LIVE, NETWORK, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

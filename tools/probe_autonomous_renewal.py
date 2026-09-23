@@ -35,6 +35,7 @@ browser holds. Not read-only, and must not be wired into CI (§44).
 
 Run: python tools/probe_autonomous_renewal.py
 """
+#: labels: LIVE, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

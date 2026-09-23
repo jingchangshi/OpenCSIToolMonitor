@@ -39,6 +39,7 @@ dedicated auth profile and writes synthetic marker cookies. It reaches the
 network only at the loopback CDP endpoint, never prints a cookie value, never
 touches the user's own Chrome profile, and never approves an OAuth consent.
 """
+#: labels: LIVE, NETWORK, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

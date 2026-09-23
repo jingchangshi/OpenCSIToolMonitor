@@ -12,6 +12,7 @@ number, a duration, a count or a boolean.
 Read-only: no command here mutates anything, none is given --renew, and no cookie
 value or token is printed -- only the paths at which the mask itself appears.
 """
+#: labels: LIVE, GET_ONLY
 
 from __future__ import annotations
 

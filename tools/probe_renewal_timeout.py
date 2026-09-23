@@ -10,6 +10,7 @@ short budget while timing it, then check whether a token exists and how long it
 has left. Read-only apart from the delete, which is the operation under test and
 is reversed by the renewal itself.
 """
+#: labels: LIVE, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

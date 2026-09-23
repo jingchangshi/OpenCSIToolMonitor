@@ -30,6 +30,7 @@ Usage
 -----
     python tools/probe_oauth_spa_static.py [--scratch DIR] [--json OUT]
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 
 from __future__ import annotations
 

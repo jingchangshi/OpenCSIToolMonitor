@@ -34,6 +34,7 @@ navigations to gitcode.com and opencsitool.com; the latter can mint a session
 cookie server-side, which is why it is not run by the test suite and is never
 part of CI (objective §44). It never prints a cookie or storage value.
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 
 from __future__ import annotations
 

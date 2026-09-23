@@ -8,6 +8,7 @@ This is read-only in the strict sense: it calls ``Storage.getCookies`` and
 nothing else. It performs no navigation, writes no cookie, touches no network
 of its own, and never prints a token value.
 """
+#: labels: LIVE, GET_ONLY
 
 from __future__ import annotations
 

@@ -41,6 +41,7 @@ Usage
 -----
     python tools/probe_oauth_spa_pure_http.py --port 9333
 """
+#: labels: LIVE, NETWORK, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

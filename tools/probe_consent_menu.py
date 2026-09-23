@@ -7,6 +7,7 @@ having a separate state.
 
 Touches no network and writes nothing.
 """
+#: labels: LIVE, GET_ONLY
 
 from __future__ import annotations
 

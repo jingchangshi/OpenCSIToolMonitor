@@ -8,6 +8,7 @@ visible, and exits on its own so the probe can be run unattended.
 Uses the offline stub client, so it touches no network and does not depend on
 the browser being up.
 """
+#: labels: LIVE, GET_ONLY
 
 from __future__ import annotations
 

@@ -6,6 +6,7 @@ documented from static bundle evidence instead.
 
 Never prints cookie/token/secret values.
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 from __future__ import annotations
 
 import http.cookiejar

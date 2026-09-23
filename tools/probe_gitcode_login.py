@@ -5,6 +5,7 @@ Prints no cookie or token values.
 
 Run:  python tools/probe_gitcode_login.py
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 
 from __future__ import annotations
 

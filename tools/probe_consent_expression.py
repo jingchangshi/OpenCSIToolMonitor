@@ -12,6 +12,7 @@ tab it opens is closed.
 
 Read-only apart from opening and closing its own background tab.
 """
+#: labels: LIVE, GET_ONLY
 
 from __future__ import annotations
 

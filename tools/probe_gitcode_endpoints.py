@@ -28,6 +28,7 @@ Labels: LIVE, NETWORK, GET only. It navigates one background tab in the profile
 you point it at and issues no request of its own. It never prints a query string,
 and reads no response body at all.
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 
 from __future__ import annotations
 

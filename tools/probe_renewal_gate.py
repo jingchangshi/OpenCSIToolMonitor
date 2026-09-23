@@ -30,6 +30,7 @@ passes, and touches no business endpoint with anything but GET.
 
 Run: python tools/probe_renewal_gate.py
 """
+#: labels: LIVE, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

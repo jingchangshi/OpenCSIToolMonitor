@@ -45,6 +45,7 @@ Usage
 
 Labels: LIVE, NETWORK, AUTH_SIDE_EFFECT. It never prints a secret.
 """
+#: labels: LIVE, NETWORK, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

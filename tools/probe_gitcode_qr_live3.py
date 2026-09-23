@@ -2,6 +2,7 @@
 
 Every call is GET or OPTIONS. No state-mutating verb is issued.
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 from __future__ import annotations
 
 import http.cookiejar

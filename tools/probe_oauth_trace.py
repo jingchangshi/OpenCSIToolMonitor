@@ -10,6 +10,7 @@ touches the user's current page, and never prints a token value. Page text is
 read only in the failure branch, only to name the blocking control, and only
 the first 400 characters.
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 
 from __future__ import annotations
 

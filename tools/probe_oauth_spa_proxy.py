@@ -36,6 +36,7 @@ Usage
     python tools/probe_oauth_spa_proxy.py
     python tools/probe_oauth_spa_proxy.py --profile "%LOCALAPPDATA%\\OpenCSI\\auth-test-profile"
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 
 from __future__ import annotations
 

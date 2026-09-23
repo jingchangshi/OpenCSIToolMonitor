@@ -12,6 +12,7 @@ sensitive is printed -- only state, counts and lifetimes.
 
 Run: python tools/probe_tray_actions.py
 """
+#: labels: LIVE, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

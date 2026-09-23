@@ -2,6 +2,7 @@
 
 No state-mutating verb is issued. No cookie/token values are printed.
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 from __future__ import annotations
 
 import http.cookiejar

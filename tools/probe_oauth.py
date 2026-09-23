@@ -5,6 +5,7 @@ masked). It never prints a cookie or token value.
 
 Run:  python tools/probe_oauth.py
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 
 from __future__ import annotations
 

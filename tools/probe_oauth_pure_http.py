@@ -24,6 +24,7 @@ an openCsiTool token -- that is an authentication action, the same one silent
 renewal performs, not a business write. Read-only with respect to openCsiTool's
 data.
 """
+#: labels: LIVE, NETWORK, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

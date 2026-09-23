@@ -3,6 +3,7 @@
 GET only. Never POSTs/PUTs/DELETEs. Never prints cookie/token/secret VALUES.
 Run: python tools/probe_gitcode_qr_live.py
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 from __future__ import annotations
 
 import http.cookiejar

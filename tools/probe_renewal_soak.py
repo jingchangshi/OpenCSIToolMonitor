@@ -22,6 +22,7 @@ the thing being observed is the shipped configuration, not a test-only shortcut.
 Run: python tools/probe_renewal_soak.py --minutes 70
 Writes nothing except a line per sample. Never prints a credential.
 """
+#: labels: LIVE, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

@@ -37,6 +37,7 @@ Usage
     python tools/probe_oauth_spa_dynamic.py --port 9333
     python tools/probe_oauth_spa_dynamic.py --port 9333 --json OUT.json
 """
+#: labels: LIVE, NETWORK, GET_ONLY
 
 from __future__ import annotations
 

@@ -25,6 +25,7 @@ touches no network, never prints a token value, and writes nothing to disk. It
 does modify a browser's cookie store, so it is not read-only and must not be
 wired into CI.
 """
+#: labels: LIVE, NETWORK, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

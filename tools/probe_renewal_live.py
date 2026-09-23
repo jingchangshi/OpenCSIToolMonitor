@@ -3,6 +3,7 @@
 Read-only against the live browser: it creates one background target, follows
 the OAuth redirect and reports where it lands. It never prints a cookie value.
 """
+#: labels: LIVE, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

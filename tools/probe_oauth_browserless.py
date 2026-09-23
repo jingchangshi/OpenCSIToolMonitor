@@ -51,6 +51,7 @@ and can mint a session cookie), GET only apart from ``checkOrAuthorize``, which
 is a status query. It never prints a secret. It is never run by the test suite
 and is never part of CI.
 """
+#: labels: LIVE, NETWORK, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 

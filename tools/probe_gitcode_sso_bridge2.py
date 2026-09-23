@@ -26,6 +26,7 @@ Labels: LIVE, NETWORK, AUTH_SIDE_EFFECT (plants cookies in the target profile),
 GET only against every remote endpoint. It never prints a body value. It is never
 run by the test suite.
 """
+#: labels: LIVE, NETWORK, AUTH_SIDE_EFFECT
 
 from __future__ import annotations
 
