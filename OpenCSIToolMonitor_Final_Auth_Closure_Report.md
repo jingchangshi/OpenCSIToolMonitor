@@ -17,17 +17,33 @@ Nine independent verdicts, one per row §24 names. No single overall PASS — se
 rows are genuinely incomplete, and collapsing them would hide exactly what this
 report exists to say.
 
-| Row | Verdict | Basis |
+### §50 verdict table — one row per capability
+
+No row is covered by another, and no overall `PASS` stands in for a `NOT EXECUTED`.
+Every `EXECUTED` row below was run against the live account `shijingchang`
+(employeeId 653124) on a real Windows 11 machine.
+
+| Capability | Verdict | Basis |
 | --- | --- | --- |
-| **Durable QR login** | `VERIFIED` — **real WeChat scan completed** | A real scan against a real account (`shijingchang`, employeeId 653124) completed with exit 0, wrote both credentials to `%LOCALAPPDATA%\OpenCSI\credentials.dat`, and a *separate* process read a 57-minute session from it and returned live data. During the scan, 43 chrome/msedge processes were already running and the delta was **0** — no browser was started. Supersedes the earlier `PRE_SCAN_VERIFIED`. |
-| **Durable browserless usage** | `VERIFIED` | Two independent processes, one DPAPI store, no browser: process A writes, process B reads the same token. `tools/acceptance_durable.py`, all checks PASS. Re-confirmed live after killing every OpenCSI process. |
-| **Durable renewal** | `VERIFIED` — **live, and offline A→B→C** | `login --renew` against the live account reported `RENEWED`, mechanism `stored-oauth`, *token changed: yes*, *server accepted it: yes*, exit 0, browser delta 0, and **zero** QR codes issued. A fresh process then read the renewed session. Independently, `tools/acceptance_durable_renewal.py` proves A writes → B renews via the production wiring → C reads, in three real processes. |
-| **GitCode refresh-token rotation** | endpoint: `VERIFIED` / implementation: `VERIFIED` / **normal-lifecycle integration: `VERIFIED`** / live rotation: **`NOT EXECUTED`** | Endpoint confirmed by probe: `POST https://gitcode.com/oauth/token?grant_type=refresh_token&…`. `RefreshingGitCodeRenewer` is now reachable from `make_renewer()`, closing the gap where the refresher existed and nothing called it. Live rotation is still unobserved — and cannot be honestly claimed, because the QR response carries no `expires_in`, so every stored credential has an unknown GitCode expiry and the refresh is attempted on every run. On this account that refresh is *refused* (HTTP 400), so no successful rotation has been seen. |
-| **Tray browserless startup** | `VERIFIED` — live | `opencsi-tray.exe --once` read the live renewed session (`total tokens: 4,237,890,625`, `credential: 53m`) with exit 0, and its `--json` surface was checked to contain no credential value. `auto_recover_auth_host` defaults to `False`, so the normal path starts no browser engine. |
-| **Windows startup registration** | `VERIFIED` — live registry round trip | Installed, read back from `HKCU\...\Run`, and removed. The value was `dist\opencsi-tray.exe`, never the bare CLI. See below. |
-| **CI** | `VERIFIED` — **all 14 jobs green** | Real GitHub Actions runs. See §11. |
+| **Durable QR persistence** | `VERIFIED` | Real scan, exit 0, both credentials written to `%LOCALAPPDATA%\OpenCSI\credentials.dat`. A separate process read them back. |
+| **Real QR scan** | `VERIFIED` — **LIVE** | The scan was actually performed with WeChat on a real phone. `login --qr` printed "Login confirmed", "openCsiTool session established and verified", "Stored: …credentials.dat". Supersedes the earlier `PRE_SCAN_VERIFIED`. |
+| **Durable browserless usage** | `VERIFIED` — **LIVE** | Every OpenCSI process was killed (0 remaining), then a fresh `opencsi usage` returned live data (4,237,890,625 tokens / 32,026 requests) with **zero** QR scans. `tools/acceptance_durable.py` independently PASSes. |
+| **Production-chain openCsi renewal** | `VERIFIED` | `tools/acceptance_durable_renewal.py`: A writes T1 + A1/R1 → B renews through the *production* wiring → C reads T2. B does not call `remember_token(T2)`; only the HTTP opener is scripted. All six checks PASS. |
+| **Live openCsi renewal** | `VERIFIED` — **LIVE** | Run at 7m53s remaining: `login --renew` → `RENEWED`, `stored-oauth`, *token changed: yes*, *server accepted it: yes*, exit 0. Expiry moved 02:30:11 → 03:22:19 (7.9 min → 59.9 min). Zero QR codes issued; browser delta 0; a fresh process then read the renewed session. |
+| **GitCode refresh endpoint** | `VERIFIED` | `POST https://gitcode.com/oauth/token?grant_type=refresh_token&…`, confirmed by `tools/probe_gitcode_refresh.py`; 15-day `expires_in`. |
+| **GitCode normal-lifecycle integration** | `VERIFIED` | `RefreshingGitCodeRenewer` is reachable from `make_renewer()`. Before this round the refresher was dead code — `rg` found it only in its own module and in tests. Now covered end-to-end by `test_a_rotated_gitcode_credential_reaches_the_store_and_the_oauth_leg`, which stubs only `_post` and is mutation-verified against a deleted rotation write. |
+| **Live GitCode rotation** | **`NOT EXECUTED`** | No `R1 → R2` was ever observed from the live server. The refresh is *attempted* on every run (the QR response carries no `expires_in`, so the expiry is unknown and `needs_refresh` says yes) and is **refused**: `HTTP 400 BAD_REQUEST`. Attempted many times, succeeded zero times. |
+| **Tray no-browser behavior** | `VERIFIED` — **LIVE** | 43 chrome/msedge processes were already running throughout; the OpenCSI-attributable delta was consistently 0 across the scan, renewal and tray read. |
+| **Tray real stored-session startup** | `VERIFIED` — **LIVE** | `opencsi-tray.exe --once` read the *renewed* live session: `state: OK`, `total tokens: 4,237,890,625`, `credential: 59m`, exit 0. Its `--json` surface was checked against the actual store contents and contains no credential value. |
+| **CI** | `VERIFIED` — **all 14 jobs green** | Real GitHub Actions runs, including the commit carrying this round's rotation test. See §11. |
+| **Secret safety** | `VERIFIED` | 21 dedicated tests over every output surface; scanner clean; no real credential value in the tracked files; no test can write to the real store (see below). |
 | **Repository hygiene** | `VERIFIED` | 158 tracked files, every text blob stored LF; zero scratch tools; enforced by `tests/test_repository_hygiene.py`. |
-| **Secret safety** | `VERIFIED` | 21 dedicated tests over every output surface; scanner clean; no real credential value found in the tracked files; and no test can write to the real store (see below). |
+
+Rows from the previous revision that said `NOT EXECUTED` and now say `VERIFIED`
+were all gated on the same missing thing: a real phone. That gate has been passed.
+The one row that remains `NOT EXECUTED` — live GitCode rotation — is not blocked by
+a phone; it is blocked by the server refusing the refresh, which is a finding
+rather than an omission.
 
 ### What is *not* claimed
 
