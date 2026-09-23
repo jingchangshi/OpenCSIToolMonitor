@@ -1485,6 +1485,28 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
   have produced untestable code, which is the reason to stop rather than a reason
   to guess.
 
+### Why the live halves still cannot run, re-measured on the current build
+
+The blockers for Q1's scan, Q3's renewal and Q4's rotation are the same one, and it
+was measured rather than assumed. There is no live session anywhere on this machine
+to renew:
+
+```text
+%LOCALAPPDATA%\OpenCSI\credentials.dat     absent (deleted; the suite no longer creates it)
+auth-host endpoint  http://127.0.0.1:9224  HeadlessChrome/153.0.8010.53
+  cookies via CDP                          total cookies: 0
+  names                                    []
+```
+
+The auth-host is OpenCSI's own hidden engine, and it holds **zero** cookies because
+no first sign-in has ever been completed in its profile. So the state is not
+"renewal failed" but "there has never been a session to renew" — and the only way
+to create one is a WeChat scan, which needs a phone.
+
+This also means the renewal attempted during this round's acceptance was
+meaningless, and it is recorded that way rather than as a product failure: the
+credential it found in the store was a **test fixture**, not a real one. See below.
+
 ### The defect acceptance found that no test could
 
 Running the real binaries against the real store surfaced a bug the whole suite was
