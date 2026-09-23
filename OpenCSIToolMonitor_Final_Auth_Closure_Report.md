@@ -102,10 +102,10 @@ with DPAPI at `CurrentUser` scope, and is read by whichever process runs next.
 
 ```text
 starting HEAD   aadc5d0  chore: update tools
-ending HEAD     f8cdb64  fix(ci): stop the frozen steps inheriting an expected non-zero status
+ending HEAD     cc6046c  fix(test): stop tests writing fixtures into the real credential store
 ```
 
-Twenty commits, one per planned step, in the order §3 fixes:
+Twenty-one commits, one per planned step, in the order §3 fixes:
 
 ```text
 f16a880 chore: remove investigation scratch files
@@ -129,15 +129,22 @@ e96d091 fix(tray): report the startup source even when the key cannot be read
 46aa869 feat(doctor): report the credential store locally, before anything else
 11b2280 fix(ci): relax ErrorActionPreference around steps that read stderr
 f8cdb64 fix(ci): stop the frozen steps inheriting an expected non-zero status
+cc6046c fix(test): stop tests writing fixtures into the real credential store
 ```
 
 `ending HEAD` names the last commit that changed **source, tests or tools**, not
 the true tip. A report cannot contain its own SHA — writing it would change the
 hash — so the anchor is the last behavioural change, which is what a reader needs
-to check out.
+to check out. The commits that carry this report come after it and are not listed,
+for the same reason.
 
-Twenty-seven commits below, each a real work item; the commits that carry this
-report are additional and are not listed, for the same reason:
+```text
+61 files changed, 16301 insertions(+), 10236 deletions(-)   (this round, excluding this report)
+```
+
+**The twenty-seven commits below are the *previous* round**, and they are listed
+only because this round builds directly on them. They are all ancestors of
+`aadc5d0` — the starting HEAD above — so they are not part of this round's diff:
 
 ```text
 56d5974  auth: separate GitCode success from openCsiTool success
@@ -169,14 +176,10 @@ b627650  feat(tray): wire the hidden auth host into the monitor, as section 30 a
 baa1f3a  fix(auth): say why renewal is available and still will not work
 ```
 
-```text
-20 files changed, 4901 insertions(+), 397 deletions(-)   (this round, excluding this report)
-```
-
 | Metric | Before | After |
 | --- | --- | --- |
-| pytest | 860 passed, 1 skipped, 182 subtests | **1077 passed, 1 skipped, 186 subtests** |
-| unittest | Ran 861, OK (skipped=1) | **Ran 1078, OK (skipped=1)** |
+| pytest | 888 passed, 1 skipped, 182 subtests | **1077 passed, 1 skipped, 186 subtests** |
+| unittest | Ran 889, OK (skipped=1) | **Ran 1078, OK (skipped=1)** |
 
 The behavioural change, stated as the user experiences it:
 
