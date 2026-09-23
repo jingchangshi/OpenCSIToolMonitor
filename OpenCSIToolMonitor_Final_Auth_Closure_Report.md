@@ -69,10 +69,10 @@ with DPAPI at `CurrentUser` scope, and is read by whichever process runs next.
 
 ```text
 starting HEAD   aadc5d0  chore: update tools
-ending HEAD     46aa869  feat(doctor): report the credential store locally, before anything else
+ending HEAD     f8cdb64  fix(ci): stop the frozen steps inheriting an expected non-zero status
 ```
 
-Eighteen commits, one per planned step, in the order §3 fixes:
+Twenty commits, one per planned step, in the order §3 fixes:
 
 ```text
 f16a880 chore: remove investigation scratch files
@@ -94,6 +94,8 @@ ae3ad2e fix: stop starting a browser engine on the normal path (objective §9.2)
 e96d091 fix(tray): report the startup source even when the key cannot be read
 6a05e41 test(acceptance): run the durable path as separate real processes
 46aa869 feat(doctor): report the credential store locally, before anything else
+11b2280 fix(ci): relax ErrorActionPreference around steps that read stderr
+f8cdb64 fix(ci): stop the frozen steps inheriting an expected non-zero status
 ```
 
 `ending HEAD` names the last commit that changed **source, tests or tools**, not
@@ -1291,6 +1293,24 @@ to a defect this project actually suffered, not to a best practice.
 
 **Status: VERIFIED — all 14 entries green, on real GitHub Actions runners.**
 
+```text
+run f8cdb64   completed success   14 ok / 0 fail
+  OK  tests (python 3.10 on ubuntu-latest)
+  OK  tests (python 3.12 on ubuntu-latest)
+  OK  tests (python 3.13 on ubuntu-latest)
+  OK  tests (python 3.14 on ubuntu-latest)
+  OK  tests (python 3.10 on windows-latest)
+  OK  tests (python 3.12 on windows-latest)
+  OK  tests (python 3.13 on windows-latest)
+  OK  tests (python 3.14 on windows-latest)
+  OK  import with no optional extras
+  OK  every file compiles on Python 3.10
+  OK  secret scan
+  OK  probe safety posture
+  OK  frozen binaries (windows)
+  OK  repository hygiene
+```
+
 ### What it took to get there, and what that says
 
 The previous round's report said CI was "written and locally rehearsed; never
@@ -1342,6 +1362,14 @@ written off:
   that the Run key is unreadable, and `logout --no-store`'s refusal. Under Actions'
   preference that raises a terminating error before any assertion runs. The
   preference is relaxed around those three calls and restored immediately after.
+- **Actions ends each pwsh step with `exit $LASTEXITCODE`.** So a step inherits the
+  *last native command's* status — and two steps deliberately end on a command that
+  is supposed to fail: `doctor` (no session on a runner) and `logout --no-store` (a
+  refusal). Both asserted the right thing and then failed the step anyway, with a
+  bare `exit code 1` and nothing in the log to say which assertion had passed. This
+  is the one that took longest to find, because the log showed the *successful*
+  assertion immediately above the failure. Each step now resets the status and
+  exits 0 explicitly, after everything that can throw.
 
 Design notes:
 
