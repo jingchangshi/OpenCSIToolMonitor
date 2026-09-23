@@ -427,15 +427,18 @@ class RefreshPolicyTest(unittest.TestCase):
 class BrowserRecoveryTest(unittest.TestCase):
     """Automatic recovery from "the browser is not running" (objective §68, §30).
 
-    Two layers, with different defaults, because they cost the user differently:
+    **Both** layers are now opt-in (objective §9.2). They used to differ -- the
+    hidden host ran by default because it put nothing on the desktop -- but that
+    reasoning belonged to a design where the browser *was* the credential store.
+    Now the secure store is consulted first, so:
 
-    * the **hidden** auth host (§30) is on by default -- it puts nothing on the
-      desktop, and §61 says the user must not see ``BROWSER_UNAVAILABLE`` merely
-      because Chrome was not already running;
-    * the **visible** browser is opt-in, because a monitor that opens windows
-      unasked is not a monitor anyone keeps.
+    * "nothing is signed in yet" and "the browser is not running" are different
+      states, and the remedy for the first is a QR scan, not a browser;
+    * a tray that starts a Chromium engine on every machine that has simply not
+      signed in yet is a tray that surprises its user.
 
-    These tests pin both halves, and the ordering between them.
+    What remains is the ordering: when a user *has* opted in, the invisible
+    option must still be tried before the visible one.
 
     Every test here patches ``_try_auth_host``. Without that the hidden-host layer
     would call ``AuthBrowserHost.ensure_running`` for real, which starts a browser
@@ -469,16 +472,35 @@ class BrowserRecoveryTest(unittest.TestCase):
         launch.assert_not_called()
         self.assertIs(snap.state, MonitorState.BROWSER_UNAVAILABLE)
 
-    def test_the_hidden_host_is_tried_without_any_opt_in(self) -> None:
-        """§30/§61: no BROWSER_UNAVAILABLE merely because Chrome was not started.
+    def test_the_hidden_host_is_not_tried_without_opt_in(self) -> None:
+        """§9.2: a browser engine is no longer the normal path.
 
-        The hidden host is the one recovery that costs the user nothing visible,
-        so it runs by default. Making it opt-in would leave the post-reboot case
-        -- the exact case §30 describes -- reporting a failure whose remedy is not
-        "opt in" but "nothing was signed in yet".
+        This is the change this round makes, and it is asserted directly rather
+        than left to the config default: the host must not start merely because
+        no credential was found. A machine that has never signed in should be
+        told to scan a QR code, not silently have Chromium opened on it.
         """
         clock = _Clock()
         service = self._failing(clock)
+        self._auth_host.return_value = True
+
+        with mock.patch(
+            "opencsi.auth.browser_launch.launch_debug_browser"
+        ) as launch:
+            service.refresh_now(block=True)
+
+        self._auth_host.assert_not_called()
+        launch.assert_not_called()
+
+    def test_the_hidden_host_runs_when_the_user_opts_in(self) -> None:
+        """Opting in still works, because migration needs it (§19).
+
+        A user with a working session in a browser profile and an empty store can
+        turn this on to seed the store from that profile. The capability is kept;
+        only the default changed.
+        """
+        clock = _Clock()
+        service = self._failing(clock, auto_recover_auth_host=True)
         self._auth_host.return_value = True
 
         with mock.patch(
@@ -496,9 +518,15 @@ class BrowserRecoveryTest(unittest.TestCase):
         whose Chrome was not yet running, and the hidden host would only be
         reached when that failed -- inverting §30 for the users who never opted
         in to windows.
+
+        The auth host is opted in explicitly: the ordering only exists to be tested
+        when both layers are permitted, and with the new default the host is never
+        reached.
         """
         clock = _Clock()
-        service = self._failing(clock, auto_recover_browser=True)
+        service = self._failing(
+            clock, auto_recover_browser=True, auto_recover_auth_host=True
+        )
         self._auth_host.return_value = True
 
         with mock.patch(
@@ -530,9 +558,16 @@ class BrowserRecoveryTest(unittest.TestCase):
         self.assertIs(snap.state, MonitorState.BROWSER_UNAVAILABLE)
 
     def test_the_hidden_host_is_rate_limited_too(self) -> None:
-        """A host that keeps failing must not be respawned every backoff tick."""
+        """A host that keeps failing must not be respawned every backoff tick.
+
+        Opt-in is enabled here because the rate limit only means anything when the
+        host is actually permitted to run; with the new default it is never
+        reached at all, and the assertion would pass for the wrong reason.
+        """
         clock = _Clock()
-        service = self._failing(clock, browser_recover_cooldown=600.0)
+        service = self._failing(
+            clock, auto_recover_auth_host=True, browser_recover_cooldown=600.0
+        )
         self._auth_host.return_value = False
 
         for _ in range(5):

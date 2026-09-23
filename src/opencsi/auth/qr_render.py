@@ -351,9 +351,14 @@ def write_image(image_bytes: bytes, *, directory: str | None = None) -> str | No
     of credential images in a user's profile is not something to leave running.
     """
     target_dir = directory or _code_dir()
+    # `TypeError` as well as `OSError`: `os.makedirs(None)` raises TypeError, not
+    # OSError, so a caller that legitimately passed None (or a `_code_dir` that
+    # somehow returned it) crashed here instead of falling through to mkstemp.
+    # Catching both is what makes "no writable directory" a soft failure, which
+    # is what the `return None` below has always been trying to express.
     try:
         os.makedirs(target_dir, exist_ok=True)
-    except OSError:
+    except (OSError, TypeError, ValueError):
         target_dir = None
     try:
         handle, path = tempfile.mkstemp(
@@ -438,7 +443,20 @@ def prune_codes(
 
 def _code_dir() -> str | None:
     """A per-user directory for the login code, when one is available."""
-    local = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
-    if local:
-        return os.path.join(local, "OpenCSI", "login-code")
-    return None
+    # Ordered from most-private to least, and the last resort is a plain temp
+    # directory rather than ``None``. Returning ``None`` was a crash, not a
+    # graceful degradation: callers pass the result straight to ``os.makedirs``,
+    # which raises **TypeError** for None -- and the caller below only catches
+    # OSError. So on any machine without these variables set (an Ubuntu runner,
+    # a stripped container, a bare CI shell) writing the login code raised
+    # instead of falling back.
+    #
+    # ``HOME`` is checked after the cache variables because a cache directory is
+    # the conventional home for a regenerable file like this, but any of them is
+    # better than a world-readable temp directory.
+    for variable in ("LOCALAPPDATA", "XDG_CACHE_HOME", "HOME"):
+        base = os.environ.get(variable)
+        if base:
+            return os.path.join(base, "OpenCSI", "login-code")
+    # Last resort: the system temp directory. Still per-file owner-only below.
+    return os.path.join(tempfile.gettempdir(), "OpenCSI", "login-code")

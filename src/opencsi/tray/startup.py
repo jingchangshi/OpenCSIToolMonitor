@@ -226,6 +226,12 @@ class StartupStatus:
         out: dict[str, object] = {"supported": self.supported, "enabled": self.enabled}
         if self.command:
             out["command"] = self.command
+        else:
+            # Mirrors the text form's "would run: ...". Without it, the JSON
+            # answer to "what will sign-in start?" is *absent* whenever nothing
+            # is registered yet -- which is exactly when the question matters most
+            # and exactly when a caller would fall back to guessing.
+            out["would_run"] = _quote(default_command())
         if self.source:
             out["source"] = self.source
         if self.detail:

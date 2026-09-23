@@ -1066,26 +1066,46 @@ class TrayCliTest(unittest.TestCase):
             parser.parse_args(["tray", "--auto-recover-browser"]).auto_recover_browser
         )
 
-    def test_the_hidden_host_is_on_by_default_and_can_be_refused(self) -> None:
-        """Opposite defaults, because the two recoveries cost the user differently.
+    def test_the_auth_host_is_off_by_default_and_must_be_enabled(self) -> None:
+        """§9.2: a browser engine is no longer either default.
 
-        The hidden host opens nothing, so it is on by default and the flag turns
-        it *off* (``--no-auth-host``). The visible browser opens a window, so it
-        is off by default and the flag turns it *on*. Getting either polarity
-        backwards would either open windows unasked or leave §30's post-reboot
-        case reporting a failure it was supposed to resolve.
+        This used to assert the opposite polarity, with ``--no-auth-host`` turning
+        an on-by-default host off. The reasoning then was that the hidden host
+        costs the user nothing visible -- but that belonged to a design where the
+        browser *was* the credential store. Now the secure store is consulted
+        first, so "nothing is signed in yet" is answered by a QR scan, and a tray
+        that opened Chromium on every unsigned-in machine would surprise its user.
+
+        Both flags are therefore opt-in, with the same polarity, and the old
+        ``--no-auth-host`` spelling is gone rather than kept as a silent no-op:
+        a user who still passes it should get a usage error telling them the flag
+        changed, not a tray that quietly ignores a security-relevant request.
         """
         from opencsi.cli.context import build_parser
 
         parser = build_parser()
-        self.assertTrue(parser.parse_args(["tray"]).auto_recover_auth_host)
-        self.assertFalse(
-            parser.parse_args(["tray", "--no-auth-host"]).auto_recover_auth_host
+        self.assertFalse(parser.parse_args(["tray"]).auto_recover_auth_host)
+        self.assertTrue(
+            parser.parse_args(["tray", "--auth-host"]).auto_recover_auth_host
         )
         # The two flags are independent, not aliases of one another.
-        both = parser.parse_args(["tray", "--no-auth-host", "--auto-recover-browser"])
-        self.assertFalse(both.auto_recover_auth_host)
+        both = parser.parse_args(["tray", "--auth-host", "--auto-recover-browser"])
+        self.assertTrue(both.auto_recover_auth_host)
         self.assertTrue(both.auto_recover_browser)
+
+    def test_the_old_no_auth_host_flag_is_rejected_loudly(self) -> None:
+        """A removed security-relevant flag must not pass silently.
+
+        ``--no-auth-host`` asked for something that is now the default, so
+        accepting it would look like agreement while changing nothing. Better a
+        usage error that names the new spelling.
+        """
+        from opencsi.cli.context import build_parser
+
+        parser = build_parser()
+        with self.assertRaises(SystemExit) as caught:
+            parser.parse_args(["tray", "--no-auth-host"])
+        self.assertEqual(caught.exception.code, 2)
 
     def test_once_exit_codes_name_the_cause_not_a_blanket_permission_error(
         self,

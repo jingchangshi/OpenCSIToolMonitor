@@ -337,17 +337,31 @@ class MonitorConfig:
     #:
     #: On by default, unlike :attr:`auto_recover_browser`, and the difference is
     #: the whole point of objective §30: the objection to starting a browser
-    #: unasked is that it puts a window on someone's desktop, and a headless host
-    #: does not. Without this, a machine where Chrome simply was not running yet
-    #: reports ``BROWSER_UNAVAILABLE`` -- which reads as "this tool is broken"
-    #: when the truth is "nothing is signed in yet" and the remedy is a QR scan.
+    #: Bring up the hidden Chromium authentication host when no credential is
+    #: available. **Defaults to ``False``** (objective §9.2): starting a browser
+    #: engine is no longer the normal path, and a tool that opens one unasked on
+    #: every machine that simply has not signed in yet is a tool that surprises
+    #: its user.
     #:
-    #: It is still not unconditional. Some Chromium builds reject
+    #: The durable store is now what the normal path uses, so "nothing is signed
+    #: in yet" and "the browser is not running" are different states and must be
+    #: reported differently: the first is answered by a QR scan, and only the
+    #: second could ever be answered by a browser. ``_maybe_recover_browser``
+    #: returns early when a stored credential exists, so this host is only ever
+    #: reached when the store has nothing -- and it now requires the user to have
+    #: opted in.
+    #:
+    #: Kept as an option rather than deleted because it is still the right answer
+    #: for the migration case (§19): a user with a working session in a browser
+    #: profile and an empty store can turn this on to seed the store from that
+    #: profile. What it is not for is silently filling the gap on every machine.
+    #:
+    #: When enabled, it is still not unconditional. Some Chromium builds reject
     #: ``--headless=new`` (Chrome 153 on the development machine does), and this
     #: host then falls back to a *visible* window. A visible fallback is exactly
     #: the behaviour :attr:`auto_recover_browser` exists to gate, so it is refused
     #: unless the user opted in -- see :meth:`_maybe_recover_browser`.
-    auto_recover_auth_host: bool = True
+    auto_recover_auth_host: bool = False
     #: Minimum gap between automatic browser launches. Without this, a machine
     #: where the launch keeps failing would retry on every backoff tick and
     #: spawn a browser window each time.

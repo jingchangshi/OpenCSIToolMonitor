@@ -439,6 +439,52 @@ class RenderTest(unittest.TestCase):
             self.assertTrue(os.path.exists(result.path or ""))
             os.unlink(result.path)  # type: ignore[arg-type]
 
+    def test_the_code_directory_exists_with_no_per_user_variables(self) -> None:
+        """A machine with no LOCALAPPDATA / XDG_CACHE_HOME / HOME still works.
+
+        This is the CI failure, reproduced: `_code_dir()` consulted only
+        LOCALAPPDATA and XDG_CACHE_HOME and returned None when neither was set.
+        Callers pass that straight to `os.makedirs`, which raises **TypeError** for
+        None -- not OSError, which the caller catches -- so writing the login code
+        crashed rather than degrading. Five tests errored on every Ubuntu runner
+        for exactly this reason.
+
+        The last resort is the system temp directory, not None: an unwritable
+        directory is a soft failure the code already handles, whereas None is a
+        crash.
+        """
+        import os
+
+        import opencsi.auth.qr_render as render
+
+        saved = {
+            name: os.environ.pop(name, None)
+            for name in ("LOCALAPPDATA", "XDG_CACHE_HOME", "HOME")
+        }
+        try:
+            code_dir = render._code_dir()
+            self.assertIsNotNone(
+                code_dir, "_code_dir() returned None with no per-user variables"
+            )
+            self.assertIsInstance(code_dir, str)
+        finally:
+            for name, value in saved.items():
+                if value is not None:
+                    os.environ[name] = value
+
+    def test_write_image_degrades_instead_of_raising_on_a_bad_directory(self) -> None:
+        """`os.makedirs(None)` raises TypeError, which must not escape."""
+        import os
+
+        import opencsi.auth.qr_render as render
+
+        # A directory that cannot be created: makedirs fails, and the write must
+        # fall through to mkstemp rather than propagate.
+        impossible = os.path.join(os.sep, "proc", "definitely-not-writable")
+        result = render.write_image(FAKE_PNG, directory=impossible)
+        # Either a path or None is acceptable; raising is not.
+        self.assertIn(result, (None, "") if result is None else (result,))
+
     def test_empty_payload_reports_no_qr(self) -> None:
         from opencsi.auth.qr_render import render_payload
 

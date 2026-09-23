@@ -328,17 +328,37 @@ jobs:
           # does nothing at sign-in.
           $cli = Resolve-Path "dist\opencsi.exe"
           $tray = Resolve-Path "dist\opencsi-tray.exe"
-          $out = & $cli.Path tray --startup-status 2>&1 | Out-String
-          Write-Host $out
+
+          # `--json` is used because it carries the *source label*, which the
+          # human-readable form renders as prose. Grepping the text output for
+          # 'frozen-cli-tray' is what this step used to do, and it failed on a
+          # build that was behaving correctly -- the label is never printed
+          # verbatim. Asserting against unprinted text tests nothing.
+          $raw = & $cli.Path tray --startup-status --json 2>&1 | Out-String
+          Write-Host $raw
           if ($LASTEXITCODE -ne 0) { throw "tray --startup-status exited $LASTEXITCODE" }
-          if ($out -notmatch [regex]::Escape($tray.Path.Split('\')[-1])) {
-            throw "the CLI did not name the tray binary as what it would run"
+
+          $doc = $raw | ConvertFrom-Json
+          Write-Host "source: $($doc.source)"
+          if ($doc.source -ne 'frozen-cli-tray') {
+            throw "expected the frozen-cli-tray source, got: $($doc.source)"
           }
+          # Nothing is registered on a runner, so the answer to "what would run?"
+          # comes back as `would_run`. A build that registered something would
+          # report `command` instead.
+          $cmd = if ($doc.command) { $doc.command } else { $doc.would_run }
+          Write-Host "would run: $cmd"
+          if (-not $cmd) { throw "the report named no command at all" }
+          if ($cmd -notmatch [regex]::Escape($tray.Path.Split('\')[-1])) {
+            throw "the CLI did not name the tray binary as what it would run: $cmd"
+          }
+          # And it must never be the bare CLI: that is the original defect.
+          if ($cmd -match '(?i)\\opencsi\.exe') {
+            throw "the registered command is the bare CLI, not the tray: $cmd"
+          }
+
           # Read-only: this only asks what *would* run. Installing the entry is
           # not done here, because a CI runner's registry is not ours to change.
-          if ($out -notmatch 'frozen-cli-tray') {
-            throw "expected the frozen-cli-tray source label, got: $out"
-          }
 
       # The frozen binaries are the artifact users actually run, and they are a
       # different test object from the source tree: a separate import system, no

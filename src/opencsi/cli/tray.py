@@ -79,12 +79,14 @@ def register(subparsers) -> None:  # noqa: ANN001 - argparse plumbing
         ),
     )
     behavior.add_argument(
-        "--no-auth-host",
+        "--auth-host",
         dest="auto_recover_auth_host",
-        action="store_false",
+        action="store_true",
         help=(
-            "do not start the hidden authentication engine when the credential "
-            "source is gone (it is on by default: it opens no window)"
+            "start the hidden authentication engine when the credential source "
+            "is gone (off by default: a browser engine is no longer the normal "
+            "path, and the secure store is consulted first; enable this only to "
+            "migrate a session out of a browser profile)"
         ),
     )
 

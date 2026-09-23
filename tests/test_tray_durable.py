@@ -41,8 +41,15 @@ REFRESH = "gitcode-refresh-token-abcdefghijklmnop"
 SESSION = "opencsi-session-token-abcdefghijklmnop"
 
 
-def a_service(*, provider=None, session=None):
-    """A MonitorService with the smallest client that will do."""
+def a_service(*, provider=None, session=None, **cfg):
+    """A MonitorService with the smallest client that will do.
+
+    ``cfg`` is forwarded to ``MonitorConfig``. Tests that assert a recovery was
+    *attempted* must pass ``auto_recover_auth_host=True``: both browser
+    recoveries are opt-in since §9.2, so without it nothing is ever tried and the
+    assertion would pass for the wrong reason -- the wrong reason being the very
+    bug this file exists to catch.
+    """
     from opencsi.monitor import MonitorConfig, MonitorService
 
     class _Client:
@@ -54,26 +61,32 @@ def a_service(*, provider=None, session=None):
         def get_my_tools(self, *args, **kwargs):
             raise RuntimeError("no network in this test")
 
-    return MonitorService(_Client(), config=MonitorConfig())
+    return MonitorService(_Client(), config=MonitorConfig(**cfg))
 
 
 class MonitorDoesNotStartABrowserWhenCredentialIsStoredTest(unittest.TestCase):
     """Phase 9: the durable store makes the browser recovery unnecessary."""
 
-    def _service_with_store(self, store) -> object:
+    def _service_with_store(self, store, **cfg) -> object:
         provider = StoredOpenCsiCredentialProvider(store, ttl=0.0)
 
         class _Session:
             credentials = provider
 
-        return a_service(provider=provider, session=_Session())
+        return a_service(provider=provider, session=_Session(), **cfg)
 
     def test_a_stored_session_suppresses_browser_recovery(self) -> None:
-        """The headline property: no Chrome, no Edge, no auth host."""
+        """The headline property: no Chrome, no Edge, no auth host.
+
+        Opt-in is *also* enabled here, and that is the point: even with the user's
+        permission to start a browser, a stored credential means one is not
+        needed. Asserting this with recovery disabled would test the config
+        default rather than the store check.
+        """
         store = MemoryCredentialStore(
             CredentialBundle(opencsi=StoredOpenCsiCredential(token=SESSION))
         )
-        service = self._service_with_store(store)
+        service = self._service_with_store(store, auto_recover_auth_host=True)
         with mock.patch(
             "opencsi.monitor.service.MonitorService._try_auth_host"
         ) as host:
@@ -84,11 +97,11 @@ class MonitorDoesNotStartABrowserWhenCredentialIsStoredTest(unittest.TestCase):
         """The migration path must keep working.
 
         A user who is signed in through a browser profile and has never scanned
-        has nothing in the store, so the browser path is exactly what should run.
-        Suppressing it would break the upgrade.
+        has nothing in the store, so the browser path is exactly what should run --
+        provided they opted in (§9.2). Suppressing it would break the upgrade.
         """
         store = MemoryCredentialStore()
-        service = self._service_with_store(store)
+        service = self._service_with_store(store, auto_recover_auth_host=True)
         with mock.patch(
             "opencsi.monitor.service.MonitorService._try_auth_host", return_value=True
         ) as host:
@@ -117,21 +130,27 @@ class MonitorDoesNotStartABrowserWhenCredentialIsStoredTest(unittest.TestCase):
                 raise CredentialStoreError("unreadable")
 
         store = _Broken()
-        provider = StoredOpenCsiCredentialProvider(store, ttl=0.0)
-        service = self._service_with_store(store) if False else None
-
-        class _Session:
-            credentials = provider
-
-        service = a_service(
-            provider=provider,
-            session=_Session(),
-        )
+        service = self._service_with_store(store, auto_recover_auth_host=True)
         with mock.patch(
             "opencsi.monitor.service.MonitorService._try_auth_host", return_value=True
         ) as host:
             self.assertTrue(service._maybe_recover_browser())
             host.assert_called_once()
+
+    def test_an_empty_store_does_not_launch_a_browser_by_itself(self) -> None:
+        """§9.2, asserted where it matters: an empty store alone starts nothing.
+
+        The test above shows recovery is *permitted* when the store is empty; this
+        one shows it is not *performed* without opt-in. Both are needed, because
+        "empty store" is exactly the post-reboot case and the whole point of the
+        change is that it no longer opens Chromium by itself.
+        """
+        service = self._service_with_store(MemoryCredentialStore())
+        with mock.patch(
+            "opencsi.monitor.service.MonitorService._try_auth_host"
+        ) as host:
+            self.assertFalse(service._maybe_recover_browser())
+            host.assert_not_called()
 
     def test_a_composite_provider_is_looked_into(self) -> None:
         """A composite hides which source answered, so the check must recurse.
@@ -148,7 +167,9 @@ class MonitorDoesNotStartABrowserWhenCredentialIsStoredTest(unittest.TestCase):
         class _Session:
             credentials = composite
 
-        service = a_service(provider=composite, session=_Session())
+        service = a_service(
+            provider=composite, session=_Session(), auto_recover_auth_host=True
+        )
         with mock.patch(
             "opencsi.monitor.service.MonitorService._try_auth_host"
         ) as host:
@@ -168,7 +189,9 @@ class MonitorDoesNotStartABrowserWhenCredentialIsStoredTest(unittest.TestCase):
         class _Session:
             credentials = provider
 
-        service = a_service(provider=provider, session=_Session())
+        service = a_service(
+            provider=provider, session=_Session(), auto_recover_auth_host=True
+        )
         with mock.patch(
             "opencsi.monitor.service.MonitorService._try_auth_host", return_value=True
         ) as host:
@@ -176,7 +199,9 @@ class MonitorDoesNotStartABrowserWhenCredentialIsStoredTest(unittest.TestCase):
             host.assert_called_once()
 
     def test_no_session_object_does_not_suppress_recovery(self) -> None:
-        service = a_service(provider=None, session=None)
+        service = a_service(
+            provider=None, session=None, auto_recover_auth_host=True
+        )
         with mock.patch(
             "opencsi.monitor.service.MonitorService._try_auth_host", return_value=True
         ) as host:
