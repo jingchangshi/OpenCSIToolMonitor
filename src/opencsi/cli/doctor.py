@@ -82,6 +82,85 @@ def _credential_hint(provider, endpoint_ok: bool) -> str:
     return "supply a credential, then retry."
 
 
+def _record_store(record, ctx) -> None:
+    """Report the durable credential store's backend and location (objective §26).
+
+    Local only: no network, no credential needed. Three outcomes, and they mean
+    genuinely different things:
+
+    * **ok** -- a store exists and is readable. ``has_gitcode_credential`` and
+      ``has_opencsi_session`` say what is in it, which is the difference between
+      "run ``login --renew``" and "scan a QR code".
+    * **warn** -- no secure store on this platform. Not a failure: the browser
+      path still works. But it does mean nothing persists, and the user should
+      know that before they wonder why every run needs a browser.
+    * **fail** -- a store exists and could not be read. Reported with the
+      location and the reason, and *not* deleted: a corrupt file is the user's
+      only copy of a working refresh token, and quietly removing it would turn a
+      recoverable problem into a fresh QR scan.
+
+    ``--no-store`` suppresses the store entirely, so the row says so rather than
+    claiming there is none -- those are different states and only one of them is
+    what the user asked for.
+    """
+    if getattr(ctx.args, "no_store", False):
+        record(
+            "credential store",
+            WARN,
+            "disabled by --no-store for this run",
+            "drop --no-store to use the durable credential store",
+        )
+        return
+
+    try:
+        from ..auth.windows_store import open_default_store
+    except ImportError as exc:  # pragma: no cover - import-time only
+        record("credential store", WARN, f"unavailable: {type(exc).__name__}")
+        return
+
+    try:
+        store = open_default_store()
+    except Exception as exc:  # noqa: BLE001 - doctor must never crash
+        record(
+            "credential store",
+            FAIL,
+            f"could not be opened: {type(exc).__name__}",
+            "re-run 'opencsi login --qr' to sign in again",
+        )
+        return
+
+    if store is None:
+        record(
+            "credential store",
+            WARN,
+            "no encrypted credential store on this platform",
+            "the browser path still works, but nothing persists across runs",
+        )
+        return
+
+    status = store.status()
+    if not status.available:
+        record(
+            "credential store",
+            FAIL,
+            f"{status.path}: {status.detail or 'unreadable'}",
+            "the file was left in place; run 'opencsi login --qr' to sign in again",
+        )
+        return
+
+    detail = f"{status.backend} at {status.path}"
+    if status.empty:
+        detail += " (empty)"
+    else:
+        held = []
+        if status.has_gitcode:
+            held.append("GitCode credential")
+        if status.has_opencsi:
+            held.append("openCsiTool session")
+        detail += f" ({', '.join(held)})"
+    record("credential store", OK, detail)
+
+
 def _record_renewal(record, provider, credential_ok: bool) -> None:
     """Report whether an expiring session can renew itself (objective §54).
 
@@ -258,7 +337,20 @@ def run(ctx: CliContext) -> int:
     except OpenCsiError as exc:
         record("devtools endpoint", FAIL, str(exc), exc.hint, exc.exit_code)
 
-    # ── 3. credential ─────────────────────────────────────────────────────
+    # ── 3. credential store ───────────────────────────────────────────────
+    # Reported before the credential because it answers a different question and
+    # is answered *locally*: where would a durable credential live, and is that
+    # file readable? Both matter on a machine with nothing signed in yet, where
+    # every later check fails and none of them says whether persistence is even
+    # possible. A frozen build that resolved its store path relative to the
+    # unpacked bundle would look fine here and silently lose credentials between
+    # runs, which is exactly the defect this row exists to make visible.
+    #
+    # No network and no credential required, so it is meaningful on a clean
+    # machine -- which is where it is most needed.
+    _record_store(record, ctx)
+
+    # ── 4. credential ─────────────────────────────────────────────────────
     credential_ok = False
     try:
         status = provider.status()

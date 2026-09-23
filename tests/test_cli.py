@@ -965,7 +965,87 @@ class FailureReportingTest(unittest.TestCase):
         self.assertIn("python", names)
         self.assertIn("credential", names)
         self.assertIn("session", names)
+        self.assertIn("credential store", names)
         self.assertTrue(parsed["ok"])
+
+    def test_doctor_reports_the_credential_store_locally(self) -> None:
+        """The store row must be answerable with no network and no credential.
+
+        That is what makes it useful on a machine with nothing signed in -- and
+        what makes it assertable in CI, where there is neither. A row that needed
+        a live session would be silent in exactly the case it exists for.
+        """
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from opencsi.auth import windows_store
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = windows_store.DpapiCredentialStore(
+                Path(tmp) / "OpenCSI" / "credentials.dat"
+            )
+            if not windows_store.supported():
+                self.skipTest("DPAPI is Windows-only")
+            client, _, _ = make_client()
+            with mock.patch.object(
+                windows_store, "open_default_store", return_value=store
+            ):
+                code, out, _ = run_cli(["doctor", "--json", "--skip-contract"], client=client)
+            row = next(
+                c for c in json.loads(out)["checks"] if c["check"] == "credential store"
+            )
+            self.assertEqual(row["status"], "ok", row)
+            self.assertIn("dpapi", row["detail"])
+            self.assertIn(tmp, row["detail"])
+            self.assertIn("empty", row["detail"])
+
+    def test_doctor_reports_a_corrupt_store_without_deleting_it(self) -> None:
+        """A corrupt file is the user's only copy of a working refresh token.
+
+        Deleting it would turn a recoverable problem into a fresh QR scan, so the
+        row must report the failure and leave the bytes alone.
+        """
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from opencsi.auth import windows_store
+
+        if not windows_store.supported():
+            self.skipTest("DPAPI is Windows-only")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "OpenCSI" / "credentials.dat"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"not a DPAPI blob")
+            store = windows_store.DpapiCredentialStore(path)
+            client, _, _ = make_client()
+            with mock.patch.object(
+                windows_store, "open_default_store", return_value=store
+            ):
+                _, out, _ = run_cli(["doctor", "--json", "--skip-contract"], client=client)
+            row = next(
+                c for c in json.loads(out)["checks"] if c["check"] == "credential store"
+            )
+            self.assertEqual(row["status"], "fail", row)
+            self.assertIn("left in place", row.get("hint", ""))
+            self.assertTrue(path.exists(), "the corrupt store was deleted")
+
+    def test_doctor_says_when_the_store_is_disabled(self) -> None:
+        """`--no-store` must not be reported as "there is no store".
+
+        Those are different states: one is a choice the user made for this run,
+        the other is a machine that cannot persist anything at all.
+        """
+        client, _, _ = make_client()
+        _, out, _ = run_cli(
+            ["doctor", "--json", "--skip-contract", "--no-store"], client=client
+        )
+        row = next(
+            c for c in json.loads(out)["checks"] if c["check"] == "credential store"
+        )
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("--no-store", row["detail"])
 
     def test_doctor_skip_contract_omits_the_endpoint_rows(self) -> None:
         client, _, _ = make_client()

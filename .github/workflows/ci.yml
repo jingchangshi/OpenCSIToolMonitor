@@ -370,24 +370,47 @@ jobs:
         shell: pwsh
         run: |
           $cli = Resolve-Path "dist\opencsi.exe"
-          # `--no-store` makes this a purely local check: the frozen build must
-          # be able to *find* the credential store and report its state without a
-          # signed-in user and without reaching the network. A CI runner has
-          # neither a stored credential nor opencsitool.com, so a check that
-          # required either would fail for reasons that say nothing about the
-          # build.
-          $out = & $cli.Path login --status --no-store 2>&1 | Out-String
-          Write-Host $out
-          if ($LASTEXITCODE -ne 0) { throw "login --status exited $LASTEXITCODE" }
+
+          # `doctor --json --skip-contract` is used because the store row is
+          # answered *locally*: no network, no credential, no browser. That is
+          # what makes it assertable on a runner, which has none of the three.
+          #
+          # This step previously ran `login --status --no-store` and required
+          # exit 0. That command reaches the network, so it failed here for
+          # reasons that said nothing about the build -- and `--no-store`
+          # actively suppressed the very store it was meant to verify. A check
+          # that cannot pass on a clean machine cannot detect a broken one.
+          $raw = & $cli.Path doctor --json --skip-contract 2>&1 | Out-String
+          Write-Host $raw
+          # A non-zero exit is expected: nothing is signed in on a runner, so
+          # the *session* check fails. Only the store row is asserted below.
+          $doc = $raw | ConvertFrom-Json
+          $row = $doc.checks | Where-Object { $_.check -eq 'credential store' }
+          if (-not $row) { throw "doctor reported no 'credential store' row" }
+          Write-Host "credential store: $($row.status) -- $($row.detail)"
+          if ($row.status -ne 'ok') {
+            throw "the frozen build cannot read its credential store: $($row.detail)"
+          }
 
           # The frozen build must resolve the store path relative to the user's
           # profile, not to the unpacked bundle. A `_MEIPASS`-relative path would
           # put credentials somewhere nobody looks, and would look correct here
           # while silently losing them between runs.
-          $logout = & $cli.Path logout --no-store 2>&1 | Out-String
-          Write-Host $logout
+          if ($row.detail -notmatch [regex]::Escape($env:LOCALAPPDATA)) {
+            throw "the store is not under LOCALAPPDATA: $($row.detail)"
+          }
+          if ($row.detail -match '(?i)_MEI|Temp\\_MEI') {
+            throw "the store path points into the unpacked bundle: $($row.detail)"
+          }
+
+      - name: The frozen CLI refuses to clear a store it does not have
+        shell: pwsh
+        run: |
+          $cli = Resolve-Path "dist\opencsi.exe"
           # --no-store on logout is a usage error, deliberately: it says there is
           # nothing to clear rather than pretending to have cleared something.
+          $logout = & $cli.Path logout --no-store 2>&1 | Out-String
+          Write-Host $logout
           if ($LASTEXITCODE -eq 0) {
             throw "logout --no-store should refuse, not silently report success"
           }
