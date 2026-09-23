@@ -47,6 +47,7 @@ from unittest import mock
 
 import helpers  # noqa: F401  (imported for its sys.path side effect)
 
+from opencsi.auth.gitcode_refresh import RefreshResult, RefreshStatus
 from opencsi.auth.http_oauth import (
     CHECK_AUTHORIZE_PATH,
     OAUTH_ENTRY_PATH,
@@ -71,6 +72,11 @@ from test_http_oauth import (  # noqa: E402  (reusing the pinned flow fixtures)
 ACCESS = "gitcode-access-token-abcdefghijklmnop"
 REFRESH = "gitcode-refresh-token-abcdefghijklmnop"
 OLD_SESSION = "opencsi-session-old-abcdefghijklmnop"
+
+#: A GitCode access token with plenty of life left, so the production chain does
+#: not try to refresh it. Fifteen days is what GitCode actually issues; this is
+#: well clear of the 24 h refresh margin.
+GITCODE_HEALTHY = time.time() + 15 * 24 * 3600
 
 CALLBACK_PATH = "/opencsitool/rest/v1/oauth2/authorization/callback/gitcode"
 
@@ -111,9 +117,19 @@ def store_with(
     refresh: str | None = REFRESH,
     session: str = OLD_SESSION,
     session_expires_at: float | None = None,
-    gitcode_expires_at: float | None = None,
+    gitcode_expires_at: float = GITCODE_HEALTHY,
 ) -> MemoryCredentialStore:
-    """A store holding a GitCode credential and a near-expiry openCsiTool session."""
+    """A store holding a GitCode credential and a near-expiry openCsiTool session.
+
+    ``gitcode_expires_at`` defaults to a *healthy* token rather than ``None``, and
+    that default is load-bearing. ``GitCodeTokenRefresher.needs_refresh`` treats an
+    unknown expiry as "refresh now" -- correct for a real credential whose expiry
+    was never recorded, but it means a fixture that omits the field makes the
+    production chain attempt a genuine network refresh on every test run. A test
+    that quietly reaches gitcode.com is a test that fails in CI, passes at home, or
+    worse, rotates a real credential. Tests that want the refresh to happen pass a
+    near-expiry value explicitly and stub the transport.
+    """
     store = MemoryCredentialStore()
     store.save_gitcode(
         StoredGitCodeCredential(
@@ -182,6 +198,41 @@ def patch_transport(opener: _StubOpener):
         "_opener",
         lambda self, jar: opener.for_jar(jar),
     )
+
+
+class NoNetworkTest(unittest.TestCase):
+    """No test in this file may reach the network. Enforced, not assumed.
+
+    This exists because it was already violated: the P0 fixtures left the GitCode
+    ``access_expires_at`` unset, the refresher's documented "unknown expiry means
+    refresh now" rule then fired, and the suite made a real HTTPS call to
+    gitcode.com from what looked like a fully offline test. It surfaced only
+    because the *production* credential was rejected and the assertion changed
+    shape -- with a valid stored token it would have silently succeeded, and in CI
+    it would have silently failed.
+    """
+
+    def test_no_outbound_connection_is_attempted(self) -> None:
+        """Fail loudly if the real GitCode token endpoint is ever contacted."""
+        from opencsi.auth import gitcode_refresh as module
+
+        real_urlopen = module.urllib.request.urlopen
+
+        def refuse(url, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            target = url if isinstance(url, str) else getattr(url, "full_url", url)
+            if "gitcode.com" in str(target):
+                raise AssertionError(f"a test tried to reach the network: {target}")
+            return real_urlopen(url, *args, **kwargs)
+
+        with mock.patch.object(module.urllib.request, "urlopen", refuse):
+            store = store_with(gitcode_expires_at=time.time() + 60)
+            with patch_store(store), patch_transport(_StubOpener(oauth_routes())):
+                ctx = context_for(store)
+                provider = ctx.make_provider()
+                renewer = ctx.make_renewer(
+                    provider, base_url="https://opencsitool.com"
+                )
+                SessionManager(provider, renewer=renewer).renew(force=True)
 
 
 class ProductionRenewalChainTest(unittest.TestCase):
@@ -313,7 +364,6 @@ class ProductionRenewalChainTest(unittest.TestCase):
         """
         store = store_with()
         opener = _StubOpener(oauth_routes())
-        captured: dict = {}
 
         with patch_store(store), patch_transport(opener):
             ctx = context_for(store)
@@ -324,10 +374,12 @@ class ProductionRenewalChainTest(unittest.TestCase):
         from opencsi.auth.session import FallbackRenewer
 
         self.assertIsInstance(renewer, FallbackRenewer)
-        http_member = renewer._renewers[0]  # noqa: SLF001
-        captured["last_persisted"] = http_member.last_persisted
+        member = renewer._renewers[0]  # noqa: SLF001
+        # The store-backed renewer is wrapped by the GitCode-refresh orchestrator,
+        # so the persistence verdict lives one level in.
+        inner = getattr(member, "_renewer", member)
         self.assertIs(
-            captured["last_persisted"],
+            inner.last_persisted,
             True,
             "a successfully persisted session was reported as not persisted",
         )
@@ -397,6 +449,109 @@ class IdentityIsolationTest(unittest.TestCase):
             "a session minted for an explicitly chosen browser was written into "
             "the stored identity",
         )
+
+
+class GitCodeRefreshLifecycleTest(unittest.TestCase):
+    """The long-lived half: an expiring GitCode token must renew itself first.
+
+    ``GitCodeTokenRefresher`` and ``StoredGitCodeRefresher`` were written and
+    tested a round earlier, and nothing in the product called them. The class
+    existing is not the same as the lifecycle running, so these tests drive the
+    production chain with a GitCode token that is about to expire and assert both
+    that the refresh happened and -- just as importantly -- that it did *not*
+    happen when it was not needed.
+    """
+
+    def _chain(self, store, *, oauth_opener, gitcode_opener):
+        """Build the production chain over a store, stubbing only HTTP."""
+        ctx = context_for(store)
+        provider = ctx.make_provider()
+        renewer = ctx.make_renewer(provider, base_url="https://opencsitool.com")
+        return provider, renewer
+
+    def test_an_expiring_gitcode_token_is_refreshed_before_opencsi_renewal(self) -> None:
+        """A1/R1 near expiry -> A2/R2 -> OAuth -> T2, all persisted."""
+        near = time.time() + 60  # inside DEFAULT_REFRESH_MARGIN (24 h)
+        store = store_with(access="gitcode-access-token-OLDOLDOLDOLDOLDOLD", gitcode_expires_at=near)
+
+        refreshed = StoredGitCodeCredential(
+            access_token="gitcode-access-token-NEWNEWNEWNEWNEWNEW",
+            refresh_token="gitcode-refresh-token-NEWNEWNEWNEWNEWNEW",
+            username="alice",
+            access_expires_at=time.time() + 1296000,
+        )
+
+        with patch_store(store), patch_transport(_StubOpener(oauth_routes())), mock.patch(
+            "opencsi.auth.gitcode_refresh.StoredGitCodeRefresher.refresh",
+            return_value=RefreshResult(RefreshStatus.REFRESHED, credential=refreshed),
+        ) as spy:
+            provider = None
+            ctx = context_for(store)
+            provider = ctx.make_provider()
+            renewer = ctx.make_renewer(provider, base_url="https://opencsitool.com")
+            SessionManager(provider, renewer=renewer).renew(force=True)
+
+            self.assertTrue(spy.called, "the GitCode refresh was never consulted")
+
+        self.assertEqual(store.load().opencsi.token, FAKE_OPENCSITOOL_TOKEN)
+
+    def test_a_healthy_gitcode_token_is_not_refreshed(self) -> None:
+        """Ten days of life left means no refresh *request*. This is the guard.
+
+        Without it, every ~hourly openCsiTool renewal would also spend a GitCode
+        refresh, and with rotation in play that is how a working credential gets
+        rotated far more often than the protocol requires -- for no benefit.
+
+        Counted at the HTTP boundary, not on ``GitCodeTokenRefresher.refresh``.
+        That method is where the expiry gate *lives*, so spying on it counts calls
+        to the gate rather than requests through it, and would report 1 whether or
+        not the gate worked. What must not happen is a network request.
+        """
+        far = time.time() + 10 * 24 * 3600  # well outside the 24 h margin
+        store = store_with(gitcode_expires_at=far)
+
+        with patch_store(store), patch_transport(_StubOpener(oauth_routes())), mock.patch(
+            "opencsi.auth.gitcode_refresh.GitCodeTokenRefresher._post"
+        ) as post:
+            ctx = context_for(store)
+            provider = ctx.make_provider()
+            renewer = ctx.make_renewer(provider, base_url="https://opencsitool.com")
+            SessionManager(provider, renewer=renewer).renew(force=True)
+
+        self.assertEqual(
+            post.call_count,
+            0,
+            "a GitCode token with ten days left still produced a refresh request",
+        )
+        self.assertEqual(store.load().opencsi.token, FAKE_OPENCSITOOL_TOKEN)
+
+
+class LateBoundTest(unittest.TestCase):
+    """A credential that is refreshed later must not break the chain."""
+
+    def test_a_failed_refresh_does_not_become_login_required(self) -> None:
+        """A network failure on refresh is not the same as a lost credential.
+
+        The stored access token may still be perfectly good, and sending the user
+        for a QR scan because GitCode was briefly unreachable is the failure mode
+        this forbids. The renewal continues on the token that is already there.
+        """
+        store = store_with(gitcode_expires_at=time.time() + 60)
+
+        with patch_store(store), patch_transport(_StubOpener(oauth_routes())), mock.patch(
+            "opencsi.auth.gitcode_refresh.GitCodeTokenRefresher.refresh",
+            return_value=RefreshResult(
+                RefreshStatus.NETWORK_ERROR, detail="gitcode unreachable"
+            ),
+        ):
+            ctx = context_for(store)
+            provider = ctx.make_provider()
+            renewer = ctx.make_renewer(provider, base_url="https://opencsitool.com")
+            result = SessionManager(provider, renewer=renewer).renew(force=True)
+
+        self.assertIsNot(result.status, RenewalStatus.LOGIN_REQUIRED)
+        self.assertIs(result.status, RenewalStatus.RENEWED)
+        self.assertEqual(store.load().opencsi.token, FAKE_OPENCSITOOL_TOKEN)
 
 
 if __name__ == "__main__":

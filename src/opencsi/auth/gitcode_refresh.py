@@ -447,3 +447,109 @@ class StoredGitCodeRefresher:
 
     def describe(self) -> str:
         return "refresh the stored GitCode credential and persist the replacement"
+
+
+class RefreshingGitCodeRenewer:
+    """Refresh an expiring GitCode credential, then run the openCsiTool renewal.
+
+    Why the ordering lives here
+    ---------------------------
+    ``HttpOAuthRenewer`` knows how to turn a GitCode credential into an
+    openCsiTool session. ``StoredGitCodeRefresher`` knows how to keep the GitCode
+    credential itself alive. Neither should learn about the other:
+    ``SessionManager`` is explicitly about the openCsiTool session, and putting a
+    GitCode concern inside it would make the session layer responsible for a
+    credential it never reads.
+
+    So the two are composed here, in a class whose only job is the order.
+
+    The gate that matters
+    ---------------------
+    The refresh runs **only** when the GitCode access token is actually near
+    expiry. ``StoredGitCodeRefresher`` already decides that (``refresh(force=
+    False)`` against ``DEFAULT_REFRESH_MARGIN``), and this class must not
+    second-guess it into running every time: an openCsiTool session lives about an
+    hour while a GitCode token lives fifteen days, so an unconditional refresh
+    would spend a fortnight-long credential roughly 360 times for nothing -- and
+    with rotation, would replace a perfectly good refresh token every hour.
+
+    Failure policy
+    --------------
+    Only a genuine refusal stops the renewal:
+
+    * ``REFRESHED`` / ``NOT_NEEDED`` -- proceed;
+    * ``NETWORK_ERROR`` -- proceed. The stored access token may still be entirely
+      valid, and "GitCode was briefly unreachable" must not become "sign in
+      again", which is a QR scan the user did not need;
+    * ``LOGIN_REQUIRED`` / ``NO_REFRESH_TOKEN`` -- stop and report, because there
+      is genuinely no credential left to spend;
+    * ``PROTOCOL_ERROR`` -- proceed, but carry the detail through. A response this
+      code does not understand is a bug in this tool, and refusing to renew would
+      hide it behind an authentication error.
+    """
+
+    name = "stored-oauth"
+
+    def __init__(self, refresher: object, renewer: object) -> None:
+        self._refresher = refresher
+        self._renewer = renewer
+        #: The refresh outcome, for diagnostics. Never holds a token: a
+        #: ``RefreshResult`` redacts itself and carries no token field.
+        self.last_refresh: RefreshResult | None = None
+
+    @property
+    def last_persisted(self) -> object:
+        """Forward the inner renewer's persistence verdict.
+
+        Reported so a caller can distinguish "the server issued a session" from
+        "the next process will be able to read it" -- the distinction this whole
+        round exists to keep.
+        """
+        return getattr(self._renewer, "last_persisted", None)
+
+    @property
+    def last_trace(self) -> object:
+        return getattr(self._renewer, "last_trace", None)
+
+    def can_renew(self) -> bool:
+        can = getattr(self._renewer, "can_renew", None)
+        return bool(can()) if callable(can) else True
+
+    def renew(self, *, timeout: float | None = None, before: object = None):
+        """Refresh if needed, then renew. Never raises; always reports."""
+        from .session import RenewalResult, RenewalStatus
+
+        refresh = getattr(self._refresher, "refresh", None)
+        if callable(refresh):
+            try:
+                result = refresh(force=False)
+            except Exception as exc:  # noqa: BLE001 - a refresh fault must not abort renewal
+                self.last_refresh = RefreshResult(
+                    RefreshStatus.PROTOCOL_ERROR,
+                    detail=f"the GitCode refresh raised {type(exc).__name__}",
+                )
+            else:
+                self.last_refresh = result
+                if result.needs_login:
+                    return RenewalResult(
+                        RenewalStatus.LOGIN_REQUIRED,
+                        detail=(
+                            "the GitCode credential can no longer be refreshed "
+                            f"({result.status.value}); sign in again with "
+                            "'opencsi login --qr'"
+                        ),
+                    )
+                # NETWORK_ERROR and PROTOCOL_ERROR deliberately fall through: the
+                # stored access token may still work, and finding out is exactly
+                # what the renewal attempt below does.
+
+        return self._renewer.renew(timeout=timeout, before=before)
+
+    def describe(self) -> str:
+        return (
+            "refresh the GitCode credential if it is near expiry, then renew the "
+            "openCsiTool session over HTTP"
+        )
+
+    def __repr__(self) -> str:
+        return "RefreshingGitCodeRenewer(refresher=stored-gitcode-refresher, renewer=http-oauth)"

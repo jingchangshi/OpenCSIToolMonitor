@@ -338,14 +338,34 @@ class CliContext:
                     stored_renewer_source = StoredOAuthCredentialAdapter(
                         stored_source, stored_sink
                     )
-                http_renewers.append(
-                    HttpOAuthRenewer(
-                        stored_renewer_source,
-                        base_url=base_url,
-                        timeout=timeout,
-                        use_proxy=use_proxy,
-                    )
+
+                stored_http = HttpOAuthRenewer(
+                    stored_renewer_source,
+                    base_url=base_url,
+                    timeout=timeout,
+                    use_proxy=use_proxy,
                 )
+
+                if stored_sink is not None:
+                    # Keep the *GitCode* credential alive across the renewal that
+                    # spends it. Wrapped only for the store-backed source: that is
+                    # the only case where a stored GitCode credential exists to
+                    # refresh, and a browser identity must not have its own
+                    # credential silently rewritten by this process.
+                    #
+                    # The refresh is gated on near-expiry inside the refresher, so
+                    # a healthy GitCode token costs no request here.
+                    from ..auth.gitcode_refresh import (
+                        RefreshingGitCodeRenewer,
+                        StoredGitCodeRefresher,
+                    )
+
+                    stored_http = RefreshingGitCodeRenewer(
+                        StoredGitCodeRefresher(stored_sink.store),
+                        stored_http,
+                    )
+
+                http_renewers.append(stored_http)
 
         if isinstance(provider, CdpCookieProvider):
             http_renewers.append(

@@ -314,6 +314,18 @@ class StoredOpenCsiCredentialProvider:
         self._read_at = 0.0
         self._last_error: str | None = None
 
+    @property
+    def store(self) -> CredentialStore:
+        """The store this provider reads and writes.
+
+        Exposed so a caller that needs the *same* store -- the GitCode refresher,
+        which must rotate the upstream credential in the one file the next process
+        will open -- can take it from here rather than opening a second handle.
+        Two handles on one path would work by accident today and break the moment
+        the path becomes configurable.
+        """
+        return self._store
+
     # ── reading ───────────────────────────────────────────────────────────
     def _load(self, *, force: bool = False) -> StoredOpenCsiCredential | None:
         now = time.time()
