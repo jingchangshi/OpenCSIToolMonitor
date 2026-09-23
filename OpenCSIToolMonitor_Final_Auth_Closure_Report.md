@@ -1436,6 +1436,22 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
 - **The `EMPTY_MOBILE` / `MFA_CHECK` branches were not explored.** Out of scope for
   the main path.
 
+### Optional and deliberately not implemented
+
+- **§19's automatic browser → DPAPI migration was not implemented.** §19 marks it
+  "如果…可以" (optional), and §20 forbids expanding scope, so it was left out rather
+  than built. What exists instead is the composite provider: a user who is already
+  signed in through a browser profile keeps working, because CDP auto-discovery is
+  still the last entry in the provider chain. Nothing is copied into the store
+  until that user runs `login --qr` or `login --renew`.
+
+  The capability the migration would need is already in place and was kept for it:
+  `auto_recover_auth_host` is now `False` by default but still exists, and its help
+  text names exactly this case ("migrate a session out of a browser profile").
+  Building the migration without a live browser session to migrate *from* would
+  have produced untestable code, which is the reason to stop rather than a reason
+  to guess.
+
 ### Resolved this round, and what resolved them
 
 Two items that appeared in the previous version of this list are no longer open:
