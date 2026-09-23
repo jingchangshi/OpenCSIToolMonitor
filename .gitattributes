@@ -11,8 +11,17 @@
 #   src/opencsi/auth/auth_host.py, src/opencsi/auth/session.py,
 #   src/opencsi/tray/startup.py, src/opencsi/auth/http_oauth.py
 #
-# `text=auto` normalises on commit and checks out per `eol`, so an editor that
-# writes CRLF cannot get it into the history.
+# `text=auto/eol=lf` applies to new writes, but legacy CRLF blobs already stored
+# in the index require one-time `git add --renormalize`. This was measured, not
+# assumed: a blob committed as CRLF stays CRLF after the attribute is added,
+# because `git add` only re-normalises a path whose working-tree file is newer
+# than its index entry. Adding the pin did not fix the existing tree -- those
+# files needed the renormalise pass, which has now been run.
+#
+# `tests/test_repository_hygiene.py` reads the committed blobs back out of `HEAD`
+# and fails if any text file is stored with CRLF, so a re-introduction is caught
+# in CI rather than years later by a reviewer wondering why a one-line change
+# produced a whole-file diff.
 
 * text=auto eol=lf
 
