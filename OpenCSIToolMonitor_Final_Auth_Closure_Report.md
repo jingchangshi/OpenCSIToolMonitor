@@ -24,7 +24,7 @@ report exists to say.
 | **Durable renewal** | `VERIFIED` (mechanism + persistence) | `HttpOAuthRenewer` against `StoredGitCodeCredentialSource`; the new token is persisted and the next process reads it. Live end-to-end renewal against a real account **not executed** — no scan. |
 | **GitCode refresh-token rotation** | `VERIFIED` (endpoint + code) / **not executed** (live rotation) | Endpoint confirmed by probe: `POST https://gitcode.com/oauth/token?grant_type=refresh_token&…`. Rotation is undocumented; the code treats it as rotating and reports whether it actually rotated. No live rotation was observed. |
 | **Tray browserless startup** | `VERIFIED` (store path + no auto browser) | The tray signs in through the same store, and `auto_recover_auth_host` now defaults to `False`, so the normal path starts no browser engine at all. |
-| **Windows startup registration** | `VERIFIED` | `tray --startup-status --json` reports `source: frozen-cli-tray` and a `would_run` naming `opencsi-tray.exe`, never the bare CLI. |
+| **Windows startup registration** | `VERIFIED` — live registry round trip | Installed, read back from `HKCU\...\Run`, and removed. The value was `dist\opencsi-tray.exe`, never the bare CLI. See below. |
 | **CI** | `VERIFIED` — **all 14 jobs green** | Real GitHub Actions runs. See §11. |
 | **Repository hygiene** | `VERIFIED` | 156 tracked files, every text blob stored LF; zero scratch tools; enforced by `tests/test_repository_hygiene.py`. |
 | **Secret safety** | `VERIFIED` | 17 dedicated tests over every output surface; scanner clean; no real credential value found in 156 tracked files. |
@@ -46,6 +46,39 @@ report exists to say.
   `CONSENT_REQUIRED` branch is unit-tested; the live first-authorization flow is
   untested and deliberately never automated.
 - **`xauth_token`'s consumer remains unidentified.** Recorded in §12.
+
+### §10.9 verified live, on the real registry
+
+The frozen CLI was asked to register startup, the registry was read back
+independently, and the entry was removed again — so the machine is exactly as it
+was found:
+
+```text
+BEFORE
+  HKCU\...\Run\OpenCSIToolMonitor   absent
+
+opencsi.exe tray --install-startup   exit 0
+  command: D:\workspace\OpenCSIToolMonitor\dist\opencsi-tray.exe
+  derived from: frozen-cli-tray
+  (the tray binary beside this CLI, not the CLI itself)
+
+READ BACK FROM THE REGISTRY
+  HKCU\...\Run\OpenCSIToolMonitor
+    = D:\workspace\OpenCSIToolMonitor\dist\opencsi-tray.exe
+
+opencsi.exe tray --startup-status --json
+  {"supported": true, "enabled": true,
+   "command": "D:\\workspace\\...\\dist\\opencsi-tray.exe",
+   "source": "frozen-cli-tray"}
+
+opencsi.exe tray --remove-startup    exit 0
+AFTER
+  HKCU\...\Run\OpenCSIToolMonitor   absent again
+```
+
+Reading the value back from `HKCU` rather than trusting the command's own output is
+the point: the defect this guards is a registration that *reports* success while
+naming a binary that does nothing at sign-in. Only the registry can answer that.
 
 ### The one architectural claim this round turns on
 
