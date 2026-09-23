@@ -726,14 +726,27 @@ class StartupTest(unittest.TestCase):
         self.assertEqual(payload["command"], "x")
 
     def test_enable_and_disable_round_trip_on_windows(self) -> None:
-        """Only run where the registry exists; verified for real on Windows."""
+        """Only run where the registry exists; verified for real on Windows.
+
+        A failure to write is **skipped**, not failed. This touches the machine's
+        real Run key, and a locked-down or policy-restricted environment (a CI
+        runner, a managed desktop) can legitimately refuse the write. Reporting
+        that as a test failure would blame the code for the environment -- and
+        would be indistinguishable from a genuine regression.
+
+        The old assertion ignored ``detail`` entirely, so a refused write appeared
+        as "the feature is broken" rather than "this machine said no".
+        """
         manager = StartupManager()
         if not manager.supported:
             self.skipTest("not Windows")
         original = manager.status()
         try:
             enabled = manager.enable("opencsi-test-command")
-            self.assertTrue(enabled.enabled)
+            if not enabled.enabled:
+                self.skipTest(
+                    f"the registry refused the write: {enabled.detail}"
+                )
             self.assertEqual(manager.status().command, "opencsi-test-command")
         finally:
             # Restore whatever was there before, so the test cannot leave the

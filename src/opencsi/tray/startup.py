@@ -297,11 +297,21 @@ class StartupManager:
             )
         except OSError as exc:
             return StartupStatus(
-                supported=True, detail=f"could not read the startup key ({exc.errno})"
+                supported=True,
+                detail=f"could not read the startup key ({exc.errno})",
+                # The source is still reported on a read failure. It is derived
+                # from *this build*, not from the registry, so it is known and
+                # correct even when the key cannot be opened -- and it is the
+                # half of the answer that says whether the tray or the CLI would
+                # be registered. Dropping it left a report that named a command
+                # with no explanation of where it came from.
+                source=startup_command_for_tray()[1],
             )
         except Exception as exc:  # noqa: BLE001
             return StartupStatus(
-                supported=True, detail=f"could not read the startup key ({type(exc).__name__})"
+                supported=True,
+                detail=f"could not read the startup key ({type(exc).__name__})",
+                source=startup_command_for_tray()[1],
             )
 
     def enable(self, command: str | None = None) -> StartupStatus:
