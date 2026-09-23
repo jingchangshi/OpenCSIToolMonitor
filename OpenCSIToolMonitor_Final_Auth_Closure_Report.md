@@ -27,7 +27,7 @@ report exists to say.
 | **Windows startup registration** | `VERIFIED` — live registry round trip | Installed, read back from `HKCU\...\Run`, and removed. The value was `dist\opencsi-tray.exe`, never the bare CLI. See below. |
 | **CI** | `VERIFIED` — **all 14 jobs green** | Real GitHub Actions runs. See §11. |
 | **Repository hygiene** | `VERIFIED` | 156 tracked files, every text blob stored LF; zero scratch tools; enforced by `tests/test_repository_hygiene.py`. |
-| **Secret safety** | `VERIFIED` | 17 dedicated tests over every output surface; scanner clean; no real credential value found in 156 tracked files. |
+| **Secret safety** | `VERIFIED` | 17 dedicated tests over every output surface; scanner clean; no real credential value found in 156 tracked files; and no test can write to the real store (see below). |
 
 ### What is *not* claimed
 
@@ -175,8 +175,8 @@ baa1f3a  fix(auth): say why renewal is available and still will not work
 
 | Metric | Before | After |
 | --- | --- | --- |
-| pytest | 860 passed, 1 skipped, 182 subtests | **1075 passed, 1 skipped, 186 subtests** |
-| unittest | Ran 861, OK (skipped=1) | **Ran 1076, OK (skipped=1)** |
+| pytest | 860 passed, 1 skipped, 182 subtests | **1077 passed, 1 skipped, 186 subtests** |
+| unittest | Ran 861, OK (skipped=1) | **Ran 1078, OK (skipped=1)** |
 
 The behavioural change, stated as the user experiences it:
 
@@ -1115,8 +1115,8 @@ Every number below is from a run on this machine, with the binaries that exist i
 
 | Surface | Command | Result |
 | --- | --- | --- |
-| pytest | `python -m pytest` | **1075 passed, 1 skipped, 186 subtests passed** |
-| unittest | `python -m unittest discover -s tests -t tests` | **Ran 1076, OK (skipped=1)** |
+| pytest | `python -m pytest` | **1077 passed, 1 skipped, 186 subtests passed** |
+| unittest | `python -m unittest discover -s tests -t tests` | **Ran 1078, OK (skipped=1)** |
 | packaging | `python tools/build_exe.py` | both binaries built, **and executed** |
 | acceptance | `python tools/acceptance_durable.py` | **worst verdict: PASS** (8/8 checks) |
 | secret scan | `bash tools/ci_secret_scan.sh` | **exit 0**, four clean categories |
@@ -1484,6 +1484,49 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
   Building the migration without a live browser session to migrate *from* would
   have produced untestable code, which is the reason to stop rather than a reason
   to guess.
+
+### The defect acceptance found that no test could
+
+Running the real binaries against the real store surfaced a bug the whole suite was
+blind to, and it is the most interesting find of the round.
+
+`doctor` reported a GitCode credential in the store. The store should have been
+empty — no scan was performed. The credential turned out to be a **test fixture**:
+
+```text
+gitcode_username: tester
+access_token:     ACCESSa1b2c3d4e5f6...
+refresh_token:    REFRESH0f9e8d7c6b5a...
+```
+
+A test was writing into `%LOCALAPPDATA%\OpenCSI\credentials.dat` — the developer's
+real credential file. The mechanism is silent: `_complete_qr_login` persists through
+`ctx.make_stored_provider()`, which decides whether a store exists by reading
+`getattr(args, "no_store", False)`. A hand-built stand-in `args` class that omits
+the attribute therefore does not mean "no store" — it means **the real one**.
+
+Confirmed three ways, because the first two could have been coincidence:
+
+1. The fixture username appeared in a store that should have been empty.
+2. The file's mtime changed while `tests/test_qr_login_semantics.py` ran, and not
+   while four other store-touching modules ran.
+3. Deleting the file and running the full suite **recreated** it.
+
+Nothing went red. That is the point: the failure mode is a confusing
+`login --renew` against a credential named `tester` that the user never created,
+possibly weeks later, with no path back to the cause. A renewal attempted during
+this round's acceptance was meaningless for exactly this reason, and is reported as
+such rather than as a product failure.
+
+Two stand-in `args` classes had the defect — `test_qr_login_semantics.py`, which did
+the writing, and `test_proxy_handling.py`, which had the same shape and had not yet
+reached a store-reading path. Both now set `no_store = True`, and
+`tests/test_repository_hygiene.py` enforces the rule structurally: any class
+carrying two or more attributes the real parser defines must declare `no_store`.
+That check found the second offender immediately.
+
+Verified after the fix: on a machine where the file was deleted beforehand, a full
+`pytest` run leaves it **absent**. Before the fix, the same run created it.
 
 ### Resolved this round, and what resolved them
 
