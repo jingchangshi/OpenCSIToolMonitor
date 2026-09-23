@@ -282,13 +282,18 @@ display_width("使用中")  # → 6，不是 3
 | `formatting.py` | 大 | CJK 宽度、亿/万、表格、JSON |
 | `client.py` | 大 | `OpenCsiToolClient`：端点编排 |
 | `auth/base.py` | 小 | `CredentialProvider` 协议 |
+| `auth/store.py` | 中 | `CredentialStore` 协议与数据模型；`MemoryCredentialStore` |
+| `auth/windows_store.py` | 中 | Windows DPAPI 加密存储（`ctypes`，零依赖） |
+| `auth/stored.py` | 中 | 从存储读取的 provider / GitCode source；`CompositeCredentialProvider` |
+| `auth/gitcode_refresh.py` | 中 | 用 refresh_token 换新的 GitCode access token |
 | `auth/cdp.py` | 大 | 从浏览器读 Cookie |
 | `auth/browser_launch.py` | 中 | 启动一个**本工具能读**的浏览器（专用配置 + 调试端口） |
 | `auth/manual.py` | 小 | 手工凭据 |
 | `auth/session.py` | 大 | `SessionManager`：重载 / 续期 / 登录三种语义 |
-| `auth/oauth_browser.py` | 大 | `BrowserOAuthRenewer`：后台标签页静默续期 |
+| `auth/oauth_browser.py` | 大 | `BrowserOAuthRenewer`：后台标签页静默续期（**fallback**） |
 | `auth/gitcode_qr.py` | 大 | `GitCodeQrAuthenticator`：无浏览器扫码登录 |
 | `auth/qr_render.py` | 中 | 登录码的终端预览与文件落盘 |
+| `cli/logout.py` | 小 | 清除本机存储的凭据（不调用远端 revoke） |
 | `monitor/service.py` | 大 | `MonitorService`：刷新循环、退避、状态机 |
 | `tray/app.py` | 大 | `TrayApp`：pystray 图标与菜单（纯 UI） |
 | `tray/presenter.py` | 中 | 快照 → 文案 / 菜单的纯函数 |
@@ -313,6 +318,10 @@ display_width("使用中")  # → 6，不是 3
 | `auth/cdp` | 进程内假 DevTools 服务器 | 否（仅 127.0.0.1） |
 | `auth/session` | 假 provider + 假 renewer | 否 |
 | `auth/gitcode_qr` | 进程内假 HTTP 服务器 | 否（仅 127.0.0.1） |
+| `auth/store` | `MemoryCredentialStore` | 否 |
+| `auth/windows_store` | 真 DPAPI（Windows）；非 Windows 跳过 | 否 |
+| `auth/stored` | 内存 store + 假 provider | 否 |
+| `auth/gitcode_refresh` | 进程内假 HTTP 服务器 | 否（仅 127.0.0.1） |
 | `monitor` | 假 client，可控时钟 | 否 |
 | `tray/presenter` | 纯函数断言 | 否 |
 | `cli` | 替换 `make_client` | 否 |
@@ -322,4 +331,8 @@ Windows 消息循环。所以业务逻辑全部被推到 `monitor/` 和 `tray/pr
 它们都是纯的、可测的；`tray/app.py` 只剩下"把已经算好的东西交给 pystray"，
 这部分用真机验证（见 README 的托盘一节）。
 
-这就是为什么整个测试套件能在**离线环境**下跑完 745 个测试。
+**跨进程那一层需要真的开进程**，单元测试共享解释器就等于共享了它本该证明不
+存在的那块内存。所以它由 `tools/acceptance_durable.py` 负责：两个独立解释器
+进程共用一个 store 目录，一个写、一个读，并检查磁盘上没有明文。
+
+这就是为什么整个测试套件能在**离线环境**下跑完 1075 个测试。
