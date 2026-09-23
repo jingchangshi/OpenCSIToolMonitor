@@ -334,9 +334,18 @@ jobs:
           # 'frozen-cli-tray' is what this step used to do, and it failed on a
           # build that was behaving correctly -- the label is never printed
           # verbatim. Asserting against unprinted text tests nothing.
+          #
+          # stderr is merged, and `--startup-status` writes a `note:` there when
+          # the Run key cannot be read (always true on a runner). Under Actions'
+          # `$ErrorActionPreference = 'Stop'` that would abort the step, so the
+          # preference is relaxed around the call.
+          $previous = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
           $raw = & $cli.Path tray --startup-status --json 2>&1 | Out-String
+          $startupExit = $LASTEXITCODE
+          $ErrorActionPreference = $previous
           Write-Host $raw
-          if ($LASTEXITCODE -ne 0) { throw "tray --startup-status exited $LASTEXITCODE" }
+          if ($startupExit -ne 0) { throw "tray --startup-status exited $startupExit" }
 
           $doc = $raw | ConvertFrom-Json
           Write-Host "source: $($doc.source)"
@@ -380,10 +389,19 @@ jobs:
           # reasons that said nothing about the build -- and `--no-store`
           # actively suppressed the very store it was meant to verify. A check
           # that cannot pass on a clean machine cannot detect a broken one.
+          # GitHub Actions runs pwsh with `$ErrorActionPreference = 'Stop'`.
+          # `doctor` writes its session failure to stderr and exits non-zero --
+          # both are expected on a runner where nothing is signed in -- and a
+          # merged `2>&1` stream under 'Stop' turns that into a terminating error
+          # before a single assertion runs. The preference is relaxed for this one
+          # call; there is no other way to read the JSON on a clean machine.
+          $previous = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
           $raw = & $cli.Path doctor --json --skip-contract 2>&1 | Out-String
+          $doctorExit = $LASTEXITCODE
+          $ErrorActionPreference = $previous
           Write-Host $raw
-          # A non-zero exit is expected: nothing is signed in on a runner, so
-          # the *session* check fails. Only the store row is asserted below.
+          Write-Host "doctor exit: $doctorExit (a failing session check is expected here)"
           $doc = $raw | ConvertFrom-Json
           $row = $doc.checks | Where-Object { $_.check -eq 'credential store' }
           if (-not $row) { throw "doctor reported no 'credential store' row" }
@@ -409,9 +427,14 @@ jobs:
           $cli = Resolve-Path "dist\opencsi.exe"
           # --no-store on logout is a usage error, deliberately: it says there is
           # nothing to clear rather than pretending to have cleared something.
+          # It writes to stderr, hence the same preference guard as above.
+          $previous = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
           $logout = & $cli.Path logout --no-store 2>&1 | Out-String
+          $logoutExit = $LASTEXITCODE
+          $ErrorActionPreference = $previous
           Write-Host $logout
-          if ($LASTEXITCODE -eq 0) {
+          if ($logoutExit -eq 0) {
             throw "logout --no-store should refuse, not silently report success"
           }
 

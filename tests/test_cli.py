@@ -981,12 +981,12 @@ class FailureReportingTest(unittest.TestCase):
 
         from opencsi.auth import windows_store
 
+        if not windows_store.supported():
+            self.skipTest("DPAPI is Windows-only")
         with tempfile.TemporaryDirectory() as tmp:
             store = windows_store.DpapiCredentialStore(
                 Path(tmp) / "OpenCSI" / "credentials.dat"
             )
-            if not windows_store.supported():
-                self.skipTest("DPAPI is Windows-only")
             client, _, _ = make_client()
             with mock.patch.object(
                 windows_store, "open_default_store", return_value=store
