@@ -536,6 +536,118 @@ class GitCodeRefreshLifecycleTest(unittest.TestCase):
         self.assertEqual(store.load().opencsi.token, FAKE_OPENCSITOOL_TOKEN)
 
 
+    def test_a_rotated_gitcode_credential_reaches_the_store_and_the_oauth_leg(self) -> None:
+        """A1/R1 near expiry -> A2/R2 lands in the store -> OAuth spends A2 -> T2.
+
+        This is the end-to-end version of the refresh lifecycle, and it exists
+        because the test above does not prove it. That one patches
+        ``StoredGitCodeRefresher.refresh`` and so never exercises parsing, the
+        rotation write, or the OAuth leg consuming the rotated token -- it proves
+        the orchestrator consults the refresher, not that the loop closes.
+
+        Only ``GitCodeTokenRefresher._post`` is stubbed, which is the single HTTP
+        seam for the refresh endpoint. Everything above it is production code: the
+        200-response parser, the atomic A2/R2 write, and the adapter's read half
+        that hands A2 to the OAuth flow.
+        """
+        store = store_with(
+            access="gitcode-access-token-ROTATEME000000",
+            refresh="gitcode-refresh-token-ROTATEME000000",
+            gitcode_expires_at=time.time() + 60,  # inside the 24 h margin
+        )
+
+        rotated_access = "gitcode-access-token-AFTERROTATE00"
+        rotated_refresh = "gitcode-refresh-token-AFTERROTATE00"
+        response = json.dumps(
+            {
+                "access_token": rotated_access,
+                "refresh_token": rotated_refresh,
+                "expires_in": 1296000,
+                "scope": "user_info",
+                "created_at": int(time.time()),
+            }
+        )
+
+        # What the OAuth leg was actually handed, observed at the GitCode source.
+        # Recorded by wrapping the *class* rather than patching an instance
+        # attribute: assigning onto the adapter shadowed its own forwarding and
+        # made this test fail for a reason that had nothing to do with the code
+        # under test.
+        seen: list[list] = []
+        from opencsi.auth.stored import StoredGitCodeCredentialSource
+
+        real_read = StoredGitCodeCredentialSource.read_all_cookies
+
+        def recording_read(self, *args, **kwargs):
+            cookies = real_read(self, *args, **kwargs)
+            seen.append(cookies)
+            return cookies
+
+        with patch_store(store), patch_transport(
+            _StubOpener(oauth_routes())
+        ), mock.patch.object(
+            StoredGitCodeCredentialSource, "read_all_cookies", recording_read
+        ), mock.patch(
+            "opencsi.auth.gitcode_refresh.GitCodeTokenRefresher._post",
+            return_value=(200, response),
+        ) as post:
+            ctx = context_for(store)
+            provider = ctx.make_provider()
+            renewer = ctx.make_renewer(provider, base_url="https://opencsitool.com")
+            result = SessionManager(provider, renewer=renewer).renew(force=True)
+
+        # Collected after the run: `seen` is appended to while the chain executes.
+        access_seen = [
+            c.get("value")
+            for batch in seen
+            for c in batch
+            if isinstance(c, Mapping) and c.get("name") == "GITCODE_ACCESS_TOKEN"
+        ]
+
+        self.assertEqual(post.call_count, 1, "the refresh endpoint was not called")
+        self.assertIs(result.status, RenewalStatus.RENEWED)
+
+        # Read through a *fresh* source over the same store, which is what the next
+        # process does. Reading `store.load()` directly is not enough here, and the
+        # difference is not academic: this assertion originally passed even with
+        # the rotation write deleted, because the refresher returns the rotated
+        # credential in memory and the OAuth leg happily spends that. The renewal
+        # therefore succeeds while the rotation is silently lost -- correct for
+        # this process, wrong for the next one. Asking a new reader is what
+        # separates the two.
+        reread = StoredGitCodeCredentialSource(store)._credential()  # noqa: SLF001
+        self.assertIsNotNone(reread, "no GitCode credential was readable back")
+        self.assertEqual(
+            reread.access_token,
+            rotated_access,
+            "the rotated access token is not durable: a fresh reader still sees the "
+            "superseded one",
+        )
+        self.assertEqual(
+            reread.refresh_token,
+            rotated_refresh,
+            "the rotated refresh token is not durable, so the next process will "
+            "refresh with a token the server has already superseded",
+        )
+
+        stored = store.load().gitcode
+        self.assertEqual(stored.access_token, rotated_access)
+        self.assertEqual(stored.refresh_token, rotated_refresh)
+
+        # The OAuth flow reads the source lazily, so the read that matters is the
+        # last one -- after the rotation. Asserting on the final value catches the
+        # real failure mode: the rotation landing in the store but the OAuth leg
+        # still spending the superseded token.
+        self.assertTrue(access_seen, "the OAuth leg never read a GitCode credential")
+        self.assertEqual(
+            access_seen[-1],
+            rotated_access,
+            "the OAuth leg spent the OLD GitCode token, so the rotation never "
+            "reached the leg that needs it",
+        )
+        self.assertEqual(store.load().opencsi.token, FAKE_OPENCSITOOL_TOKEN)
+
+
 class LateBoundTest(unittest.TestCase):
     """A credential that is refreshed later must not break the chain."""
 
