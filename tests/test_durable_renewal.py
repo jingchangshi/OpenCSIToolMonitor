@@ -82,7 +82,11 @@ CALLBACK_PATH = "/opencsitool/rest/v1/oauth2/authorization/callback/gitcode"
 
 
 def oauth_routes(
-    minted: str = FAKE_OPENCSITOOL_TOKEN, *, max_age: int | None = None
+    minted: str = FAKE_OPENCSITOOL_TOKEN,
+    *,
+    max_age: int | None = None,
+    host: str = "opencsitool.com",
+    base: str = "https://opencsitool.com",
 ) -> dict:
     """The three-request OAuth flow, as the pinned shape test describes it.
 
@@ -92,12 +96,18 @@ def oauth_routes(
     cookie -- the 401-clears case is the only ``Set-Cookie`` on record. So the
     honest default is a session cookie, and the renewer treats "no expiry" as
     unknown rather than inventing one.
+
+    ``host``/``base`` exist because the acceptance runner points the renewer at a
+    loopback address. The stub is keyed by ``(host, path)``, so a run against
+    ``127.0.0.1`` would otherwise miss every route and look like a renewal
+    failure rather than a fixture mismatch.
     """
     cookie = _set_cookie("token", minted)
     if max_age is not None:
         cookie += f"; Max-Age={max_age}"
+    callback = f"{base}{CALLBACK_PATH}?code=CODE&state=ST"
     return {
-        ("opencsitool.com", OAUTH_ENTRY_PATH): (
+        (host, OAUTH_ENTRY_PATH): (
             302,
             {"Location": AUTHORIZE_URL},
             b"",
@@ -105,9 +115,9 @@ def oauth_routes(
         ("web-api.gitcode.com", CHECK_AUTHORIZE_PATH): (
             200,
             {},
-            json.dumps({"redirect_uri": CALLBACK_URL}).encode(),
+            json.dumps({"redirect_uri": callback}).encode(),
         ),
-        ("opencsitool.com", CALLBACK_PATH): (302, {"Set-Cookie": cookie}, b""),
+        (host, CALLBACK_PATH): (302, {"Set-Cookie": cookie}, b""),
     }
 
 
