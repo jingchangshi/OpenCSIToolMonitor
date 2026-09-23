@@ -31,6 +31,11 @@ from ..auth import (
     SessionManager,
 )
 from ..auth.session import SessionRenewer
+from ..auth.stored import (
+    CompositeCredentialProvider,
+    StoredGitCodeCredentialSource,
+    StoredOpenCsiCredentialProvider,
+)
 from ..client import BASE_URL, OpenCsiToolClient
 from ..errors import ConfigError, UsageError
 from ..formatting import Table, to_json
@@ -39,6 +44,10 @@ from ..version import USER_AGENT, __version__
 ENV_CDP_URL = "OPENCSI_CDP_URL"
 ENV_BASE_URL = "OPENCSI_BASE_URL"
 ENV_NO_RENEW = "OPENCSI_NO_RENEW"
+#: Disable the durable credential store, for debugging the browser path. Named
+#: rather than undocumented so a user who needs it can find it, and so nobody
+#: has to guess why a stored credential is or is not being used.
+ENV_NO_STORE = "OPENCSI_NO_STORE"
 
 log = logging.getLogger("opencsi.cli")
 
@@ -111,13 +120,36 @@ class CliContext:
 
     # ── client ────────────────────────────────────────────────────────────
     def make_provider(self) -> CredentialProvider:
-        """Choose a credential provider from the parsed arguments."""
+        """Choose a credential provider from the parsed arguments.
+
+        Order, and why it is this order:
+
+        1. ``--cdp`` -- an explicit endpoint the user named. Honoured first and
+           never overridden, so the flag keeps working exactly as it did.
+        2. ``--no-discover`` with ``$OPENCSI_CDP_URL`` -- also explicit, just
+           supplied through the environment.
+        3. **the secure store** -- the normal path. No browser, no port, no
+           process to have started first.
+        4. CDP auto-discovery -- the migration path. A user who is already signed
+           in through a browser profile has nothing in the store yet, and must
+           keep working rather than being told to sign in again.
+
+        The store is tried *before* auto-discovery, which is the change this
+        round makes. Auto-discovery used to be the default, so every command
+        silently required a browser with a debug port to already be running --
+        including the tray, which is exactly the "Tray -> must start Chrome
+        first" dependency this architecture removes.
+
+        The two explicit cases stay in front of the store so that a user who
+        deliberately points at a browser still gets that browser. A stored
+        credential silently winning over ``--cdp`` would make the flag a lie.
+        """
         explicit = getattr(self.args, "cdp", None)
         if explicit:
             return CdpCookieProvider(explicit, discover=False)
 
+        env = os.environ.get(ENV_CDP_URL)
         if getattr(self.args, "no_discover", False):
-            env = os.environ.get(ENV_CDP_URL)
             if not env:
                 raise ConfigError(
                     "--no-discover requires --cdp or the "
@@ -126,7 +158,53 @@ class CliContext:
             return CdpCookieProvider(env, discover=False)
 
         ports = getattr(self.args, "ports", None)
-        return CdpCookieProvider(ports=ports or None)
+        browser = CdpCookieProvider(ports=ports or None)
+        stored = self.make_stored_provider()
+        if stored is None:
+            return browser
+        # ``$OPENCSI_CDP_URL`` without ``--no-discover`` is still an explicit
+        # statement of intent, so it stays ahead of the store.
+        if env:
+            return CompositeCredentialProvider(
+                [CdpCookieProvider(env, discover=False), stored, browser]
+            )
+        return CompositeCredentialProvider([stored, browser])
+
+    def make_stored_provider(self) -> "StoredOpenCsiCredentialProvider | None":
+        """The secure-store provider, or ``None`` when there is no secure store.
+
+        ``--no-store`` and ``$OPENCSI_NO_STORE`` disable it, which exists for two
+        reasons: a user debugging the browser path wants to *see* what that path
+        does without a stored credential short-circuiting it, and a test must be
+        able to run against a browser without touching a real credential file.
+        """
+        if getattr(self.args, "no_store", False) or os.environ.get(ENV_NO_STORE):
+            return None
+        from ..auth.stored import StoredOpenCsiCredentialProvider
+        from ..auth.windows_store import open_default_store
+
+        store = open_default_store()
+        if store is None:
+            # No secure store on this platform. Returning None rather than a
+            # weaker store is deliberate: there is deliberately no plaintext
+            # fallback, and inventing one here would put a live credential in
+            # the clear on a machine whose owner expected encryption.
+            return None
+        return StoredOpenCsiCredentialProvider(
+            store, ttl=float(getattr(self.args, "store_ttl", 5.0) or 5.0)
+        )
+
+    def make_stored_source(self) -> "StoredGitCodeCredentialSource | None":
+        """The secure-store GitCode source, or ``None`` when there is no store."""
+        if getattr(self.args, "no_store", False) or os.environ.get(ENV_NO_STORE):
+            return None
+        from ..auth.stored import StoredGitCodeCredentialSource
+        from ..auth.windows_store import open_default_store
+
+        store = open_default_store()
+        if store is None:
+            return None
+        return StoredGitCodeCredentialSource(store)
 
     def make_renewer(
         self, provider: CredentialProvider, *, base_url: str
@@ -138,37 +216,57 @@ class CliContext:
         manager -- and because a test should be able to script a renewal
         without standing up a browser.
 
-        **Order matters, and it is the opposite of what this project assumed for
-        a long time.** The browserless HTTP renewer is tried first because it
-        needs no browser engine at all: measured, the whole OAuth leg is three
-        ordinary requests (``tools/probe_oauth_browserless.py``). The browser
-        renewer is kept as the fallback for the one case HTTP cannot cover --
-        a first-time consent that a human has to approve -- and because a build
-        with no GitCode session readable over CDP can still work if a browser
-        already holds one.
+        **The HTTP renewer now has two possible credential sources, and both are
+        tried before any browser is.** That is the change this round makes:
 
-        :class:`~opencsi.auth.session.FallbackRenewer` owns that ordering, so the
-        policy stays in one place rather than being re-derived by each caller.
+        * the secure store's GitCode credential -- no browser at all, and the
+          normal path after a QR login;
+        * the CDP provider, when the provider *is* a browser reading a GitCode
+          session out of a profile -- the migration path for a user who has not
+          scanned yet.
+
+        :class:`~opencsi.auth.oauth_browser.BrowserOAuthRenewer` is now last and
+        only reached when no HTTP source can help. It is not deleted: it covers
+        a first-time consent that a human has to approve, which is the one thing
+        HTTP cannot do.
         """
-        if not isinstance(provider, CdpCookieProvider):
-            return None
-
         from ..auth.http_oauth import HttpOAuthRenewer
         from ..auth.session import FallbackRenewer
 
-        http = HttpOAuthRenewer(
-            provider,
-            base_url=base_url,
-            timeout=float(getattr(self.args, "renew_timeout", 45.0) or 45.0),
-            use_proxy=not bool(getattr(self.args, "no_proxy", False)),
-        )
+        timeout = float(getattr(self.args, "renew_timeout", 45.0) or 45.0)
+        use_proxy = not bool(getattr(self.args, "no_proxy", False))
+
+        http_renewers: list[Any] = []
+
+        # A composite provider hides which source it used, so ask it: when the
+        # value came from the store, the store is the credential source to hand
+        # the HTTP renewer as well.
+        stored_source = self.make_stored_source()
+        if stored_source is not None:
+            http_renewers.append(
+                HttpOAuthRenewer(
+                    stored_source, base_url=base_url, timeout=timeout, use_proxy=use_proxy
+                )
+            )
+
+        if isinstance(provider, CdpCookieProvider):
+            http_renewers.append(
+                HttpOAuthRenewer(
+                    provider, base_url=base_url, timeout=timeout, use_proxy=use_proxy
+                )
+            )
+
+        if not http_renewers and not isinstance(provider, CdpCookieProvider):
+            # A manual token has no upstream session to re-run OAuth against.
+            return None
+
         browser = BrowserOAuthRenewer(
             getattr(self.args, "cdp", None),
             base_url=base_url,
-            timeout=float(getattr(self.args, "renew_timeout", 45.0) or 45.0),
+            timeout=timeout,
             ports=getattr(self.args, "ports", None) or None,
         )
-        return FallbackRenewer([http, browser])
+        return FallbackRenewer([*http_renewers, browser])
 
     def make_session(
         self,
@@ -268,6 +366,24 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     )
 
     conn = parser.add_argument_group("connection")
+    conn.add_argument(
+        "--no-store",
+        action="store_true",
+        help=(
+            "ignore the encrypted credential store and use the browser path "
+            f"only (also settable via ${ENV_NO_STORE}); for debugging"
+        ),
+    )
+    conn.add_argument(
+        "--store-ttl",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help=(
+            "how long a credential read from the secure store is reused before "
+            "the file is re-read (default: 5)"
+        ),
+    )
     conn.add_argument(
         "--cdp",
         metavar="URL",
