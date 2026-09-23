@@ -64,8 +64,31 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      # The package must be INSTALLED, not merely checked out. The suite lives
+      # in `tests/` and imports `opencsi` from `src/`; `pytest` finds that via
+      # `pythonpath = ["src"]` in pyproject.toml, but `unittest` reads no
+      # configuration file at all -- so the unittest step below resolved
+      # `opencsi` only if the developer machine happened to have an editable
+      # install. On a clean CI checkout it did not, and eleven jobs failed with
+      # `ModuleNotFoundError: No module named 'opencsi'`.
+      #
+      # `--no-deps` is deliberate: the package declares no runtime dependencies,
+      # so installing them would hide the exact regression the `stdlib-only` job
+      # exists to catch.
+      - name: Install the package under test
+        run: python -m pip install -e . --no-deps
+
       - name: Install test dependencies
         run: python -m pip install --upgrade pip pytest
+
+      # A guard, not a formality: this is the step whose absence caused the
+      # failure above, and a silent no-op install would restore it.
+      - name: The package is importable from a clean checkout
+        run: |
+          python -c "
+          import opencsi
+          print('opencsi', opencsi.__version__ if hasattr(opencsi, '__version__') else '', 'from', opencsi.__file__)
+          "
 
       # unittest is not redundant with pytest. The suite is written to run under
       # both, and pytest's collection does not exercise `unittest.main()` or the
@@ -104,6 +127,15 @@ jobs:
       # air-gapped Windows machine with no package index. That promise is easy to
       # break by adding one convenient import, and nothing else would notice,
       # because every developer machine has Pillow and pystray installed.
+      #
+      # `--no-deps` is the whole point of the job: installing the package *with*
+      # its extras would import nothing wrong, but it would also put PIL and
+      # pystray on the path, so a stray top-level import would stop being an
+      # error. Installing with no dependencies keeps the tree as bare as an
+      # air-gapped machine's.
+      - name: Install the package with no dependencies
+        run: python -m pip install -e . --no-deps
+
       - name: The CLI must import with only the standard library
         run: |
           python -c "
@@ -156,13 +188,30 @@ jobs:
         with:
           python-version: "3.12"
 
-      # tools/probe_*.py reach a live service and can change real state. Every
-      # one must state in its docstring whether it is read-only, GET-only, or
-      # mutating -- so that nobody has to read the whole file to find out before
-      # running it. This is enforced in the unit suite too; running it here makes
-      # the requirement visible in CI rather than only in a test name.
+      # `tools/probe_*.py` reach a live service and can change real state. Every
+      # one must declare its posture so nobody has to read the whole file to find
+      # out before running it.
+      #
+      # This used to be `-k posture`, which selects by *name*: it silently ran
+      # whichever tests happened to contain that substring, and would have gone
+      # on passing if the real labels file were renamed or, worse, deselected.
+      # The file is now named explicitly. `test_live_probe_labels.py` is the
+      # contract -- presence, well-formedness, and agreement with the code --
+      # and `test_packaging.py` carries the packaging-side posture check.
       - name: Every probe declares its posture
-        run: python -m pytest tests/test_packaging.py -q -k posture
+        run: |
+          python -m pytest \
+            tests/test_live_probe_labels.py \
+            tests/test_packaging.py \
+            tests/test_repository_hygiene.py \
+            -q
+
+      # The labels are declared as data (`#: labels: LIVE, NETWORK, ...`) and the
+      # static analysis only looks for contradictions. This prints the whole
+      # table, so a reader of the CI log sees the posture of every probe rather
+      # than only that the assertion passed.
+      - name: Print the probe label table
+        run: python tools/live_probe_labels.py
 
   # ── 5. the frozen binaries must actually start ───────────────────────────
   frozen:
@@ -189,25 +238,32 @@ jobs:
       - name: The frozen CLI must run
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Recurse -Filter opencsi.exe | Select-Object -First 1
-          if (-not $exe) { throw "opencsi.exe was not produced" }
-          Write-Host "found $($exe.FullName)"
-          & $exe.FullName --version
+          # Addressed explicitly rather than by `Get-ChildItem -Recurse | Select
+          # -First 1`. A recursive search can return a PyInstaller *build*
+          # intermediate -- build/opencsi/.../opencsi.exe is not the shipped
+          # artifact and does not have the bundled runtime -- so the job could
+          # pass while the real dist binary was broken, or vice versa. The
+          # destination is fixed by tools/build_exe.py (--distpath defaults to
+          # <root>/dist), so it is named directly.
+          $cli = Resolve-Path "dist\opencsi.exe" -ErrorAction SilentlyContinue
+          if (-not $cli) { throw "dist\opencsi.exe was not produced" }
+          Write-Host "using $($cli.Path)"
+          & $cli.Path --version
           if ($LASTEXITCODE -ne 0) { throw "--version exited $LASTEXITCODE" }
-          & $exe.FullName --help | Out-Null
+          & $cli.Path --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "--help exited $LASTEXITCODE" }
 
       - name: The frozen tray must run
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Recurse -Filter opencsi-tray.exe | Select-Object -First 1
-          if (-not $exe) { throw "opencsi-tray.exe was not produced" }
-          Write-Host "found $($exe.FullName)"
+          $tray = Resolve-Path "dist\opencsi-tray.exe" -ErrorAction SilentlyContinue
+          if (-not $tray) { throw "dist\opencsi-tray.exe was not produced" }
+          Write-Host "using $($tray.Path)"
           # §43 names both of these. `--help` proves the windowed binary can
           # parse arguments at all; a windowed build that cannot is a build whose
           # every other invocation fails silently, because it has no console to
           # print the traceback to.
-          & $exe.FullName --help | Out-Null
+          & $tray.Path --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "tray --help exited $LASTEXITCODE" }
           # `--check` proves the icon and menu can be constructed, then exits.
           # It touches no network, so it cannot hang waiting for an API.
@@ -216,7 +272,7 @@ jobs:
           # straight to the tray sub-command; `opencsi-tray.exe tray --check`
           # would double the sub-command. The entry point now tolerates that too,
           # but CI asserts the canonical form.
-          & $exe.FullName --check
+          & $tray.Path --check
           if ($LASTEXITCODE -ne 0) { throw "tray --check exited $LASTEXITCODE" }
 
       - name: The frozen CLI must register the tray, not itself
@@ -225,19 +281,35 @@ jobs:
           # §32/§62. The defect this guards is silent: an entry naming
           # opencsi.exe with no sub-command looks healthy in Task Manager and
           # does nothing at sign-in.
-          $cli = Get-ChildItem -Recurse -Filter opencsi.exe | Select-Object -First 1
-          $tray = Get-ChildItem -Recurse -Filter opencsi-tray.exe | Select-Object -First 1
-          $out = & $cli.FullName tray --startup-status 2>&1 | Out-String
+          $cli = Resolve-Path "dist\opencsi.exe"
+          $tray = Resolve-Path "dist\opencsi-tray.exe"
+          $out = & $cli.Path tray --startup-status 2>&1 | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0) { throw "tray --startup-status exited $LASTEXITCODE" }
-          if ($out -notmatch [regex]::Escape($tray.Name)) {
-            throw "the CLI did not name the tray binary ($($tray.Name)) as what it would run"
+          if ($out -notmatch [regex]::Escape($tray.Path.Split('\')[-1])) {
+            throw "the CLI did not name the tray binary as what it would run"
           }
           # Read-only: this only asks what *would* run. Installing the entry is
           # not done here, because a CI runner's registry is not ours to change.
           if ($out -notmatch 'frozen-cli-tray') {
             throw "expected the frozen-cli-tray source label, got: $out"
           }
+
+      # The frozen binaries are the artifact users actually run, and they are a
+      # different test object from the source tree: a separate import system, no
+      # `src/` on sys.path, and no optional extras unless the spec bundles them.
+      # This is where the durable-credential store must also work, because a
+      # frozen build resolving a path relative to the source checkout would
+      # silently store credentials somewhere nobody looks.
+      - name: The frozen CLI reports its credential store
+        shell: pwsh
+        run: |
+          $cli = Resolve-Path "dist\opencsi.exe"
+          $out = & $cli.Path login --status 2>&1 | Out-String
+          Write-Host $out
+          # `--status` is read-only and must not fail merely because nobody has
+          # signed in on a fresh runner; it reports the absence instead.
+          if ($LASTEXITCODE -ne 0) { throw "login --status exited $LASTEXITCODE" }
 
       - name: Upload the binaries
         if: always()
@@ -246,7 +318,6 @@ jobs:
           name: frozen-binaries
           path: |
             dist/**
-            build/**/*.exe
           if-no-files-found: warn
           retention-days: 7
 
@@ -268,6 +339,12 @@ jobs:
             echo "::error::compiled or generated files are tracked"; exit 1
           fi
           echo "no generated files are tracked"
+
+      # The checkout must be a full clone for this: the line-ending check reads
+      # the committed blobs back out of HEAD, and the default shallow clone has
+      # no usable HEAD tree to compare against.
+      - name: The committed tree is LF-normalized
+        run: python -m pytest tests/test_repository_hygiene.py -q
 
       - name: Every Python file compiles
         run: python -m compileall -q src tools tests
