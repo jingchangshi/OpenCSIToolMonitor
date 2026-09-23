@@ -19,33 +19,67 @@ report exists to say.
 
 | Row | Verdict | Basis |
 | --- | --- | --- |
-| **Durable QR login** | `VERIFIED` (persistence) / **`PRE_SCAN_VERIFIED`** (scan) | `login --qr` persists the GitCode credential *before* the OAuth leg and the openCsiTool session *after* `getUserInfo`, and exit 0 requires the write to have succeeded. Cross-process read verified. **No real WeChat scan was performed** — a phone is required, so the scan itself is `PRE_SCAN_VERIFIED`, never "QR login PASS". |
-| **Durable browserless usage** | `VERIFIED` | Two independent processes, one DPAPI store, no browser: process A writes, process B reads the same token. `tools/acceptance_durable.py`, all checks PASS. |
-| **Durable renewal** | `VERIFIED` (mechanism + persistence) | `HttpOAuthRenewer` against `StoredGitCodeCredentialSource`; the new token is persisted and the next process reads it. Live end-to-end renewal against a real account **not executed** — no scan. |
-| **GitCode refresh-token rotation** | `VERIFIED` (endpoint + code) / **not executed** (live rotation) | Endpoint confirmed by probe: `POST https://gitcode.com/oauth/token?grant_type=refresh_token&…`. Rotation is undocumented; the code treats it as rotating and reports whether it actually rotated. No live rotation was observed. |
-| **Tray browserless startup** | `VERIFIED` (store path + no auto browser) | The tray signs in through the same store, and `auto_recover_auth_host` now defaults to `False`, so the normal path starts no browser engine at all. |
+| **Durable QR login** | `VERIFIED` — **real WeChat scan completed** | A real scan against a real account (`shijingchang`, employeeId 653124) completed with exit 0, wrote both credentials to `%LOCALAPPDATA%\OpenCSI\credentials.dat`, and a *separate* process read a 57-minute session from it and returned live data. During the scan, 43 chrome/msedge processes were already running and the delta was **0** — no browser was started. Supersedes the earlier `PRE_SCAN_VERIFIED`. |
+| **Durable browserless usage** | `VERIFIED` | Two independent processes, one DPAPI store, no browser: process A writes, process B reads the same token. `tools/acceptance_durable.py`, all checks PASS. Re-confirmed live after killing every OpenCSI process. |
+| **Durable renewal** | `VERIFIED` — **live, and offline A→B→C** | `login --renew` against the live account reported `RENEWED`, mechanism `stored-oauth`, *token changed: yes*, *server accepted it: yes*, exit 0, browser delta 0, and **zero** QR codes issued. A fresh process then read the renewed session. Independently, `tools/acceptance_durable_renewal.py` proves A writes → B renews via the production wiring → C reads, in three real processes. |
+| **GitCode refresh-token rotation** | endpoint: `VERIFIED` / implementation: `VERIFIED` / **normal-lifecycle integration: `VERIFIED`** / live rotation: **`NOT EXECUTED`** | Endpoint confirmed by probe: `POST https://gitcode.com/oauth/token?grant_type=refresh_token&…`. `RefreshingGitCodeRenewer` is now reachable from `make_renewer()`, closing the gap where the refresher existed and nothing called it. Live rotation is still unobserved — and cannot be honestly claimed, because the QR response carries no `expires_in`, so every stored credential has an unknown GitCode expiry and the refresh is attempted on every run. On this account that refresh is *refused* (HTTP 400), so no successful rotation has been seen. |
+| **Tray browserless startup** | `VERIFIED` — live | `opencsi-tray.exe --once` read the live renewed session (`total tokens: 4,237,890,625`, `credential: 53m`) with exit 0, and its `--json` surface was checked to contain no credential value. `auto_recover_auth_host` defaults to `False`, so the normal path starts no browser engine. |
 | **Windows startup registration** | `VERIFIED` — live registry round trip | Installed, read back from `HKCU\...\Run`, and removed. The value was `dist\opencsi-tray.exe`, never the bare CLI. See below. |
 | **CI** | `VERIFIED` — **all 14 jobs green** | Real GitHub Actions runs. See §11. |
-| **Repository hygiene** | `VERIFIED` | 156 tracked files, every text blob stored LF; zero scratch tools; enforced by `tests/test_repository_hygiene.py`. |
-| **Secret safety** | `VERIFIED` | 17 dedicated tests over every output surface; scanner clean; no real credential value found in 156 tracked files; and no test can write to the real store (see below). |
+| **Repository hygiene** | `VERIFIED` | 158 tracked files, every text blob stored LF; zero scratch tools; enforced by `tests/test_repository_hygiene.py`. |
+| **Secret safety** | `VERIFIED` | 21 dedicated tests over every output surface; scanner clean; no real credential value found in the tracked files; and no test can write to the real store (see below). |
 
 ### What is *not* claimed
 
-- **No real QR scan was performed.** Per §10.3 this can only be reported as
-  `PRE_SCAN_VERIFIED`. A phone is required, and no phone was involved. This is why
-  the first row above is split: persistence is verified, the scan is not.
-- **Live renewal against a real account was not executed**, for the same reason:
-  there is no scanned credential to renew from. What is verified is the mechanism
-  (HTTP, no browser) and the persistence (next process reads the new token).
-- **GitCode refresh-token rotation was not observed live.** The endpoint is
-  confirmed; whether GitCode actually returns a *new* refresh token is
-  undocumented and was not exercised.
+- **A real QR scan *was* performed** — this is the change from the previous
+  revision, which reported `PRE_SCAN_VERIFIED` because no phone was involved. A
+  phone was involved this time. The scan completed, the credential landed in the
+  store, and a separate process read it. The row is no longer split.
+- **GitCode refresh-token rotation was not observed live, and could not be.** Two
+  facts combine here, and both are evidence-backed rather than assumed. First, the
+  QR login response carries no `expires_in` field at all
+  (`docs/gitcode-qr-protocol.md`, response body is `is_new`/`user_id`/`mask`/
+  `mobile`/`username`/`user_status_enum`/`access_token`/`refresh_token`), so
+  `access_expires_at` is legitimately `None` after every scan — the tool cannot
+  invent a lifetime it was never told. Second, `needs_refresh` treats an unknown
+  expiry as "refresh now", so every renewal on this account attempts a real
+  rotation. That attempt is **refused**: `HTTP 400 BAD_REQUEST` from
+  `https://gitcode.com/oauth/token`. So a rotation was attempted many times and
+  never once succeeded. Reporting the row as "rotation verified" would be false.
+  What *is* verified is that the attempt is made on the normal path, that its
+  refusal no longer breaks a working session (see below), and that no rotation
+  token is corrupted by a failed attempt.
+- **The live renewal ran against a real account and succeeded** — `login --renew`
+  reported `RENEWED`, `token changed: yes`, `server accepted it: yes`, exit 0. The
+  earlier revision of this report said this was not executed.
 - **A real Windows sign-out → sign-in was not performed.** The registry round trip
   is verified directly (install, read back, remove), not across a real logon.
 - **The consent path was not exercised against a never-approved account.** The
   `CONSENT_REQUIRED` branch is unit-tested; the live first-authorization flow is
   untested and deliberately never automated.
 - **`xauth_token`'s consumer remains unidentified.** Recorded in §12.
+
+### Two live defects this round found, and neither was visible offline
+
+Worth stating plainly, because the previous revision of this report asserted the
+durable path was already verified:
+
+1. **A refused GitCode refresh ended a healthy session.** With a real credential
+   and 56 minutes of session life left, `login --renew` returned `LOGIN_REQUIRED`
+   and advised a new QR scan. `RefreshingGitCodeRenewer` treated the refusal as
+   final and returned before attempting the OAuth leg — but the two are separate
+   credentials, and only the OAuth leg can say whether the stored session still
+   works. It did. Fixed: the refresh is still attempted and still respected, it
+   just no longer short-circuits; `LOGIN_REQUIRED` is now reported only when the
+   OAuth attempt *also* fails, with the refresh detail attached.
+2. **`--status` called the store path unrenewable.** `renewal_capability` knew
+   only `CdpCookieProvider` and answered everything else "a manually supplied
+   token has no GitCode SSO session" — false, and the wrong cause, on a machine
+   where `login --renew` then succeeded. Fixed and covered by four tests.
+
+Both were introduced or exposed by the P1 wiring, both passed 1089 offline tests,
+and both required a real scan to observe. That is the argument for the live gate
+existing at all.
 
 ### §10.9 verified live, on the real registry
 
@@ -239,10 +273,16 @@ expected encryption.
 
 ### Q1. After `opencsi login --qr` succeeds, does closing the process and running `opencsi usage` succeed?
 
-**`YES`** — for the persistence half, which is the part this round changed, and
-**`NOT EXECUTED`** for the real-scan half.
+**`YES`** — with a real scan, on a real account.
 
-Evidence for persistence, from `tools/acceptance_durable.py`:
+A real WeChat scan completed (`login --qr` exit 0, user `shijingchang`, employeeId
+653124, "openCsiTool session established and verified", credential written to
+`%LOCALAPPDATA%\OpenCSI\credentials.dat`). Every OpenCSI process was then killed
+(0 remaining), and a fresh `opencsi usage` returned live data — 4,237,890,625
+tokens, 32,026 requests — from the stored session, with the credential source
+reported as `secure-store`.
+
+The persistence half was already proven offline, by `tools/acceptance_durable.py`:
 
 ```text
 [PASS] process A writes the credential
@@ -256,9 +296,6 @@ and the session *after* `getUserInfo`, and exit 0 now requires the write to have
 succeeded — a session that cannot be persisted exits `35`
 (`EXIT_NOT_PERSISTED`), not 0, because the user must know the next process will
 fail.
-
-Exact blocker on the scan: **no WeChat scan was performed.** A phone is required.
-Per §10.3 this can only be reported as `PRE_SCAN_VERIFIED`.
 
 ### Q2. Does success involve a Chrome/Edge auth host?
 
@@ -278,23 +315,58 @@ credential, and for when the store is unavailable.
 
 ### Q3. After the openCsiTool token expires, can it be renewed entirely from the stored GitCode credential?
 
-**`YES`** for the mechanism and the persistence; **`NOT EXECUTED`** against a live
-account.
+**`YES`** — verified live, and independently across three real processes.
 
-Evidence: `CliContext.make_renewer()` builds
-`HttpOAuthRenewer(StoredGitCodeCredentialSource(store))`, so the GitCode
-credential is read from DPAPI and the new token is written back through
-`StoredOpenCsiCredentialProvider.remember_token()`. Renewal no longer requires a
-`CdpCookieProvider` — that requirement was removed this round — and the store is
-consulted only when the provider is actually store-backed, so a manually pasted
-token can never renew against a stored identity.
+Live evidence. With a real scanned credential, the session was deliberately cleared
+by `opencsi logout` (which keeps the GitCode credential by design), leaving no
+openCsiTool session at all. `opencsi login --renew` then reported:
 
-Exact blocker on the live run: there is no scanned credential to renew from, since
-no scan was performed.
+```text
+== Session renewal ==
+Outcome : RENEWED
+Mechanism : stored-oauth
+Cookie lifetime before : -
+Cookie lifetime after  : 59m59s
+Token changed      : yes
+Server accepted it : yes
+```
+
+Exit 0, **zero QR codes issued** (no new PNG in the login-code directory), and a
+browser-process delta of **0**. A fresh process then read the renewed session and
+returned live data.
+
+Offline evidence, `tools/acceptance_durable_renewal.py` — the chain that the
+previous revision of this report could not demonstrate:
+
+```text
+[PASS] A: writes T1 and GitCode A1/R1
+[PASS] B: renewal reports RENEWED
+[PASS] C: reads the renewed session T2
+[PASS] GitCode A1/R1 preserved across the renewal
+[PASS] no plaintext in the renewed store -- 518 bytes ciphertext
+[PASS] no browser started
+```
+
+Process B builds the renewer the way the product does — `CliContext.make_provider()`
+→ `make_renewer()` → `SessionManager.renew()` — and does **not** hand the minted
+token to the sink, because doing so would test the part that was never broken. It
+was the *wiring* that was broken: `make_renewer()` passed the read-only
+`StoredGitCodeCredentialSource` as the renewer's provider, and `HttpOAuthRenewer`
+fetches `remember_token`/`install_token` with `getattr`, so the missing write half
+was silently skipped and renewal persisted nothing while reporting `RENEWED`.
+
+`StoredGitCodeCredentialSource` is still read-only. The write half comes from a
+purpose-built `StoredOAuthCredentialAdapter`, so a GitCode *source* never doubles
+as an openCsiTool *sink* — the two are different credentials and conflating them
+was the whole defect.
+
+Exact blocker on the remaining sub-question: which of Q4's rotation behaviours
+actually occurs live, since the refresh is refused on this account.
 
 ### Q4. After the GitCode access token expires, does the refresh token actually extend the login?
 
-**`NOT EXECUTED`** — endpoint and code verified, live rotation not observed.
+**`NOT EXECUTED`** — endpoint, implementation and normal-lifecycle integration are
+verified; a *successful* live rotation was never observed, and cannot be claimed.
 
 Evidence for the endpoint, from `tools/probe_gitcode_refresh.py`:
 
@@ -311,16 +383,53 @@ one. Failure statuses are kept distinct — `REFRESHED`, `LOGIN_REQUIRED`,
 `NETWORK_ERROR`, `PROTOCOL_ERROR` — so a network blip is never reported as "sign in
 again".
 
+Why the live half is `NOT EXECUTED` rather than `YES`, stated precisely. The
+integration now exists: `RefreshingGitCodeRenewer` is reachable from
+`make_renewer()`, where before this round nothing in the product called the
+refresher at all (`rg` found it only in its own module and in tests — a class that
+existed, was tested, and was dead code). But the attempt is *refused* on this
+account:
+
+```text
+refresh status  : LOGIN_REQUIRED
+detail          : GitCode refused the refresh token (HTTP 400):
+                  {"error_code":400,"error_code_name":"BAD_REQUEST", …}
+```
+
+The refusal is not caused by a stale rotation. Two independent reasons:
+
+1. **No token was ever successfully rotated by this tool.** The only refresh calls
+   made were the ones in this round's live run, and every one returned 400. Nothing
+   in this tool could have invalidated a rotation token, because no rotation
+   succeeded.
+2. **The QR response never carried an expiry.** `docs/gitcode-qr-protocol.md`
+   records the response body as `is_new`/`user_id`/`mask`/`mobile`/`username`/
+   `user_status_enum`/`access_token`/`refresh_token` — no `expires_in`, and the
+   bundle analysis found no `expire`/`expires_in`/`ttl` field read on that path.
+   So `access_expires_at` is `None` after every scan, `needs_refresh` treats an
+   unknown expiry as "refresh now" (correct on its own terms), and the refresh is
+   attempted on **every** renewal rather than fifteen days later.
+
+That combination is itself a finding: a credential scanned seconds ago already
+reports as needing a refresh. It is recorded as an open item rather than papered
+over, and it is why the rotation-token corruption §38 warns about could not have
+been self-inflicted by this round.
+
 ### Q5. After Windows starts, does the Tray show usage without the user starting a browser first?
 
-**`YES`** for the store path and the no-browser default; **`NOT EXECUTED`** across
-a real sign-out.
+**`YES`** for the live tray read and the no-browser default; **`NOT EXECUTED`**
+across a real sign-out.
 
-Evidence: the tray signs in through the same store the CLI uses and invalidates the
-monitor's cached credential rather than patching client internals — so the
-provider sees the new credential on its next read. `auto_recover_auth_host` is
-`False` by default, so startup does not launch Chromium. Startup registration is
-verified to name `opencsi-tray.exe`, never the bare CLI.
+Evidence: `opencsi-tray.exe --once` read the live renewed session with exit 0 —
+`state: OK`, `total tokens: 4,237,890,625`, `requests: 32,026`,
+`credential: 53m` — while 43 chrome/msedge processes were already running and the
+delta attributable to OpenCSI was 0. Its `--json` surface was checked against the
+contents of the actual store: no credential value appears in it. The tray signs in
+through the same store the CLI uses and invalidates the monitor's cached credential
+rather than patching client internals, so the provider sees the new credential on
+its next read. `auto_recover_auth_host` is `False` by default, so startup does not
+launch Chromium. Startup registration is verified to name `opencsi-tray.exe`, never
+the bare CLI.
 
 Exact blocker: a genuine Windows sign-out → sign-in was not performed. The
 registry round trip is verified directly (install, read back, remove, restore), not
@@ -337,7 +446,7 @@ defects the first honest run exposed.
 
 Evidence: `git ls-files --eol` reports `i/lf` for every text blob in the index —
 which is what is committed, and what `tests/test_repository_hygiene.py` asserts by
-reading blobs back out of `HEAD` rather than trusting the working tree. 156 tracked
+reading blobs back out of `HEAD` rather than trusting the working tree. 158 tracked
 files. `*.bat`, `*.cmd` and `*.ps1` are explicitly CRLF, and binaries are marked
 `binary` so `text=auto` never rewrites them.
 
@@ -1306,9 +1415,17 @@ before anyone runs it.
 
 ### Not executed
 
-- **A real WeChat scan.** No phone was involved. `PRE-SCAN VERIFIED` only.
-- **A full logout → login cycle.**
+- **A successful GitCode refresh-token rotation.** The endpoint, the implementation
+  and the normal-lifecycle integration are all verified; the live rotation is
+  refused (HTTP 400) on this account. See Q4.
 - **The live consent flow** against a never-approved account.
+
+### Executed this round, live
+
+- **A real WeChat scan**, on a real phone, against a real account — exit 0, both
+  credentials written to DPAPI.
+- **A full logout → renew → usage cycle**, with no QR code and no browser.
+- **A tray read** of the renewed session, and a credential-leak check of its JSON.
 
 ---
 
@@ -1433,10 +1550,12 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
 
 ### Genuinely impossible without a phone
 
-- **The WeChat scan itself.** A physical action. This is not a browser-JS
-  requirement and does not make the flow `QR_FLOW_BROWSER_BOUND`. Everything
-  downstream of the scan — persistence, cross-process reuse, browserless renewal —
-  is verified without one.
+- **Nothing in this round's core chain, as it turned out.** The scan was performed
+  on a real phone against a real account, and everything downstream of it —
+  persistence, cross-process reuse, browserless renewal, tray read — is now
+  verified live rather than by proxy. The earlier revision of this report listed
+  the scan itself here and marked four rows `PRE_SCAN_VERIFIED`; that is no longer
+  the state of the evidence.
 
 ### Genuinely requires a human, but only once
 
@@ -1447,13 +1566,19 @@ Only what was measured. Nothing here is "尚未解决" dressed up as "理论上�
 
 ### Unresolved, with the reason
 
-- **GitCode refresh-token rotation was not observed live.** The endpoint is
-  confirmed by probe; whether GitCode returns a *new* refresh token is
+- **A successful GitCode refresh-token rotation was never observed.** The endpoint
+  is confirmed by probe; whether GitCode returns a *new* refresh token is
   undocumented. The code treats it as rotating and reports whether it did, rather
-  than assuming either way.
-- **Live renewal against a real account was not executed**, because no scan was
-  performed and therefore no credential exists to renew from. The mechanism and
-  the persistence are both verified independently.
+  than assuming either way. Live, the refresh is *refused* — HTTP 400 — and the
+  refusal is reproducible. It cannot have been caused by a rotation this tool
+  performed, because no rotation ever succeeded. Two things follow, and both are
+  open: why GitCode refuses the token, and why a credential scanned moments earlier
+  reports as needing a refresh at all. The second has a known cause — the QR
+  response carries no `expires_in`, and `needs_refresh` treats an unknown expiry as
+  "refresh now" — which is a deliberate rule that this deployment makes expensive.
+- **Live renewal against a real account *was* executed** and succeeded
+  (`RENEWED`, token changed, server accepted, exit 0, no QR, no browser). This
+  entry previously said the opposite.
 - **A real Windows sign-out and sign-in was not performed**, so §30's flow is
   verified up to the hidden engine coming up but not through an actual logon. The
   registry round trip itself is verified directly: install, read back, remove,
