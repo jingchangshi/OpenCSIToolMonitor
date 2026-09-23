@@ -20,6 +20,8 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import helpers  # noqa: F401  (imported for its sys.path side effect)
+
 from opencsi.auth.gitcode_refresh import (
     GITCODE_ACCESS_TOKEN_SECONDS,
     GITCODE_TOKEN_URL,

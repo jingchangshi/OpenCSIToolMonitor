@@ -27,6 +27,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import helpers  # noqa: F401  (imported for its sys.path side effect)
+
 from opencsi.auth.store import (
     STORE_VERSION,
     CredentialBundle,

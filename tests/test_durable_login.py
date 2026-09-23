@@ -30,6 +30,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import helpers  # noqa: F401  (imported for its sys.path side effect)
+
 from opencsi.auth.store import (
     CredentialBundle,
     MemoryCredentialStore,
