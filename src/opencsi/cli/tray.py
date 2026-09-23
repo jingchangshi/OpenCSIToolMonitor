@@ -294,6 +294,21 @@ def _sign_in_qr(service) -> None:
     The refresh afterwards is **enqueued**, never performed here: all fetching
     happens on the monitor's worker thread, and calling ``_refresh_once`` from
     this one would race it on both the HTTP call and the bookkeeping.
+
+    **The credential is written to the durable store, and that is what makes the
+    tray's sign-in stick.** Previously this function obtained a real session and
+    then handed it to nobody: ``GitCodeCookieSource`` and ``HttpOAuthRenewer``
+    both held it in their own memory, and the ``MonitorService`` went on reading
+    its original provider, which had never seen it. The visible symptom was a
+    tray that reported success and then showed nothing -- and, after a restart,
+    needed signing in again.
+
+    Writing to the shared store fixes it without reaching into the monitor's
+    internals: the provider the service already holds re-reads that same store on
+    its next tick, so it sees the new credential by itself. Assigning
+    ``service._client.provider = ...`` would have been the tempting alternative,
+    and it is wrong -- it patches a private field, races the worker thread, and
+    leaves the stored credential still absent so the *next* process starts over.
     """
     import time
 
@@ -329,6 +344,25 @@ def _sign_in_qr(service) -> None:
         log.warning("the QR credential held none of the cookies the flow needs")
         return
 
+    # Persist the GitCode half before the leg that can fail, matching the CLI.
+    # It is what makes every later renewal possible without another scan, so a
+    # failure further down must not lose it.
+    store = _open_store()
+    if store is not None:
+        try:
+            from ..auth.store import StoredGitCodeCredential
+
+            store.save_gitcode(
+                StoredGitCodeCredential(
+                    access_token=credentials["access_token"],
+                    refresh_token=credentials.get("refresh_token"),
+                    username=result.username,
+                )
+            )
+            log.info("stored the GitCode credential from the tray")
+        except Exception as exc:  # noqa: BLE001 - report, never crash the tray
+            log.warning("could not store the GitCode credential: %s", type(exc).__name__)
+
     renewer = HttpOAuthRenewer(source, base_url=BASE_URL)
     renewal = renewer.renew()
     if renewal.status not in (RenewalStatus.RENEWED, RenewalStatus.ALREADY_VALID):
@@ -336,6 +370,33 @@ def _sign_in_qr(service) -> None:
         # has to approve the page once -- not to silently try again.
         log.info("the QR login stopped at %s", renewal.status.value)
         return
+
+    # Persist the session too. Without this the tray would work until it exited
+    # and the credential would be gone, which is precisely the "works only in
+    # this process" defect this round removes.
+    if store is not None:
+        token = source.get_token()
+        if token:
+            try:
+                from ..auth.store import StoredOpenCsiCredential
+
+                store.save_opencsi(
+                    StoredOpenCsiCredential(
+                        token=token,
+                        expires_at=(
+                            time.time() + renewal.expires_in
+                            if renewal.expires_in
+                            else None
+                        ),
+                    )
+                )
+                log.info("stored the openCsiTool session from the tray")
+                # The provider the monitor already holds caches for a few
+                # seconds; dropping that cache is not reaching into internals,
+                # it is the documented way to say "the store changed".
+                _invalidate_service_credential(service)
+            except Exception as exc:  # noqa: BLE001 - report, never crash the tray
+                log.warning("could not store the session: %s", type(exc).__name__)
 
     # The session exists; the worker thread should now pick it up. Enqueued
     # rather than performed, for the reason in the docstring.
@@ -345,6 +406,43 @@ def _sign_in_qr(service) -> None:
         if service.snapshot.has_data:
             return
         time.sleep(5.0)
+
+
+def _open_store():
+    """The durable credential store, or ``None`` when there is none to use.
+
+    ``None`` on a platform without a secure store. There is deliberately no
+    fallback: a plaintext store would be worse than not persisting, because the
+    failure would be silent.
+    """
+    try:
+        from ..auth.windows_store import open_default_store
+
+        return open_default_store()
+    except Exception:  # noqa: BLE001 - a missing store is not a tray failure
+        return None
+
+
+def _invalidate_service_credential(service) -> None:
+    """Tell the service's provider to re-read the store on its next tick.
+
+    ``invalidate()`` is the provider's public contract -- "drop the cache, the
+    next read goes to the source" -- and on a store-backed provider it never
+    deletes anything, so this is safe to call at any time.
+
+    Used instead of assigning the provider, which would patch a private field and
+    race the worker thread. Never raises: the tray's sign-in has already
+    succeeded at this point, and failing here would discard a real result.
+    """
+    try:
+        session = getattr(service, "_client", None)
+        session = getattr(session, "session", None)
+        provider = getattr(session, "credentials", None)
+        invalidate = getattr(provider, "invalidate", None)
+        if callable(invalidate):
+            invalidate()
+    except Exception:  # noqa: BLE001 - best effort; the store is already written
+        pass
 
 
 def _sign_in(service) -> None:

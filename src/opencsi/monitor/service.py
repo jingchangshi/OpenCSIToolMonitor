@@ -759,6 +759,61 @@ class MonitorService:
         self._publish(published)
         return published
 
+    def _durable_credential_available(self) -> bool:
+        """Whether the secure store already holds something usable.
+
+        Asked of the *client's own provider*, not of a fresh store, because the
+        provider is what the service will actually read from on the retry. A
+        separate lookup could answer "yes" while the provider in use is a browser
+        provider that will still fail, and the service would then skip the
+        recovery its real credential source needed.
+
+        Only a :class:`~opencsi.auth.stored.StoredOpenCsiCredentialProvider`
+        counts. A browser provider is deliberately not consulted: it is not a
+        durable credential, and asking it would reach for a browser in the one
+        code path whose purpose is to avoid doing so.
+
+        The *store* is consulted rather than the provider's cache, because a
+        fresh provider's cache is empty until its first read -- and it is exactly
+        the fresh-provider case (tray start-up, before any tick) that must not
+        start a browser. ``peek_token()`` is checked first anyway, since when it
+        does have an answer no I/O at all is needed.
+
+        Failure is ``False`` -- start the recovery. An unreadable store should not
+        suppress the browser path, which may well work; the opposite mistake
+        (claiming a credential exists when it cannot be read) would strand the
+        tray on a permanent error with no attempt made.
+        """
+        from ..auth.stored import StoredOpenCsiCredentialProvider
+
+        credentials = getattr(self._client, "session", None)
+        provider = getattr(credentials, "credentials", None)
+        if provider is None:
+            return False
+
+        candidates = [provider]
+        # A composite hides which source answered, so its members are checked
+        # too -- otherwise a stored credential behind one would be invisible and
+        # a browser would be started anyway, which is the same bug one layer down.
+        members = getattr(provider, "_providers", None)
+        if isinstance(members, (list, tuple)):
+            candidates = [*members, provider]
+
+        for candidate in candidates:
+            if not isinstance(candidate, StoredOpenCsiCredentialProvider):
+                continue
+            try:
+                if candidate.peek_token():
+                    return True
+                # A fresh provider has no cache yet, so ask the store. This is a
+                # local file read, and it is the case that matters: the tray asks
+                # this question at start-up, before its first fetch.
+                if candidate.has_stored_credential():
+                    return True
+            except Exception:  # noqa: BLE001 - a probe must never break the tick
+                continue
+        return False
+
     def _maybe_recover_browser(self) -> bool:
         """Try to restore a credential source, hidden first.
 
@@ -766,15 +821,30 @@ class MonitorService:
         starts the tray at sign-in, but Chrome is not running yet, so the tray
         would otherwise sit at "browser not running" until someone clicked.
 
+        **It is now the fallback, not the normal path.** The first thing this
+        method does is ask whether a durable credential is already available; if
+        one is, there is nothing to recover and no process to start. That check
+        is what removes the "Tray -> must start Chrome first" dependency, and it
+        is deliberately the *first* branch rather than a condition on the launch,
+        because the cheapest way to avoid opening a browser is not to consider
+        opening one.
+
         Objective §30 puts the hidden host first, and §61 spells out why: the user
         must not see ``BROWSER_UNAVAILABLE`` merely because Chrome was not already
         open. The order is therefore:
 
+        0. **a credential in the durable store** -- nothing to do at all. This is
+           the normal path, and reaching either launch below means it did not
+           apply: the store is empty, unreadable, or disabled with ``--no-store``.
         1. ``AuthBrowserHost.ensure_running(headless=True)`` -- the engine needed
            for the OAuth leg, with no window. Costs the user nothing visible.
         2. ``launch_debug_browser`` -- a *visible* window. Only when the user
            opted in with ``auto_recover_browser``, because that is the behaviour
            they would object to, and only when the hidden attempt did not work.
+
+        Step 0 must not be mistaken for an optimisation. Starting a browser to
+        answer a question the store already answers is how the previous design
+        ended up requiring a browser for a flow that demonstrably needs none.
 
         The visible fallback is gated rather than automatic because
         ``--headless=new`` is not universally supported: on a build that rejects
@@ -789,6 +859,10 @@ class MonitorService:
         while doubling the work. Never raises: a recovery that fails must leave
         the state honest, not take down the worker.
         """
+        if self._durable_credential_available():
+            log.debug("a durable credential is stored; not starting a browser")
+            return False
+
         now = self._clock()
         if (
             self._last_browser_recover is not None

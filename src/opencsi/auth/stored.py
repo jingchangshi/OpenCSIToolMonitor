@@ -251,6 +251,25 @@ class StoredOpenCsiCredentialProvider:
         """
         return self._cached.token if self._cached is not None else None
 
+    def has_stored_credential(self) -> bool:
+        """Whether the store holds a session, without caching or raising.
+
+        A cheap pre-flight for callers deciding whether to *start something* -- in
+        practice :class:`~opencsi.monitor.MonitorService`, which must not launch a
+        browser to answer a question the store already answers.
+
+        Distinct from :meth:`peek_token`, which reports only what has already been
+        read: a fresh provider has an empty cache even when the store is full, and
+        that is precisely the case at tray start-up.
+
+        Never raises, and never treats a broken store as "yes". A store that
+        cannot be read must not suppress a recovery attempt that might work.
+        """
+        try:
+            return self._store.load().opencsi is not None
+        except Exception:  # noqa: BLE001 - a pre-flight must never raise
+            return False
+
     def invalidate(self) -> None:
         """Drop the **cache** only. Never deletes the stored credential.
 
