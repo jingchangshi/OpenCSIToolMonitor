@@ -48,7 +48,8 @@ from typing import Callable
 
 from ..auth.session import RenewalStatus, SessionManager
 from ..errors import OpenCsiError
-from ..models import MyToolsSnapshot
+from ..aggregation import aggregate_trend, estimate_usage_cost
+from ..models import ModelPrice, MyToolsSnapshot
 
 log = logging.getLogger("opencsi.monitor")
 
@@ -199,6 +200,79 @@ _TRANSIENT_STATES = frozenset(
 
 
 @dataclass(frozen=True)
+class DailyModelUsage:
+    """One model's usage for the local calendar day."""
+
+    request_type: str
+    display_name: str
+    tokens: int
+    cost: float | None = None
+
+
+@dataclass(frozen=True)
+class DailyUsage:
+    """Usage derived from tokenTrend for one local calendar day."""
+
+    date: str
+    total_tokens: int = 0
+    total_cost: float | None = 0.0
+    currency: str = "CNY"
+    models: tuple[DailyModelUsage, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "date": self.date,
+            "total_tokens": self.total_tokens,
+            "total_cost": round(self.total_cost, 4) if self.total_cost is not None else None,
+            "currency": self.currency,
+            "models": [
+                {
+                    "request_type": m.request_type,
+                    "display_name": m.display_name,
+                    "tokens": m.tokens,
+                    "cost": round(m.cost, 4) if m.cost is not None else None,
+                }
+                for m in self.models
+            ],
+        }
+
+
+def build_daily_usage(
+    snapshot: MyToolsSnapshot, prices: tuple[ModelPrice, ...], *, date: str
+) -> DailyUsage:
+    """Build the site's daily token/cost view from date-filtered tokenTrend.
+
+    The API investigation established two important facts: startDate/endDate
+    filter tokenTrend, not requestList/tokenSummary; and the web page's money
+    view is tokens * blendedPrice / 1e6. Reuse the existing cost engine so the
+    tray cannot drift from the CLI's pricing semantics.
+    """
+    tokens_by_model = aggregate_trend(snapshot.token_trend, by_model=True)
+    estimate = estimate_usage_cost(tokens_by_model, prices)
+    models = tuple(
+        DailyModelUsage(
+            request_type=line.request_type,
+            display_name=line.display_name or line.request_type or "Unknown",
+            tokens=line.tokens,
+            cost=line.estimated_cost,
+        )
+        for line in sorted(
+            estimate.lines, key=lambda line: (-line.tokens, line.display_name, line.request_type)
+        )
+    )
+    total_tokens = sum(m.tokens for m in models)
+    complete = all(m.cost is not None for m in models if m.tokens > 0)
+    total_cost = estimate.token_cost if complete else (0.0 if not models else None)
+    return DailyUsage(
+        date=date,
+        total_tokens=total_tokens,
+        total_cost=total_cost,
+        currency=estimate.currency,
+        models=models,
+    )
+
+
+@dataclass(frozen=True)
 class MonitorSnapshot:
     """An immutable, secret-free view of the account for a UI to render.
 
@@ -225,6 +299,8 @@ class MonitorSnapshot:
     last_error: str | None = None
     #: Seconds of credential life left, when known. Advisory only.
     credential_expires_in: float | None = None
+    #: Usage for the current local calendar day, derived from tokenTrend.
+    daily_usage: DailyUsage | None = None
     #: How many consecutive failures have occurred (drives backoff).
     consecutive_failures: int = 0
 
@@ -261,6 +337,8 @@ class MonitorSnapshot:
             "adopted_lines": self.adopted_lines,
             "adoption_rate": round(self.adoption_rate, 4),
         }
+        if self.daily_usage is not None:
+            out["daily_usage"] = self.daily_usage.as_dict()
         if self.data_fresh_time:
             out["data_fresh_time"] = self.data_fresh_time
         if self.fetched_at is not None:
@@ -280,6 +358,7 @@ class MonitorSnapshot:
         *,
         state: MonitorState = MonitorState.OK,
         credential_expires_in: float | None = None,
+        daily_usage: DailyUsage | None = None,
     ) -> "MonitorSnapshot":
         """Build a monitor snapshot from an API response."""
         fresh = snapshot.sync_status.data_fresh_time if snapshot.sync_status else None
@@ -295,6 +374,7 @@ class MonitorSnapshot:
             data_fresh_time=fresh,
             fetched_at=snapshot.fetched_at or datetime.now(timezone.utc),
             credential_expires_in=credential_expires_in,
+            daily_usage=daily_usage,
         )
 
     def with_state(self, state: MonitorState, *, error: str | None = None) -> "MonitorSnapshot":
@@ -693,15 +773,48 @@ class MonitorService:
         except Exception as exc:  # noqa: BLE001 - the tray must not die
             return self._handle_failure(exc, recovered=_recovered)
 
+        daily_usage = self._fetch_daily_usage(refresh=force)
         credential = self._credential_status()
         published = MonitorSnapshot.from_snapshot(
             snapshot,
             state=MonitorState.OK,
             credential_expires_in=credential,
+            daily_usage=daily_usage,
         )
         self._next_refresh_at = self._clock() + self.config.refresh_interval
         self._publish(published)
         return published
+
+    def _local_today(self) -> str:
+        """The operating system's current local calendar date."""
+        now = self._now()
+        try:
+            if now.tzinfo is not None:
+                now = now.astimezone()
+        except (ValueError, OSError):
+            pass
+        return now.date().isoformat()
+
+    def _fetch_daily_usage(self, *, refresh: bool) -> DailyUsage | None:
+        """Fetch today's trend and price it; keep same-day last-good data.
+
+        Daily usage is deliberately independent from the headline fetch. A
+        temporary failure of the price endpoint must not blank otherwise valid
+        account data, and yesterday's cached value must never be relabelled as
+        today's after midnight.
+        """
+        today = self._local_today()
+        try:
+            daily = self._client.get_my_tools(today, today, refresh=refresh)
+            prices = self._client.get_model_prices(refresh=False)
+            return build_daily_usage(daily, tuple(prices), date=today)
+        except Exception as exc:  # noqa: BLE001 - auxiliary data must not kill the tray
+            previous = self.snapshot.daily_usage
+            if previous is not None and previous.date == today:
+                log.debug("daily usage refresh failed; retaining same-day data: %s", type(exc).__name__)
+                return previous
+            log.debug("daily usage unavailable: %s", type(exc).__name__)
+            return None
 
     def _classify_failure(self, exc: BaseException) -> MonitorState:
         """The state for a failure, preferring what renewal actually said.
