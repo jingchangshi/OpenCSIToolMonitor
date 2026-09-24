@@ -163,6 +163,19 @@ def _once(ctx: CliContext, config) -> int:
             ctx.out(f"generated:    {snapshot.generated_lines:,} lines")
             ctx.out(f"adopted:      {snapshot.adopted_lines:,} lines")
             ctx.out(f"adoption:     {snapshot.adoption_rate:.1%}")
+            if snapshot.daily_usage is not None:
+                from ..tray.presenter import format_cost
+
+                daily = snapshot.daily_usage
+                ctx.out(
+                    f"today:        {daily.total_tokens:,} tokens / "
+                    f"{format_cost(daily.total_cost, daily.currency)}"
+                )
+                for model in daily.models:
+                    ctx.out(
+                        f"  {model.display_name}: {model.tokens:,} / "
+                        f"{format_cost(model.cost, daily.currency)}"
+                    )
             if snapshot.data_fresh_time:
                 ctx.out(f"server data:  {snapshot.data_fresh_time}")
         if snapshot.credential_expires_in is not None:
