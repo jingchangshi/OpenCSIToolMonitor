@@ -109,7 +109,7 @@ class OpenCsiToolClient:
         cache_ttl: float = DEFAULT_TTL,
         transport: HttpTransport | None = None,
         verbose: bool = False,
-        use_proxy: bool = True,
+        use_proxy: bool = False,
         session: SessionManager | None = None,
     ) -> None:
         self.credentials = credentials

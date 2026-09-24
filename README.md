@@ -29,6 +29,7 @@
 - [安全性](#安全性)
 - [常见问题](#常见问题)
 - [开发](#开发)
+- [开发待办](docs/TODO.md)
 
 ---
 
@@ -708,13 +709,20 @@ opencsi-monitor                # 等价于 opencsi tray
 读的就是它 —— 在这里关和在系统里关是同一件事。**不显式执行 `--install-startup`
 就不会写任何东西。**
 
-托盘的文字是中文，数字用 `万` / `亿`：
+托盘的文字是中文，数字用 `万` / `亿`。除了账号累计值，托盘还会用本机当天日期请求 `personalQueueStatus?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`，从受日期过滤的 `tokenTrend` 聚合各模型 Token，并按站点同一口径 `tokens × blendedPrice / 1e6` 计算消费金额：
 
 ```text
 OpenCSI | 正常
-36.3亿 tokens  2.7万 次请求  249 PR
+今日 5285.2万 tokens | ¥14.80
 更新于 0s 前 | 会话 53m
+
+菜单：
+今日: 52,852,000 tokens / ¥14.80
+  GLM-5.3-Flash: 31,000,000 / ¥5.58
+  DeepSeek-V4-Flash-0731: 21,852,000 / ¥6.12
 ```
+
+如果某模型没有可验证的 Token 单价，金额显示 `--`，不会把“未知”误显示为 `¥0.00`。
 
 **tooltip 用 `亿`，菜单用完整数字**，这是刻意的：tooltip 一共只有 127 个字符
 （Windows `NOTIFYICONDATA` 的硬限制），必须压缩；而菜单有空间，打开菜单看数字的
@@ -909,18 +917,22 @@ opencsi login --manual          # ✅ 用 getpass() 从 stdin 读
 浏览器连上了，但里面没有登录状态。请在**那个**浏览器窗口里登录一次
 openCsiTool（注意：专用配置目录是全新的，需要重新登录）。
 
-### 报错 `SSLEOFError` / `UNEXPECTED_EOF_WHILE_READING`
+### 代理与 `SSLEOFError` / `UNEXPECTED_EOF_WHILE_READING`
 
-**不是服务端故障**，通常是本地代理。
+OpenCSIToolMonitor **默认直连**，不会因为 `HTTP_PROXY` / `HTTPS_PROXY` 或 Windows 系统代理存在，就自动把业务 API、扫码或续期流量送进代理。这是因为实际机器上的 `127.0.0.1:7890` 能代理部分站点，却无法连通 openCsiTool，导致 Python 看起来像服务端 TLS 故障。
 
-`urllib` 在 Windows 上会读注册表里的系统代理，而 `curl` 不读 —— 所以
-`curl` 能通、Python 不通。用 `--no-proxy` 绕过：
+只有显式指定 `--proxy` 时才启用 urllib 的正常代理发现：
 
 ```bash
-opencsi status --no-proxy
+opencsi usage                 # 默认：直连
+opencsi login --renew         # 默认：直连
+opencsi tray                  # 默认：直连
+opencsi usage --proxy         # 显式使用 HTTP_PROXY / HTTPS_PROXY / 系统代理
 ```
 
-确认一下 Python 眼里有哪些代理：
+`--no-proxy` 继续保留以兼容已有脚本，但它现在只是“明确选择默认的直连模式”。
+
+确认 Python 能看到哪些代理：
 
 ```bash
 python -c "import urllib.request; print(urllib.request.getproxies())"
@@ -1022,3 +1034,8 @@ with OpenCsiToolClient(CdpCookieProvider()) as client:
 `opencsi contract-check` 定位差异。
 
 请仅在你**本人已获授权**的账号上使用本工具，并遵守所在组织的规定。
+
+
+## 开发待办
+
+仍未闭环的 GitCode 长期 refresh、首次 consent live acceptance、Windows 真正 sign-out/sign-in 等事项集中记录在 [`docs/TODO.md`](docs/TODO.md)。

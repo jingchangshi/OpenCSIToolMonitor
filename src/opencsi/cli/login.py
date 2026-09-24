@@ -248,7 +248,7 @@ def _qr(ctx: CliContext) -> int:
         api_base=os.environ.get("OPENCSI_GITCODE_API", "https://web-api.gitcode.com"),
         source=os.environ.get("OPENCSI_QR_SOURCE", "toolbar_login"),
         max_wait=float(getattr(ctx.args, "qr_wait", 180.0) or 180.0),
-        use_proxy=not bool(getattr(ctx.args, "no_proxy", False)),
+        use_proxy=ctx.use_proxy,
     )
 
     rendered: dict[str, object] = {}
@@ -1230,7 +1230,7 @@ def _open_a_readable_browser(ctx: CliContext) -> None:
     from ..auth.browser_launch import BrowserLaunchStatus, launch_debug_browser
 
     result = launch_debug_browser(
-        LOGIN_URL, no_proxy=bool(getattr(ctx.args, "no_proxy", False))
+        LOGIN_URL, no_proxy=not ctx.use_proxy
     )
 
     if result.status is BrowserLaunchStatus.LAUNCHED:
@@ -1256,10 +1256,10 @@ def _open_a_readable_browser(ctx: CliContext) -> None:
         # A system proxy that cannot reach opencsitool.com produces a page that
         # simply never loads -- indistinguishable from the site being down. The
         # flag that fixes it is not guessable, so it is named here.
-        if not getattr(ctx.args, "no_proxy", False):
+        if ctx.use_proxy:
             ctx.err(
-                "       if the page will not load, a system proxy may be blocking "
-                "opencsitool.com; retry with --no-proxy."
+                "       this launch is using the configured proxy; retry without "
+                "--proxy if that proxy cannot reach opencsitool.com."
             )
 
 

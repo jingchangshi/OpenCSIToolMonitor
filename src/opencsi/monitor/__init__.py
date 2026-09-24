@@ -8,6 +8,9 @@ Windows session.
 
 from .service import (
     STATE_LABELS,
+    DailyModelUsage,
+    DailyUsage,
+    build_daily_usage,
     MonitorConfig,
     MonitorService,
     MonitorSnapshot,
@@ -16,6 +19,9 @@ from .service import (
 )
 
 __all__ = [
+    "DailyModelUsage",
+    "DailyUsage",
+    "build_daily_usage",
     "MonitorService",
     "MonitorSnapshot",
     "MonitorState",
