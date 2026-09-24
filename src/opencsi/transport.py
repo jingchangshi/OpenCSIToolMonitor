@@ -102,7 +102,7 @@ class HttpTransport:
         attempts: int = DEFAULT_ATTEMPTS,
         backoff: float = DEFAULT_BACKOFF,
         verify_tls: bool = True,
-        use_proxy: bool = True,
+        use_proxy: bool = False,
         logger: Any = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
