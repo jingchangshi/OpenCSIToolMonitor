@@ -151,12 +151,10 @@ class OpenerWiringTest(unittest.TestCase):
         transport = HttpTransport("https://opencsitool.com", use_proxy=False)
         self.assertEqual(self._proxy_handlers(transport), [])
 
-    def test_default_transport_keeps_urllib_proxy_resolution(self) -> None:
-        transport = HttpTransport("https://opencsitool.com", use_proxy=True)
-        handlers = self._proxy_handlers(transport)
-        # The inherited default handler is present and carries whatever the
-        # environment/registry resolved, so urllib's normal behaviour is kept.
-        self.assertEqual(len(handlers), 1)
+    def test_default_transport_is_direct(self) -> None:
+        transport = HttpTransport("https://opencsitool.com")
+        self.assertFalse(transport.use_proxy)
+        self.assertEqual(self._proxy_handlers(transport), [])
 
     def test_client_passes_the_flag_through(self) -> None:
         from opencsi.client import OpenCsiToolClient
@@ -166,12 +164,12 @@ class OpenerWiringTest(unittest.TestCase):
         self.assertFalse(client.http.use_proxy)
         client.close()
 
-    def test_client_defaults_to_using_the_proxy(self) -> None:
+    def test_client_defaults_to_direct_connections(self) -> None:
         from opencsi.client import OpenCsiToolClient
 
         provider = StubCredentialProvider()
         client = OpenCsiToolClient(provider)
-        self.assertTrue(client.http.use_proxy)
+        self.assertFalse(client.http.use_proxy)
         client.close()
 
     def test_repr_does_not_leak_the_cookie(self) -> None:
@@ -247,6 +245,29 @@ class CliProxyFlagTest(unittest.TestCase):
                 self.assertEqual(code, 0, f"{command}: {err.getvalue()}")
         finally:
             ctx_module.CliContext.make_client = original
+
+
+class ProxyOptInTest(unittest.TestCase):
+    def _context(self, *argv):
+        import io
+        from opencsi.cli.context import CliContext, build_parser
+        args = build_parser().parse_args(list(argv))
+        return CliContext(args=args, stdout=io.StringIO(), stderr=io.StringIO())
+
+    def test_default_is_direct_even_when_proxy_environment_exists(self) -> None:
+        with mock.patch.dict("os.environ", {"HTTP_PROXY": "http://127.0.0.1:7890", "HTTPS_PROXY": "http://127.0.0.1:7890"}, clear=False):
+            self.assertFalse(self._context("usage").use_proxy)
+
+    def test_proxy_flag_opts_in(self) -> None:
+        self.assertTrue(self._context("usage", "--proxy").use_proxy)
+
+    def test_no_proxy_remains_direct(self) -> None:
+        self.assertFalse(self._context("usage", "--no-proxy").use_proxy)
+
+    def test_conflicting_proxy_flags_are_rejected(self) -> None:
+        from opencsi.cli.context import build_parser
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["usage", "--proxy", "--no-proxy"])
 
 
 if __name__ == "__main__":
