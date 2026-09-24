@@ -804,9 +804,13 @@ class MonitorService:
         today's after midnight.
         """
         today = self._local_today()
+        get_prices = getattr(self._client, "get_model_prices", None)
+        if not callable(get_prices):
+            previous = self.snapshot.daily_usage
+            return previous if previous is not None and previous.date == today else None
         try:
             daily = self._client.get_my_tools(today, today, refresh=refresh)
-            prices = self._client.get_model_prices(refresh=False)
+            prices = get_prices(refresh=False)
             return build_daily_usage(daily, tuple(prices), date=today)
         except Exception as exc:  # noqa: BLE001 - auxiliary data must not kill the tray
             previous = self.snapshot.daily_usage
