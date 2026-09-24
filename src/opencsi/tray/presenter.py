@@ -119,6 +119,14 @@ def format_duration(seconds: float | None) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+def format_cost(value: float | None, currency: str = "CNY") -> str:
+    """Human-readable spend; unknown is never rendered as zero."""
+    if value is None:
+        return "--"
+    prefix = "¥" if currency.upper() == "CNY" else f"{currency} "
+    return f"{prefix}{value:.2f}"
+
+
 def tooltip_for(snapshot: MonitorSnapshot, *, now: float | None = None) -> str:
     """The hover text.
 
@@ -134,11 +142,18 @@ def tooltip_for(snapshot: MonitorSnapshot, *, now: float | None = None) -> str:
         text = f"{head}\n{line}"
         return text[:MAX_TOOLTIP]
 
-    parts = [
-        head,
-        f"{format_count_cn(snapshot.total_tokens)} tokens  "
-        f"{format_count_cn(snapshot.requests)} 次请求  {snapshot.prs} PR",
-    ]
+    if snapshot.daily_usage is not None:
+        daily = snapshot.daily_usage
+        headline = (
+            f"今日 {format_count_cn(daily.total_tokens)} tokens | "
+            f"{format_cost(daily.total_cost, daily.currency)}"
+        )
+    else:
+        headline = (
+            f"{format_count_cn(snapshot.total_tokens)} tokens  "
+            f"{format_count_cn(snapshot.requests)} 次请求  {snapshot.prs} PR"
+        )
+    parts = [head, headline]
 
     age = snapshot.age_seconds(now=now)
     if snapshot.is_healthy:
@@ -211,6 +226,25 @@ def actions_for(
     items: list[Action] = [
         Action("headline", headline_for(snapshot), enabled=False, default=True)
     ]
+    if snapshot.daily_usage is not None:
+        daily = snapshot.daily_usage
+        items.append(
+            Action(
+                "daily_total",
+                f"今日: {daily.total_tokens:,} tokens / "
+                f"{format_cost(daily.total_cost, daily.currency)}",
+                enabled=False,
+            )
+        )
+        for index, model in enumerate(daily.models):
+            items.append(
+                Action(
+                    f"daily_model_{index}",
+                    f"  {model.display_name}: {model.tokens:,} / "
+                    f"{format_cost(model.cost, daily.currency)}",
+                    enabled=False,
+                )
+            )
 
     if snapshot.state is MonitorState.BROWSER_UNAVAILABLE:
         # The honest first action. "Sign in" is not offered because it cannot
@@ -300,6 +334,15 @@ def status_text(snapshot: MonitorSnapshot, *, now: float | None = None) -> str:
                 f"adopted_lines: {snapshot.adopted_lines}",
                 f"adoption_rate: {snapshot.adoption_rate:.1%}",
                 f"data_fresh_time: {snapshot.data_fresh_time}",
+                *(
+                    [
+                        f"today_date: {snapshot.daily_usage.date}",
+                        f"today_tokens: {snapshot.daily_usage.total_tokens}",
+                        f"today_cost: {format_cost(snapshot.daily_usage.total_cost, snapshot.daily_usage.currency)}",
+                    ]
+                    if snapshot.daily_usage is not None
+                    else []
+                ),
                 f"data_age: {format_age(snapshot.age_seconds(now=now))}",
             ]
         )
