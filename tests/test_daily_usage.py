@@ -73,5 +73,74 @@ class DailyUsageTrayTest(unittest.TestCase):
         self.assertTrue(any("Model A: 3,000,000 / ¥1.50" in x for x in labels))
 
 
+class DailyUsageServiceTest(unittest.TestCase):
+    class _Session:
+        credentials = object()
+
+    class _Client:
+        def __init__(self) -> None:
+            self.session = DailyUsageServiceTest._Session()
+            self.dates: list[tuple[str | None, str | None]] = []
+            self.fail = False
+
+        def get_my_tools(self, start_date=None, end_date=None, *, refresh=False):
+            del refresh
+            self.dates.append((start_date, end_date))
+            if self.fail:
+                raise RuntimeError("daily endpoint unavailable")
+            day = start_date or "all"
+            return MyToolsSnapshot(
+                token_trend=(
+                    TokenTrendPoint(date=day, request_type="A", tokens=1_000_000),
+                )
+            )
+
+        def get_model_prices(self, *, refresh=False):
+            del refresh
+            return (
+                ModelPrice(
+                    request_type="A",
+                    display_name="Model A",
+                    bill_type="TOKEN",
+                    enabled=1,
+                    blended_price=0.5,
+                ),
+            )
+
+    def test_local_day_is_used_for_both_date_bounds_and_rolls_over(self) -> None:
+        from opencsi.monitor import MonitorService
+
+        current = [datetime(2026, 9, 24, 23, 59)]
+        client = self._Client()
+        service = MonitorService(client, session=client.session, now=lambda: current[0])
+
+        first = service._fetch_daily_usage(refresh=True)  # noqa: SLF001
+        self.assertEqual(first.date, "2026-09-24")
+        self.assertEqual(client.dates[-1], ("2026-09-24", "2026-09-24"))
+
+        current[0] = datetime(2026, 9, 25, 0, 1)
+        second = service._fetch_daily_usage(refresh=True)  # noqa: SLF001
+        self.assertEqual(second.date, "2026-09-25")
+        self.assertEqual(client.dates[-1], ("2026-09-25", "2026-09-25"))
+
+    def test_same_day_failure_keeps_last_good_but_next_day_does_not_relabel_it(self) -> None:
+        from opencsi.monitor import MonitorService
+
+        current = [datetime(2026, 9, 24, 12, 0)]
+        client = self._Client()
+        service = MonitorService(client, session=client.session, now=lambda: current[0])
+        first = service._fetch_daily_usage(refresh=True)  # noqa: SLF001
+        service._publish(MonitorSnapshot(state=MonitorState.OK, daily_usage=first))  # noqa: SLF001
+
+        client.fail = True
+        self.assertEqual(
+            service._fetch_daily_usage(refresh=True).date,  # noqa: SLF001
+            "2026-09-24",
+        )
+
+        current[0] = datetime(2026, 9, 25, 0, 1)
+        self.assertIsNone(service._fetch_daily_usage(refresh=True))  # noqa: SLF001
+
+
 if __name__ == "__main__":
     unittest.main()
