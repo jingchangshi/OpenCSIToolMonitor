@@ -260,9 +260,9 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
 
     app = TrayApp(
         service,
-        on_login=lambda: _sign_in(service),
-        on_login_qr=lambda: _sign_in_qr(service),
-        on_launch_browser=lambda: _launch_browser_then_refresh(service),
+        on_login=lambda: _sign_in(service, use_proxy=ctx.use_proxy),
+        on_login_qr=lambda: _sign_in_qr(service, use_proxy=ctx.use_proxy),
+        on_launch_browser=lambda: _launch_browser_then_refresh(service, use_proxy=ctx.use_proxy),
     )
     try:
         if allow_multiple:
@@ -276,7 +276,7 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
         return 0
 
 
-def _sign_in_qr(service) -> None:
+def _sign_in_qr(service, *, use_proxy: bool = False) -> None:
     """Run a QR login from the tray, with no browser involved.
 
     This is the route that works when the browser is the broken part -- which is
@@ -322,7 +322,7 @@ def _sign_in_qr(service) -> None:
     log.info("starting a QR login from the tray")
 
     try:
-        authenticator = GitCodeQrAuthenticator()
+        authenticator = GitCodeQrAuthenticator(use_proxy=use_proxy)
         result = authenticator.login()
     except Exception as exc:  # noqa: BLE001 - the tray must report, not crash
         log.warning("the QR login failed: %s", type(exc).__name__)
@@ -365,7 +365,7 @@ def _sign_in_qr(service) -> None:
         except Exception as exc:  # noqa: BLE001 - report, never crash the tray
             log.warning("could not store the GitCode credential: %s", type(exc).__name__)
 
-    renewer = HttpOAuthRenewer(source, base_url=BASE_URL)
+    renewer = HttpOAuthRenewer(source, base_url=BASE_URL, use_proxy=use_proxy)
     renewal = renewer.renew()
     if renewal.status not in (RenewalStatus.RENEWED, RenewalStatus.ALREADY_VALID):
         # CONSENT_REQUIRED lands here, and the honest response is to say a human
@@ -447,7 +447,7 @@ def _invalidate_service_credential(service) -> None:
         pass
 
 
-def _sign_in(service) -> None:
+def _sign_in(service, *, use_proxy: bool = False) -> None:
     """Open the login page in a readable browser, then watch for the session.
 
     Runs on its own thread (``TrayApp`` starts one), because opening a browser
@@ -477,7 +477,7 @@ def _sign_in(service) -> None:
     from .login import LOGIN_URL
 
     try:
-        open_or_launch(LOGIN_URL)
+        open_or_launch(LOGIN_URL, no_proxy=not use_proxy)
     except Exception as exc:  # noqa: BLE001 - the user can open it themselves
         log.warning("could not open a readable browser: %s", type(exc).__name__)
 
@@ -491,7 +491,7 @@ def _sign_in(service) -> None:
             return
 
 
-def _launch_browser_then_refresh(service) -> None:
+def _launch_browser_then_refresh(service, *, use_proxy: bool = False) -> None:
     """Start a CDP-capable browser, then let the worker pick up the session.
 
     This is the action offered when the tray is in ``BROWSER_UNAVAILABLE``: the
@@ -507,7 +507,7 @@ def _launch_browser_then_refresh(service) -> None:
     from .login import LOGIN_URL
 
     try:
-        result = launch_debug_browser(LOGIN_URL)
+        result = launch_debug_browser(LOGIN_URL, no_proxy=not use_proxy)
         if result.ok:
             service.refresh_now()
         else:
