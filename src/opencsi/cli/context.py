@@ -44,6 +44,7 @@ from ..version import USER_AGENT, __version__
 ENV_CDP_URL = "OPENCSI_CDP_URL"
 ENV_BASE_URL = "OPENCSI_BASE_URL"
 ENV_NO_RENEW = "OPENCSI_NO_RENEW"
+ENV_PROXY = "OPENCSI_PROXY"
 #: Disable the durable credential store, for debugging the browser path. Named
 #: rather than undocumented so a user who needs it can find it, and so nobody
 #: has to guess why a stored credential is or is not being used.
@@ -80,6 +81,24 @@ class CliContext:
     @property
     def verbose(self) -> bool:
         return bool(getattr(self.args, "verbose", False))
+
+    @property
+    def use_proxy(self) -> bool:
+        """Whether production HTTP should honour configured proxies.
+
+        Direct connections are the default. urllib otherwise inherits
+        HTTP_PROXY/HTTPS_PROXY and, on Windows, the registry proxy; on the
+        development machine that silently routed openCsiTool through
+        127.0.0.1:7890, where TLS failed. Proxying is therefore an explicit
+        opt-in via --proxy (or OPENCSI_PROXY=1). --no-proxy is retained as a
+        backwards-compatible explicit spelling of the default.
+        """
+        if bool(getattr(self.args, "no_proxy", False)):
+            return False
+        if bool(getattr(self.args, "proxy", False)):
+            return True
+        value = os.environ.get(ENV_PROXY, "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
 
     def out(self, text: str = "") -> None:
         """Write a line to stdout."""
@@ -285,7 +304,7 @@ class CliContext:
         from ..auth.session import FallbackRenewer
 
         timeout = float(getattr(self.args, "renew_timeout", 45.0) or 45.0)
-        use_proxy = not bool(getattr(self.args, "no_proxy", False))
+        use_proxy = self.use_proxy
 
         # A manually supplied token has no upstream session of its own, and it
         # must never borrow one. Falling through to the store here would renew the
@@ -356,12 +375,16 @@ class CliContext:
                     # The refresh is gated on near-expiry inside the refresher, so
                     # a healthy GitCode token costs no request here.
                     from ..auth.gitcode_refresh import (
+                        GitCodeTokenRefresher,
                         RefreshingGitCodeRenewer,
                         StoredGitCodeRefresher,
                     )
 
                     stored_http = RefreshingGitCodeRenewer(
-                        StoredGitCodeRefresher(stored_sink.store),
+                        StoredGitCodeRefresher(
+                            stored_sink.store,
+                            refresher=GitCodeTokenRefresher(use_proxy=use_proxy),
+                        ),
                         stored_http,
                     )
 
@@ -462,7 +485,7 @@ class CliContext:
             timeout=timeout,
             cache_ttl=cache_ttl,
             verbose=self.verbose,
-            use_proxy=not bool(getattr(self.args, "no_proxy", False)),
+            use_proxy=self.use_proxy,
             session=session,
         )
 
@@ -552,13 +575,21 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
             "Only business data is ever cached, never the cookie"
         ),
     )
-    conn.add_argument(
+    proxy_mode = conn.add_mutually_exclusive_group()
+    proxy_mode.add_argument(
+        "--proxy",
+        action="store_true",
+        help=(
+            "honour HTTP_PROXY/HTTPS_PROXY and the system proxy. Direct "
+            "connections are the default; also settable via $OPENCSI_PROXY"
+        ),
+    )
+    proxy_mode.add_argument(
         "--no-proxy",
         action="store_true",
         help=(
-            "ignore HTTP_PROXY/HTTPS_PROXY and the system proxy. Use when a "
-            "local proxy cannot reach opencsitool.com (urllib honours the "
-            "Windows registry proxy, unlike curl)"
+            "explicitly use direct connections and ignore configured proxies "
+            "(this is already the default; retained for compatibility)"
         ),
     )
 
