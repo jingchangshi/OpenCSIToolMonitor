@@ -736,6 +736,23 @@ class HttpOAuthRenewer:
                     requires_interaction=True,
                     detail="the GitCode session is no longer valid",
                 )
+            if status == 401:
+                # A 401 to a *live* session is the unapproved-grant case. The
+                # measured evidence (docs/oauth-spa-investigation.md §4.3): after
+                # checkOrAuthorize answers 401, the SPA loads the authorize chunk
+                # -- the consent branch -- and only a signed-out account ends up
+                # on the login page. So for a session the probe just confirmed,
+                # 401 means "no existing grant", and the remedy is one approval
+                # click -- reporting it as a generic failure told a signed-in
+                # user to debug a renewal that was waiting for them.
+                return RenewalResult(
+                    RenewalStatus.CONSENT_REQUIRED,
+                    requires_interaction=True,
+                    detail=(
+                        "GitCode has no existing authorization for this "
+                        "application, so the approval page has to be confirmed once"
+                    ),
+                )
             return RenewalResult(
                 RenewalStatus.OAUTH_FAILED,
                 detail=f"GitCode rejected the authorization request (HTTP {status})",

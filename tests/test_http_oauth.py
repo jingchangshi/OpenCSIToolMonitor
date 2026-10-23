@@ -429,6 +429,26 @@ class RefusalTest(unittest.TestCase):
         self.assertIs(result.status, RenewalStatus.LOGIN_REQUIRED)
         self.assertIs(renewer.last_trace.gitcode_session_valid, False)
 
+    def test_a_401_with_a_live_session_is_consent_required(self) -> None:
+        """A 401 to a confirmed session is the unapproved-grant case.
+
+        Measured evidence (docs/oauth-spa-investigation.md §4.3): after
+        checkOrAuthorize answers 401, GitCode's own SPA loads the authorize
+        chunk -- the consent branch -- and only a signed-out account ends up on
+        the login page. So 401 plus a session the probe just confirmed means
+        "no existing grant", and the remedy is one approval click.
+        """
+        routes = {
+            ("opencsitool.com", OAUTH_ENTRY_PATH): (302, {"Location": AUTHORIZE_URL}, b""),
+            ("web-api.gitcode.com", CHECK_AUTHORIZE_PATH): (401, {}, b'{"error_code":401}'),
+            ("web-api.gitcode.com", "/uc/api/v1/user/oauth/userInfo"): (200, {}, b"{}"),
+        }
+        renewer, _provider = self._renewer(routes)
+        result = renewer.renew()
+        self.assertIs(result.status, RenewalStatus.CONSENT_REQUIRED)
+        self.assertTrue(result.requires_interaction)
+        self.assertIs(renewer.last_trace.gitcode_session_valid, True)
+
     def test_a_rejected_authorization_with_a_live_session_is_not_a_signin_prompt(
         self,
     ) -> None:
