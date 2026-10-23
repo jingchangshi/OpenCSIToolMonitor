@@ -482,12 +482,26 @@ class MonitorService:
         self._thread: threading.Thread | None = None
         self._next_refresh_at = 0.0
         self._last_credential_check = 0.0
+        #: Whether *scheduled* work runs at all. The tray's "自动刷新" toggle
+        #: drives this; manual refreshes and renewals are commands, not ticks,
+        #: and keep working while it is off. Without the flag the toggle was
+        #: cosmetic: it flipped a menu checkbox while the worker kept polling.
+        self._auto_enabled = True
         #: Set once the user has been told the session needs them; cleared by a
         #: settled healthy state. See :meth:`_publish`.
         self._attention_latched = False
         #: When an automatic browser recovery was last attempted, for the
         #: cooldown. ``None`` means never.
         self._last_browser_recover: float | None = None
+
+    # ── scheduling switch ─────────────────────────────────────────────────
+    def set_auto_refresh(self, enabled: bool) -> None:
+        """Turn scheduled work on or off. Manual commands are unaffected."""
+        self._auto_enabled = bool(enabled)
+
+    @property
+    def auto_refresh_enabled(self) -> bool:
+        return self._auto_enabled
 
     # ── observation ───────────────────────────────────────────────────────
     @property
@@ -672,7 +686,14 @@ class MonitorService:
         return max(0.05, min(min(candidates), self.config.credential_check_interval))
 
     def _tick_once(self) -> None:
-        """The scheduled path: check the credential, then maybe fetch."""
+        """The scheduled path: check the credential, then maybe fetch.
+
+        Skipped entirely while auto-refresh is off: a paused monitor must not
+        renew behind the user's back either. Manual refreshes and renewals go
+        through the command queue and still run.
+        """
+        if not self._auto_enabled:
+            return
         now = self._clock()
         if now - self._last_credential_check >= self.config.credential_check_interval:
             self._last_credential_check = now

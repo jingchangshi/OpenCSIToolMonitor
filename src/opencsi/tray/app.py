@@ -236,6 +236,12 @@ class TrayApp:
         elif action_id == "autorefresh":
             with self._lock:
                 self._auto_refresh = not self._auto_refresh
+            # The toggle has to reach the service, or it is a checkbox that
+            # lies: the worker kept polling on the old schedule regardless of
+            # what the menu said.
+            set_auto = getattr(self._service, "set_auto_refresh", None)
+            if callable(set_auto):
+                set_auto(self._auto_refresh)
             if self._auto_refresh:
                 self._service.refresh_now()
             self._refresh_view()

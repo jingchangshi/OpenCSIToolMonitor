@@ -83,6 +83,7 @@ class _Session:
 
     def renew(self, *, force: bool = False) -> RenewalResult:
         self.renew_calls += 1
+        self.renew_force = force
         if self.raises is not None:
             raise self.raises
         return self.renew_result
@@ -1194,6 +1195,71 @@ class ReprTest(unittest.TestCase):
         self.assertIn("MonitorService", text)
         self.assertIn("OK", text)
         self.assertNotIn("token=", text)
+
+
+
+
+class AutoRefreshSwitchTest(unittest.TestCase):
+    """The tray's "自动刷新" toggle controls the scheduled work -- or it lies.
+
+    The toggle used to flip a menu checkbox while the worker kept polling on
+    the old schedule, which a user reading the menu as truth would experience
+    as a monitor that refuses to pause.
+    """
+
+    def test_a_disabled_service_does_not_refresh_on_schedule(self) -> None:
+        client = _Client()
+        clock = _Clock()
+        service = _service(client, clock=clock, refresh_interval=60.0)
+        service.set_auto_refresh(False)
+        clock.advance(120.0)
+        service.tick()
+        self.assertEqual(client.calls, 0, "a paused monitor fetched anyway")
+
+    def test_a_disabled_service_does_not_renew_on_schedule(self) -> None:
+        session = _Session()
+        session.needs_renewal = lambda margin=None: True
+        client = _Client()
+        clock = _Clock()
+        service = _service(client, session=session, clock=clock)
+        service.set_auto_refresh(False)
+        clock.advance(120.0)
+        service.tick()
+        self.assertEqual(session.renew_calls, 0, "a paused monitor renewed anyway")
+
+    def test_re_enabling_resumes_the_schedule(self) -> None:
+        client = _Client()
+        clock = _Clock()
+        service = _service(client, clock=clock, refresh_interval=60.0)
+        service.set_auto_refresh(False)
+        clock.advance(120.0)
+        service.tick()
+        self.assertEqual(client.calls, 0)
+        service.set_auto_refresh(True)
+        service.tick()
+        self.assertEqual(client.calls, 1, "re-enabling did not resume polling")
+
+    def test_manual_refresh_still_works_while_paused(self) -> None:
+        """The switch gates the *schedule*, not the user's own click."""
+        client = _Client()
+        clock = _Clock()
+        service = _service(client, clock=clock)
+        service.set_auto_refresh(False)
+        service.refresh_now(block=True)
+        self.assertEqual(client.calls, 1)
+
+    def test_manual_renewal_still_works_while_paused(self) -> None:
+        session = _Session()
+        client = _Client()
+        service = _service(client, session=session)
+        service.set_auto_refresh(False)
+        service.renew_now(block=True)
+        self.assertEqual(session.renew_calls, 1)
+        self.assertTrue(session.renew_force)
+
+    def test_enabled_by_default(self) -> None:
+        service = _service(_Client())
+        self.assertTrue(service.auto_refresh_enabled)
 
 
 if __name__ == "__main__":

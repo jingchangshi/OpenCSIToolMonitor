@@ -1569,6 +1569,18 @@ class TrayAppLogicTest(unittest.TestCase):
         app._dispatch("autorefresh")
         self.assertTrue(app._auto_refresh)
 
+    def test_the_auto_refresh_toggle_reaches_the_service(self) -> None:
+        """The checkbox controls the worker, or it is a checkbox that lies.
+
+        The toggle used to flip only a tray-side flag while the monitor kept
+        polling on its own schedule.
+        """
+        app, service = self._app()
+        app._dispatch("autorefresh")
+        self.assertFalse(service.auto_refresh_enabled)
+        app._dispatch("autorefresh")
+        self.assertTrue(service.auto_refresh_enabled)
+
     def test_an_unknown_action_is_ignored_not_fatal(self) -> None:
         app, _service = self._app()
         app._dispatch("no-such-action")
