@@ -388,6 +388,16 @@ class CliContext:
                         stored_http,
                     )
 
+                if isinstance(provider, CompositeCredentialProvider):
+                    # A composite may have served this session from its *browser*
+                    # member while the store holds a different account's GitCode
+                    # credential. Renewal must follow whoever supplied the token,
+                    # so the stored path is gated on the composite's own
+                    # last_source evidence (renew time, not construction time).
+                    from ..auth.stored import SourceBoundRenewer
+
+                    stored_http = SourceBoundRenewer(stored_http, provider)
+
                 http_renewers.append(stored_http)
 
         if isinstance(provider, CdpCookieProvider):

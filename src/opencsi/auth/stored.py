@@ -483,6 +483,96 @@ class StoredOpenCsiCredentialProvider:
         return f"StoredOpenCsiCredentialProvider({self._store!r})"
 
 
+class SourceBoundRenewer:
+    """Run ``inner`` only while the active credential actually came from the store.
+
+    Why this exists
+    ---------------
+    A :class:`CompositeCredentialProvider` is built as ``[store, browser]``, and
+    whichever member *supplied* the token decides whose identity the tool is
+    serving. The renewer chain, however, was built from the provider's *type*:
+    a composite containing a store-backed member made the stored GitCode
+    credential the renewal source even when the request that triggered renewal
+    had been served from the **browser**. The failure this produces is an
+    identity swap: the store holds account B's GitCode credential and no
+    session, the browser holds account A, a request runs on A, the renewal mints
+    a session for B and writes it into the store -- and the next process reads B
+    while the user believes they are looking at A.
+
+    The evidence of who is being served is the composite's own
+    ``last_source``, which :meth:`CompositeCredentialProvider.get_token` records.
+    The gate reads it at renew time, not at construction time, because a renewer
+    is built before the first request answers that question:
+
+    * ``None`` -- nothing has been read yet; the store path is allowed (this is
+      what keeps ``login --renew`` working, which renews before any request);
+    * the store member's name -- the store supplied the credential; proceed;
+    * anything else -- the browser (or another member) supplied it; refuse.
+
+    Refusing reports :attr:`RenewalStatus.UNSUPPORTED`, which
+    :class:`~opencsi.auth.session.FallbackRenewer` treats as "this mechanism
+    cannot help here" and moves on -- typically to the browser renewer, which
+    renews the identity the user is actually using.
+    """
+
+    name = "stored-oauth"
+
+    def __init__(self, inner: Any, provider: Any, *, source_name: str | None = None) -> None:
+        self._inner = inner
+        self._provider = provider
+        self._source_name = source_name or "secure-store"
+
+    def _identity_matches(self) -> bool:
+        last = getattr(self._provider, "last_source", None)
+        return last is None or last == self._source_name
+
+    # -- diagnostics, forwarded so no caller loses evidence ----------------
+
+    @property
+    def last_refresh(self) -> Any:
+        return getattr(self._inner, "last_refresh", None)
+
+    @property
+    def last_persisted(self) -> Any:
+        return getattr(self._inner, "last_persisted", None)
+
+    @property
+    def last_trace(self) -> Any:
+        return getattr(self._inner, "last_trace", None)
+
+    # -- the gate -----------------------------------------------------------
+
+    def can_renew(self) -> bool:
+        """False when another member supplied the credential: skip, do not run."""
+        if not self._identity_matches():
+            return False
+        can = getattr(self._inner, "can_renew", None)
+        return bool(can()) if callable(can) else True
+
+    def renew(self, *, timeout: float | None = None, before: Any = None):
+        from .session import RenewalResult, RenewalStatus
+
+        if not self._identity_matches():
+            return RenewalResult(
+                RenewalStatus.UNSUPPORTED,
+                detail=(
+                    "the active credential came from "
+                    f"{getattr(self._provider, 'last_source', '?')!r}, so the "
+                    "stored GitCode credential must not be used to renew it"
+                ),
+            )
+        return self._inner.renew(timeout=timeout, before=before)
+
+    def describe(self) -> str:
+        return (
+            "renew from the stored GitCode credential, only while the active "
+            "session also came from the store"
+        )
+
+    def __repr__(self) -> str:
+        return f"SourceBoundRenewer({self._inner!r})"
+
+
 class CompositeCredentialProvider:
     """Try several providers in order; the first usable credential wins.
 

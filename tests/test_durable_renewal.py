@@ -131,14 +131,13 @@ def store_with(
 ) -> MemoryCredentialStore:
     """A store holding a GitCode credential and a near-expiry openCsiTool session.
 
-    ``gitcode_expires_at`` defaults to a *healthy* token rather than ``None``, and
-    that default is load-bearing. ``GitCodeTokenRefresher.needs_refresh`` treats an
-    unknown expiry as "refresh now" -- correct for a real credential whose expiry
-    was never recorded, but it means a fixture that omits the field makes the
-    production chain attempt a genuine network refresh on every test run. A test
-    that quietly reaches gitcode.com is a test that fails in CI, passes at home, or
-    worse, rotates a real credential. Tests that want the refresh to happen pass a
-    near-expiry value explicitly and stub the transport.
+    ``gitcode_expires_at`` defaults to a *healthy* token rather than ``None``.
+    An unknown expiry no longer triggers a proactive refresh (the policy is
+    demand-driven now), but a *near-expiry* known value does, and a fixture that
+    sets one without stubbing the transport would attempt a genuine network
+    refresh -- a test that quietly reaches the real refresh endpoint. Tests that
+    want the refresh to happen pass a near-expiry value explicitly and stub the
+    transport.
     """
     store = MemoryCredentialStore()
     store.save_gitcode(
@@ -459,6 +458,105 @@ class IdentityIsolationTest(unittest.TestCase):
             "a session minted for an explicitly chosen browser was written into "
             "the stored identity",
         )
+
+
+class SourceIdentityGateTest(unittest.TestCase):
+    """Renewal must follow whoever *supplied* the active credential.
+
+    The composite is ``[store, browser]``. When its token came from the browser,
+    the store's GitCode credential belongs to a possibly different account, and
+    renewing from it would mint the browser user's session as the store user --
+    an identity swap that survives into the next process. The gate reads the
+    composite's own ``last_source`` evidence, so these tests set that evidence
+    the way real use does: by calling ``get_token()``.
+    """
+
+    def _ctx(self, store: MemoryCredentialStore):
+        return context_for(store)
+
+    def test_a_browser_supplied_credential_refuses_the_store_path(self) -> None:
+        """The browser answered a request; the store's credential must not renew it."""
+        from opencsi.auth.stored import SourceBoundRenewer
+
+        # A store holding ONLY a GitCode credential: the composite's stored
+        # member returns no token, so the browser member is the one that serves.
+        store = MemoryCredentialStore()
+        store.save_gitcode(
+            StoredGitCodeCredential(
+                access_token=ACCESS,
+                refresh_token=REFRESH,
+                username="alice",
+                access_expires_at=GITCODE_HEALTHY,
+            )
+        )
+        browser_token = "browser-session-token-abcdefghij"
+        with patch_store(store):
+            ctx = self._ctx(store)
+            provider = ctx.make_provider()
+            # The production composite's last member is the auto-discovered
+            # browser. Script that member to answer -- which is exactly what a
+            # signed-in browser does -- and leave the store member natural.
+            browser_member = provider._providers[-1]
+            with mock.patch.object(
+                browser_member, "get_token", lambda *a, **k: browser_token
+            ):
+                served = provider.get_token()
+            self.assertEqual(served, browser_token)
+            self.assertEqual(provider.last_source, "cdp")
+
+            renewer = ctx.make_renewer(provider, base_url="https://opencsitool.com")
+            self.assertIsNotNone(renewer)
+            gated = renewer._renewers[0]
+            self.assertIsInstance(gated, SourceBoundRenewer)
+            self.assertFalse(
+                gated.can_renew(),
+                "the gate offered the store path for a browser-served credential",
+            )
+            result = gated.renew()
+            self.assertEqual(result.status, RenewalStatus.UNSUPPORTED)
+
+            # Nothing was minted into the store: the refusal moves on rather
+            # than renewing the wrong identity.
+            self.assertIsNone(store.load().opencsi)
+
+    def test_a_store_supplied_credential_renews_through_the_gate(self) -> None:
+        """The positive case: store served the token, store renews it."""
+        from opencsi.auth.stored import SourceBoundRenewer
+
+        store = store_with()
+        with patch_store(store), patch_transport(
+            _StubOpener(oauth_routes("session-minted-via-the-gate-aaaa"))
+        ):
+            ctx = self._ctx(store)
+            provider = ctx.make_provider()
+            provider.get_token()  # the store member answers: last_source is set
+            self.assertEqual(provider.last_source, "secure-store")
+
+            renewer = ctx.make_renewer(provider, base_url="https://opencsitool.com")
+            self.assertIsInstance(renewer._renewers[0], SourceBoundRenewer)
+
+            result = SessionManager(provider, renewer=renewer).renew(force=True)
+            self.assertEqual(result.status, RenewalStatus.RENEWED)
+        self.assertNotEqual(store.load().opencsi.token, OLD_SESSION)
+
+    def test_no_evidence_yet_still_allows_the_store_path(self) -> None:
+        """``login --renew`` renews before any request: the gate stays open."""
+        from opencsi.auth.stored import SourceBoundRenewer
+
+        store = store_with()
+        with patch_store(store), patch_transport(
+            _StubOpener(oauth_routes("session-minted-with-no-evidence-bbbb"))
+        ):
+            ctx = self._ctx(store)
+            provider = ctx.make_provider()
+            self.assertIsNone(provider.last_source)
+
+            renewer = ctx.make_renewer(provider, base_url="https://opencsitool.com")
+            result = SessionManager(provider, renewer=renewer).renew(force=True)
+            self.assertEqual(result.status, RenewalStatus.RENEWED)
+        self.assertNotEqual(store.load().opencsi.token, OLD_SESSION)
+
+
 
 
 class GitCodeRefreshLifecycleTest(unittest.TestCase):
