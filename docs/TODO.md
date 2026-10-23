@@ -7,57 +7,42 @@ follow-ups.
 
 ## P1 — Close the live GitCode refresh-token lifecycle
 
-**Status:** OPEN
+**Status:** ROOT CAUSE CLOSED (2026-10-24 audit) — live exchange still NOT
+EXECUTED, requires explicit user opt-in.
 
-**Problem:** QR login returns an `access_token` and `refresh_token`, and the
-production lifecycle is wired to `POST https://gitcode.com/oauth/token` with
-`grant_type=refresh_token`. Offline rotation tests pass, but the real credential
-obtained from the QR flow is reproducibly refused by the live endpoint with HTTP
-400 `BAD_REQUEST`.
+**Resolved:** the 400 was a credential-family mismatch. The QR login's tokens
+belong to GitCode's *account-token* system, renewed with
+`POST https://web-api.gitcode.com/uc/api/v1/user/token/refresh`
+(`Authorization: Bearer <access_token>`, urlencoded `refresh_token` body) — the
+exact request GitCode's own frontend makes (current production bundle). The old
+target, `POST https://gitcode.com/oauth/token?grant_type=refresh_token`, serves
+the OAuth-application token system and answers a QR refresh token with the same
+"refresh_token不存在或已过期" it gives a fabricated one. The production refresher
+now targets the account-token endpoint, refreshes demand-driven (on a refused
+OAuth leg, once, then retries), and classifies only 401/400004 as a dead
+credential. See `docs/auth-lifecycle-audit-20261024.md`.
 
-**Current evidence:**
-- openCsiTool session renewal is live-verified and browserless.
-- the GitCode refresh endpoint exists and the implementation is production-wired.
-- no successful live `R1 -> R2` rotation has been observed.
-- the failure cannot be attributed to a rotation performed by this tool because
-  no live rotation has ever succeeded.
+**Remaining:** one live `A1/R1 -> A2/R2` exchange, because it may rotate the
+refresh token. `tools/probe_gitcode_token_refresh.py --execute` performs exactly
+one, persists the replacement before reporting, and verifies the store on
+failure. Run it only when a real rotation is acceptable.
 
-**Why it matters:** until this is closed, the tool has proven hour-scale automatic
-openCsiTool renewal but has not proven unattended operation after the upstream
-GitCode access credential itself expires.
-
-**Next investigation:**
-1. Determine whether the QR API's `refresh_token` is the same credential lineage
-   accepted by the OAuth `refresh_token` grant.
-2. Capture the real GitCode web client's credential-renewal request, if any.
-3. Check whether the request needs client context, cookies, Authorization,
-   Origin/Referer, `xauth_token`, or another endpoint.
-4. Do not infer protocol requirements from field names alone.
-
-**Acceptance:** a real `A1/R1 -> A2/R2` exchange succeeds, A2/R2 is written to
-DPAPI, the process exits, a fresh process renews openCsiTool successfully without
-another QR scan.
+**Acceptance:** the exchange succeeds, A2/R2 is written to DPAPI, the process
+exits, a fresh process renews openCsiTool successfully without another QR scan.
 
 ## P1 — Resolve unknown GitCode access-token expiry
 
-**Status:** OPEN
+**Status:** CLOSED (2026-10-24 audit) by the evidence-backed third option.
 
-The QR completion response contains no verified `expires_in`, so the persisted
-`access_expires_at` is unknown. The current conservative policy attempts an
-upstream refresh before openCsiTool renewal; on the live account that means an
-unnecessary HTTP 400 before the still-valid GitCode access credential is used
-successfully.
-
-Do not assume the QR credential has the 15-day lifetime returned by a different
-OAuth-token response unless protocol evidence proves they are the same token
-type. Prefer one of:
-- a verified QR-token lifetime;
-- a server-side expiry source; or
-- a policy that refreshes only after the access credential is actually rejected.
-
-**Acceptance:** steady-state openCsiTool renewal no longer performs a known-useless
-GitCode refresh, while a genuinely expiring/rejected GitCode credential still has
-a proven recovery path.
+The QR completion response contains no `expires_in` (confirmed again against the
+current bundle: the frontend reads none either), so `access_expires_at` stays
+unknown for QR credentials. The policy now matches GitCode's own client, which
+never refreshes proactively: it refreshes when an API call comes back 401 and
+retries the call. Steady-state renewal performs **zero** GitCode refresh
+requests; a genuinely dead access token triggers exactly one refresh and one
+renewal retry (`RefreshingGitCodeRenewer`), and a known expiry inside the margin
+still refreshes proactively. The unverified "15 days" figure was removed from
+the code entirely.
 
 ## P2 — Identify the role of xauth_token
 
