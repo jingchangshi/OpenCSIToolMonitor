@@ -18,18 +18,19 @@ import json
 import threading
 import time
 import unittest
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import helpers  # noqa: F401  (imported for its sys.path side effect)
 
 from opencsi.auth.gitcode_refresh import (
-    GITCODE_ACCESS_TOKEN_SECONDS,
     GITCODE_TOKEN_URL,
     GitCodeTokenRefresher,
     RefreshStatus,
     StoredGitCodeRefresher,
     _classify_http_error,
 )
+from opencsi.auth.session import RenewalResult, RenewalStatus
 from opencsi.auth.store import (
     CredentialBundle,
     MemoryCredentialStore,
@@ -54,17 +55,23 @@ def a_credential(**overrides) -> StoredGitCodeCredential:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """A stub token endpoint. Records the last query it was asked."""
+    """A stub token endpoint. Records the last request it was asked."""
 
     #: Set per test: ``(status, body)`` to answer with.
     response: tuple[int, str] = (200, "{}")
     last_query: str = ""
+    last_headers: dict[str, str] = {}
+    last_body: bytes = b""
+    requests: int = 0
 
     def do_POST(self) -> None:  # noqa: N802 - the stdlib names it this
+        type(self).requests += 1
         type(self).last_query = self.path
+        type(self).last_headers = {
+            key.lower(): value for key, value in self.headers.items()
+        }
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        type(self).last_body = self.rfile.read(length) if length else b""
         status, body = type(self).response
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -98,24 +105,25 @@ class StubEndpointMixin:
 class ConstantsTest(unittest.TestCase):
     """The facts the design rests on, pinned so a change is visible."""
 
-    def test_the_endpoint_is_on_the_gitcode_host_not_the_api_host(self) -> None:
-        """Established by probing: these are different services.
+    def test_the_endpoint_is_the_account_token_refresh_path(self) -> None:
+        """The QR credential belongs to GitCode's account-token system.
 
-        ``checkOrAuthorize`` lives on ``web-api.gitcode.com``; the token endpoint
-        does not. Pointing this at the API host would 404 rather than explain
-        itself, which is exactly the wrong guess that costs an afternoon.
+        Three independent lines of evidence, recorded in the module docstring:
+        GitCode's own frontend renews via ``POST
+        web-api.gitcode.com/uc/api/v1/user/token/refresh`` (current production
+        bundle, verbatim URL/headers/body); a no-credential probe of that path
+        answers its own ``400004 REFRESH_TOKEN_ERROR`` family; and the frontend
+        never calls ``gitcode.com/oauth/token`` anywhere in the bundle. The
+        OAuth-application endpoint *did* refuse the QR refresh token with
+        ``refresh_token不存在或已过期`` -- the same answer a fabricated token
+        gets -- which is what "wrong credential system" looks like.
         """
-        self.assertEqual(GITCODE_TOKEN_URL, "https://gitcode.com/oauth/token")
-        self.assertNotIn("web-api", GITCODE_TOKEN_URL)
-
-    def test_the_documented_token_lifetime_is_fifteen_days(self) -> None:
-        """The number the whole refresh token exists for.
-
-        The openCsiTool session lasts an hour; this is 15 days. If the lifetime
-        were also an hour, a refresh token would buy nothing.
-        """
-        self.assertEqual(GITCODE_ACCESS_TOKEN_SECONDS, 1296000)
-        self.assertEqual(GITCODE_ACCESS_TOKEN_SECONDS / 86400, 15.0)
+        self.assertEqual(
+            GITCODE_TOKEN_URL,
+            "https://web-api.gitcode.com/uc/api/v1/user/token/refresh",
+        )
+        self.assertIn("web-api.gitcode.com", GITCODE_TOKEN_URL)
+        self.assertIn("/uc/api/v1/user/token/refresh", GITCODE_TOKEN_URL)
 
 
 class NeedsRefreshTest(unittest.TestCase):
@@ -136,14 +144,18 @@ class NeedsRefreshTest(unittest.TestCase):
         credential = a_credential(access_expires_at=time.time() - 10)
         self.assertTrue(self.refresher.needs_refresh(credential))
 
-    def test_an_unknown_expiry_is_refreshed(self) -> None:
-        """Deliberately the opposite of the session cookie's rule.
+    def test_an_unknown_expiry_is_not_refreshed_proactively(self) -> None:
+        """Unknown expiry waits for the demand-driven retry instead.
 
-        A session cookie with no ``expires`` never expires. An access token with
-        no recorded expiry is one whose expiry this tool failed to record --
-        refreshing costs one request, and not refreshing costs a scan.
+        The QR response carries no ``expires_in``, so "unknown" is the normal
+        state of a QR credential, and a proactive refresh would spend one
+        request per renewal cycle against a credential whose state the answer
+        does not report. GitCode's own frontend is demand-driven -- it refreshes
+        when an API call is refused, then retries -- and
+        :class:`RefreshingGitCodeRenewer` mirrors that at the moment the refresh
+        is actually needed.
         """
-        self.assertTrue(self.refresher.needs_refresh(a_credential(access_expires_at=None)))
+        self.assertFalse(self.refresher.needs_refresh(a_credential(access_expires_at=None)))
 
     def test_the_margin_is_configurable(self) -> None:
         credential = a_credential(access_expires_at=time.time() + 3600)
@@ -176,12 +188,43 @@ class NoRefreshTokenTest(unittest.TestCase):
 
 
 class FailureClassificationTest(unittest.TestCase):
-    """The distinctions that keep a user from re-authenticating for no reason."""
+    """The distinctions that keep a user from re-authenticating for no reason.
 
-    def test_a_4xx_means_the_refresh_token_is_dead(self) -> None:
-        status, detail = _classify_http_error(400, '{"error_code":400}')
+    Only the endpoint's *own* credential-refusal answer sends the user to scan:
+    401, or 400 carrying ``error_code 400004 REFRESH_TOKEN_ERROR`` (the shape
+    the real endpoint answered to a fabricated token). Every other 4xx is a
+    response this code does not recognise -- a changed API, a WAF interstitial,
+    a proxy -- and re-authenticating does not fix any of those.
+    """
+
+    def test_the_endpoint_refusal_code_means_the_refresh_token_is_dead(self) -> None:
+        status, detail = _classify_http_error(
+            400,
+            '{"error_code":400004,"error_code_name":"REFRESH_TOKEN_ERROR",'
+            '"error_message":"token校验失败或者refreshToken已失效"}',
+        )
         self.assertEqual(status, RefreshStatus.LOGIN_REQUIRED)
         self.assertTrue(detail)
+
+    def test_a_401_means_the_refresh_token_is_dead(self) -> None:
+        status, _detail = _classify_http_error(401, '{"error_code":401}')
+        self.assertEqual(status, RefreshStatus.LOGIN_REQUIRED)
+
+    def test_an_unrecognised_400_is_a_protocol_error(self) -> None:
+        """An unknown 4xx is not evidence about the credential."""
+        status, _detail = _classify_http_error(400, '{"error_code":400,"error_message":"?"}')
+        self.assertEqual(status, RefreshStatus.PROTOCOL_ERROR)
+        self.assertNotEqual(status, RefreshStatus.LOGIN_REQUIRED)
+
+    def test_a_403_is_a_protocol_error(self) -> None:
+        status, _detail = _classify_http_error(403, "forbidden")
+        self.assertEqual(status, RefreshStatus.PROTOCOL_ERROR)
+
+    def test_a_429_is_a_network_class_failure(self) -> None:
+        """Throttling says "try later"; it says nothing about the credential."""
+        status, _detail = _classify_http_error(429, "slow down")
+        self.assertEqual(status, RefreshStatus.NETWORK_ERROR)
+        self.assertNotEqual(status, RefreshStatus.LOGIN_REQUIRED)
 
     def test_a_5xx_does_not_send_the_user_to_sign_in(self) -> None:
         """A server fault is not a credential fault.
@@ -218,7 +261,7 @@ class ExchangeTest(StubEndpointMixin, unittest.TestCase):
                 {
                     "access_token": NEW_ACCESS,
                     "refresh_token": NEW_REFRESH,
-                    "expires_in": GITCODE_ACCESS_TOKEN_SECONDS,
+                    "expires_in": 1296000,
                     "scope": "all_user",
                 }
             ),
@@ -227,25 +270,53 @@ class ExchangeTest(StubEndpointMixin, unittest.TestCase):
         self.assertEqual(result.status, RefreshStatus.REFRESHED)
         self.assertTrue(result.ok)
         self.assertEqual(result.credential.access_token, NEW_ACCESS)
-        self.assertEqual(result.expires_in, float(GITCODE_ACCESS_TOKEN_SECONDS))
+        self.assertEqual(result.expires_in, 1296000.0)
 
-    def test_the_request_carries_the_grant_type_and_token(self) -> None:
+    def test_an_enveloped_200_is_accepted(self) -> None:
+        """A ``{"data": {...}}`` wrapper must not become a protocol error."""
+        _Handler.response = (
+            200,
+            json.dumps({"data": {"access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH}}),
+        )
+        result = self.refresher().refresh(a_credential(), force=True)
+        self.assertEqual(result.status, RefreshStatus.REFRESHED)
+        self.assertEqual(result.credential.access_token, NEW_ACCESS)
+
+    def test_the_request_is_the_frontend_shape(self) -> None:
+        """Bearer credential in the header, refresh token in the form body.
+
+        This is the shape GitCode's own frontend sends (current production
+        bundle, verbatim): nothing in the query string -- which also keeps the
+        refresh token out of any URL a proxy could log.
+        """
         _Handler.response = (200, json.dumps({"access_token": NEW_ACCESS}))
         self.refresher().refresh(a_credential(), force=True)
-        self.assertIn("grant_type=refresh_token", _Handler.last_query)
-        self.assertIn("refresh_token=", _Handler.last_query)
+
+        self.assertNotIn("?", _Handler.last_query, "nothing travels in a query string")
+        self.assertEqual(
+            _Handler.last_headers.get("authorization"), f"Bearer {ACCESS}"
+        )
+        self.assertIn(
+            "application/x-www-form-urlencoded",
+            _Handler.last_headers.get("content-type", ""),
+        )
+        self.assertEqual(
+            _Handler.last_body.decode("ascii"),
+            f"refresh_token={urllib.parse.quote(REFRESH)}",
+        )
 
     def test_the_request_does_not_send_a_client_secret(self) -> None:
-        """Neither is required for the refresh grant, and neither is sent.
+        """This endpoint authenticates the caller by token, not by app secret.
 
         Sending a ``client_secret`` this tool does not have would be a guess, and
         a wrong one would look like a rejected credential.
         """
         _Handler.response = (200, json.dumps({"access_token": NEW_ACCESS}))
         self.refresher().refresh(a_credential(), force=True)
-        self.assertNotIn("client_secret", _Handler.last_query)
-        self.assertNotIn("client_id", _Handler.last_query)
-        self.assertNotIn("redirect_uri", _Handler.last_query)
+        sent = _Handler.last_body.decode("utf-8", "replace")
+        self.assertNotIn("client_secret", sent)
+        self.assertNotIn("client_id", sent)
+        self.assertNotIn("redirect_uri", sent)
 
     def test_a_rotated_refresh_token_is_reported(self) -> None:
         _Handler.response = (
@@ -296,14 +367,31 @@ class ExchangeTest(StubEndpointMixin, unittest.TestCase):
         result = self.refresher().refresh(a_credential(), force=True)
         self.assertEqual(result.status, RefreshStatus.PROTOCOL_ERROR)
 
-    def test_a_400_is_login_required(self) -> None:
+    def test_the_endpoint_refusal_is_login_required(self) -> None:
+        """The 400004 REFRESH_TOKEN_ERROR shape the real endpoint produces."""
+        _Handler.response = (
+            400,
+            json.dumps(
+                {
+                    "error_code": 400004,
+                    "error_code_name": "REFRESH_TOKEN_ERROR",
+                    "error_message": "token校验失败或者refreshToken已失效",
+                }
+            ),
+        )
+        result = self.refresher().refresh(a_credential(), force=True)
+        self.assertEqual(result.status, RefreshStatus.LOGIN_REQUIRED)
+        self.assertTrue(result.needs_login)
+
+    def test_an_unrecognised_400_is_a_protocol_error(self) -> None:
+        """The old endpoint's generic BAD_REQUEST is not a credential answer."""
         _Handler.response = (
             400,
             json.dumps({"error_code": 400, "error_message": "refresh_token不存在或已过期"}),
         )
         result = self.refresher().refresh(a_credential(), force=True)
-        self.assertEqual(result.status, RefreshStatus.LOGIN_REQUIRED)
-        self.assertTrue(result.needs_login)
+        self.assertEqual(result.status, RefreshStatus.PROTOCOL_ERROR)
+        self.assertFalse(result.needs_login)
 
     def test_a_500_is_a_network_error_not_a_login_requirement(self) -> None:
         _Handler.response = (500, "internal error")
@@ -411,7 +499,7 @@ class PersistenceTest(StubEndpointMixin, unittest.TestCase):
         self.assertEqual(store.load().gitcode.username, "alice")
 
     def test_a_failed_refresh_does_not_touch_the_store(self) -> None:
-        _Handler.response = (400, json.dumps({"error_code": 400}))
+        _Handler.response = (400, json.dumps({"error_code": 400004}))
         store = MemoryCredentialStore(CredentialBundle(gitcode=a_credential()))
         before = store.writes
         result = StoredGitCodeRefresher(store, refresher=self.refresher()).refresh(force=True)
@@ -471,6 +559,151 @@ class PersistenceTest(StubEndpointMixin, unittest.TestCase):
             ),
         ).refresh(force=True)
         self.assertIsInstance(result.status, RefreshStatus)
+
+
+class RenewingRenewerTest(StubEndpointMixin, unittest.TestCase):
+    """The composed renewer: proactive gate, demand recovery, honest failure.
+
+    ``RefreshingGitCodeRenewer`` is the production path -- the tray renews
+    through it -- and until now it had no test of its own. These drive the real
+    refresher against the real store and a stub endpoint, with a fake OAuth leg
+    whose answer the test scripts.
+    """
+
+    def setUp(self) -> None:
+        type(self)._server.requests = 0
+        _Handler.requests = 0
+
+    def store(self) -> MemoryCredentialStore:
+        return MemoryCredentialStore(CredentialBundle(gitcode=a_credential()))
+
+    @staticmethod
+    def fake_leg(results: list[RenewalResult]):
+        """An OAuth leg that answers from a script and records its calls."""
+        calls: list[str] = []
+
+        class _Leg:
+            name = "fake-leg"
+
+            def can_renew(self) -> bool:
+                return True
+
+            def renew(self, *, timeout=None, before=None) -> RenewalResult:
+                calls.append("renew")
+                return results.pop(0) if results else RenewalResult(
+                    RenewalStatus.RENEWED, renewed=True, token_changed=True
+                )
+
+        return _Leg(), calls
+
+    def composed(self, store, leg):
+        from opencsi.auth.gitcode_refresh import RefreshingGitCodeRenewer
+
+        return RefreshingGitCodeRenewer(
+            StoredGitCodeRefresher(store, refresher=self.refresher()), leg
+        )
+
+    def test_a_known_valid_expiry_skips_the_proactive_refresh(self) -> None:
+        """A healthy credential costs the renewal zero refresh requests."""
+        store = self.store()
+        store.load().gitcode.__post_init__  # touch, keeps linters honest
+        leg, calls = self.fake_leg([RenewalResult(RenewalStatus.RENEWED, renewed=True)])
+        store._bundle = CredentialBundle(
+            gitcode=a_credential(access_expires_at=time.time() + 90_000)
+        )
+        renewer = self.composed(store, leg)
+        result = renewer.renew()
+        self.assertEqual(result.status, RenewalStatus.RENEWED)
+        self.assertEqual(_Handler.requests, 0, "a refresh fired for a valid token")
+        self.assertEqual(calls, ["renew"])
+
+    def test_an_unknown_expiry_skips_the_proactive_refresh(self) -> None:
+        """The QR credential's normal state makes no proactive request."""
+        store = self.store()
+        store._bundle = CredentialBundle(gitcode=a_credential(access_expires_at=None))
+        leg, _ = self.fake_leg([RenewalResult(RenewalStatus.RENEWED, renewed=True)])
+        self.composed(store, leg).renew()
+        self.assertEqual(_Handler.requests, 0)
+
+    def test_a_dead_session_triggers_one_recovery_refresh_and_a_retry(self) -> None:
+        """The demand-driven path: leg fails, refresh runs, leg is retried.
+
+        This is the recovery the L2 goal rests on: the GitCode access token has
+        died, the refresh token is still good, and nobody scans anything.
+        """
+        store = self.store()
+        store._bundle = CredentialBundle(gitcode=a_credential(access_expires_at=None))
+        leg, calls = self.fake_leg([
+            RenewalResult(RenewalStatus.LOGIN_REQUIRED, detail="session gone"),
+            RenewalResult(RenewalStatus.RENEWED, renewed=True, token_changed=True),
+        ])
+        _Handler.response = (
+            200,
+            json.dumps({"access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH}),
+        )
+        renewer = self.composed(store, leg)
+        result = renewer.renew()
+
+        self.assertEqual(result.status, RenewalStatus.RENEWED)
+        self.assertEqual(_Handler.requests, 1, "exactly one recovery refresh")
+        self.assertEqual(calls, ["renew", "renew"])
+        stored = store.load().gitcode
+        self.assertEqual(stored.access_token, NEW_ACCESS)
+        self.assertEqual(stored.refresh_token, NEW_REFRESH)
+
+    def test_a_refused_recovery_is_not_asked_twice(self) -> None:
+        """A refresh token the server refuses is spent once, not twice.
+
+        The proactive refresh already came back LOGIN_REQUIRED (400004), so the
+        recovery path must not spend a second request on the same dead token.
+        """
+        store = self.store()
+        store._bundle = CredentialBundle(gitcode=a_credential(access_expires_at=None))
+        leg, calls = self.fake_leg([
+            RenewalResult(RenewalStatus.LOGIN_REQUIRED, detail="session gone"),
+        ])
+        _Handler.response = (
+            400,
+            json.dumps({"error_code": 400004, "error_code_name": "REFRESH_TOKEN_ERROR"}),
+        )
+        renewer = self.composed(store, leg)
+        result = renewer.renew()
+
+        self.assertEqual(result.status, RenewalStatus.LOGIN_REQUIRED)
+        self.assertEqual(_Handler.requests, 1, "the dead token was asked for twice")
+        self.assertEqual(calls, ["renew"])
+        self.assertIn("can no longer be refreshed", result.detail or "")
+        self.assertIn("400004", result.detail or "")
+        self.assertIn("session gone", result.detail or "")
+
+    def test_a_successful_refresh_that_still_fails_reports_both_facts(self) -> None:
+        """A new credential is not proof the leg will accept it."""
+        store = self.store()
+        store._bundle = CredentialBundle(gitcode=a_credential(access_expires_at=None))
+        leg, _ = self.fake_leg([
+            RenewalResult(RenewalStatus.LOGIN_REQUIRED, detail="refused again"),
+            RenewalResult(RenewalStatus.LOGIN_REQUIRED, detail="refused again"),
+        ])
+        _Handler.response = (200, json.dumps({"access_token": NEW_ACCESS}))
+        renewer = self.composed(store, leg)
+        result = renewer.renew()
+
+        self.assertEqual(result.status, RenewalStatus.LOGIN_REQUIRED)
+        self.assertEqual(_Handler.requests, 1)
+        self.assertEqual(store.load().gitcode.access_token, NEW_ACCESS)
+        self.assertIn("refused again", result.detail or "")
+        self.assertIn("still refused", result.detail or "")
+
+    def test_a_healthy_renewal_never_touches_the_refresh_path(self) -> None:
+        store = MemoryCredentialStore(
+            CredentialBundle(gitcode=a_credential(access_expires_at=time.time() + 90_000))
+        )
+        leg, calls = self.fake_leg([RenewalResult(RenewalStatus.RENEWED, renewed=True)])
+        self.composed(store, leg).renew()
+        self.assertEqual(_Handler.requests, 0)
+        self.assertEqual(calls, ["renew"])
+        self.assertEqual(store.writes, 0)
+
 
 
 class RefreshResultShapeTest(unittest.TestCase):

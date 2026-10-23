@@ -8,43 +8,62 @@ apart:
 * the **openCsiTool** session cookie -- about one hour, renewed over plain HTTP
   from the GitCode credential. Solved, and covered by
   :mod:`opencsi.auth.http_oauth`.
-* the **GitCode access token** itself -- documented at ``expires_in = 1296000``,
-  which is 15 days. Until this module existed, that expiry was terminal: the
-  refresh token was stored and then never used, so the tool would work for a
-  fortnight and then require another WeChat scan.
+* the **GitCode access token** itself -- the QR login's own credential. When it
+  dies, either the refresh token extends the login or the user scans a QR code
+  again. That difference is why the stored credential carries a
+  ``refresh_token`` at all.
 
-That is the difference between a credential lifetime measured in weeks and one
-measured in months, and it is why the stored credential carries a
-``refresh_token`` at all.
+Which endpoint the QR credential actually belongs to
+----------------------------------------------------
+The endpoint below was **not** guessed, and the first attempt was wrong in a way
+worth recording. ``POST https://gitcode.com/oauth/token`` with
+``grant_type=refresh_token`` is a *real* endpoint -- a bogus ``grant_type`` made
+it enumerate its own supported values -- but it serves GitCode's **OAuth
+application** token system (the ``authorization_code`` grant a third-party app
+exchanges). A credential issued by the WeChat-QR login is refused there with
+HTTP 400 ``refresh_token不存在或已过期`` -- the same answer a fabricated token
+gets -- because it simply does not exist in that system. Three independent lines
+of evidence establish the family the QR credential *does* belong to:
 
-The endpoint, established by probing rather than guessing
----------------------------------------------------------
-``POST https://gitcode.com/oauth/token`` with ``grant_type=refresh_token``.
+1. **GitCode's own frontend** (current production bundle) renews its token with::
 
-The evidence, and it is worth recording because the endpoint is not where one
-would first look: sending a bogus ``grant_type`` makes the server enumerate its
-own supported values --
+       POST https://web-api.gitcode.com/uc/api/v1/user/token/refresh
+       Authorization: Bearer <access_token>
+       Content-Type: application/x-www-form-urlencoded
+       body: refresh_token=<refresh_token>
 
-    grant_type必须为以下值：'authorization_code','refresh_token'
+   and on 200 stores the returned ``access_token`` / ``refresh_token`` over the
+   old ones. It never calls ``gitcode.com/oauth/token`` anywhere in the bundle.
+2. A no-credential probe of that endpoint answers a fabricated token with its
+   own error family -- HTTP 400 ``error_code 400004 REFRESH_TOKEN_ERROR`` --
+   distinct from the generic ``BAD_REQUEST`` the OAuth-application endpoint
+   produces.
+3. The QR login's tokens are used exactly the way that endpoint expects: the
+   frontend stores them in ``localStorage`` and sends them as
+   ``Authorization: Bearer`` against ``web-api.gitcode.com``.
 
--- and a bogus ``refresh_token`` returns an endpoint-specific
-``refresh_token不存在或已过期``. Both were reproduced against production
-(``tools/probe_gitcode_refresh.py``).
+The QR flow therefore mints a **GitCode account token**, and that is the system
+this module talks to.
 
-**The host is ``gitcode.com``, not ``web-api.gitcode.com``.** Those are different
-services: ``checkOrAuthorize`` lives on the API host, the token endpoint does not.
-Pointing this at the API host would 404 rather than explain itself, which is
-exactly the kind of wrong guess that costs an afternoon.
-
-Only two parameters are required -- ``grant_type`` and ``refresh_token``.
-``client_id``, ``client_secret`` and ``redirect_uri`` are conditional on
-``authorization_code`` and are not sent here.
+What is *not* claimed: that a live ``A1/R1 -> A2/R2`` exchange has been observed
+on a real account. It has not -- the exchange rotates the refresh token, so
+running it is an explicit opt-in (``tools/probe_gitcode_token_refresh.py``).
+Everything up to that request's shape is verified; the exchange itself is the
+acceptance step that remains.
 
 Failure semantics
 -----------------
 Four outcomes, deliberately not collapsed into one. ``except Exception ->
-LOGIN_REQUIRED`` is the shape this module exists to avoid: it turns a wifi dropout
-into "scan the QR code again", which is both wrong and expensive for the user.
+LOGIN_REQUIRED`` is the shape this module exists to avoid: it turns a wifi
+dropout into "scan the QR code again", which is both wrong and expensive for the
+user.
+
+The 4xx split is the part error classification gets wrong most easily, so it is
+explicit: **only** the endpoint's own credential-refusal answer (401, or 400
+carrying ``error_code 400004 REFRESH_TOKEN_ERROR``) means the refresh token is
+dead. Any *other* 4xx is a shape this code does not recognise -- a changed API,
+a WAF page, a proxy -- and is reported as a protocol error rather than as "sign
+in again", because re-authenticating does not fix a parser.
 """
 
 from __future__ import annotations
@@ -59,14 +78,17 @@ from enum import Enum
 
 from ..redaction import scrub_text
 
-#: The token endpoint. On ``gitcode.com`` -- see the module docstring.
-GITCODE_TOKEN_URL = "https://gitcode.com/oauth/token"
+#: The account-token refresh endpoint. On ``web-api.gitcode.com`` -- the same
+#: host the QR login itself runs on -- with the ``/uc`` prefix the frontend's
+#: axios interceptor adds. See the module docstring for why this is *not*
+#: ``gitcode.com/oauth/token``: that host serves the OAuth-application token
+#: system, which the QR credential is not part of.
+GITCODE_TOKEN_URL = "https://web-api.gitcode.com/uc/api/v1/user/token/refresh"
 
-#: The documented lifetime of an access token: 1296000 s = exactly 15 days.
-#: Recorded because the *point* of the refresh token is a lifetime an order of
-#: magnitude longer than the session cookie's hour, and this number is the claim
-#: being relied on.
-GITCODE_ACCESS_TOKEN_SECONDS = 1296000
+#: The endpoint's own refusal code for an unusable token. Observed on the wire
+#: against a fabricated value; treated as the one 400 shape that means "this
+#: refresh token is dead" rather than "this request is malformed".
+REFRESH_TOKEN_ERROR_CODE = 400004
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -75,9 +97,11 @@ USER_AGENT = (
 
 DEFAULT_TIMEOUT = 20.0
 
-#: Refresh this long before the access token actually expires. A day is generous
-#: for something measured in weeks, and it means a machine that was asleep for a
-#: fortnight still refreshes on wake rather than after its first failed request.
+#: Refresh this long before the access token actually expires -- *when the
+#: expiry is known*. The QR response carries no ``expires_in``, so for a
+#: QR-issued credential the expiry is normally unknown and the policy that
+#: applies is the demand-driven one described on :meth:`GitCodeTokenRefresher.
+#: needs_refresh`, not a margin.
 DEFAULT_REFRESH_MARGIN = 86400.0
 
 
@@ -97,18 +121,25 @@ class RefreshStatus(str, Enum):
     """GitCode refused the refresh token: expired, revoked, or already rotated.
 
     This is the one outcome that genuinely needs a QR scan, and it is reached
-    only on a 4xx that says so -- not on a network failure.
+    only on the endpoint's own credential-refusal answer -- 401, or 400 with
+    ``error_code 400004`` -- never on a network failure or an unrecognised
+    response.
     """
 
     NETWORK_ERROR = "NETWORK_ERROR"
-    """The request did not reach GitCode, or the reply did not arrive."""
+    """The request did not reach GitCode, was throttled, or GitCode is unwell.
+
+    429 and 5xx land here on purpose: both say "try again later" and neither
+    says anything about the credential.
+    """
 
     PROTOCOL_ERROR = "PROTOCOL_ERROR"
-    """GitCode answered 200 with a body this code does not understand.
+    """GitCode answered in a shape this code does not understand.
 
     Kept separate from :attr:`LOGIN_REQUIRED` on purpose: a changed response
-    shape is a bug in this tool, and reporting it as "sign in again" would have
-    the user re-authenticate forever without ever fixing it.
+    shape, an unexpected 4xx, or a WAF interstitial is a bug in this tool or an
+    environment problem, and reporting it as "sign in again" would have the user
+    re-authenticate forever without ever fixing it.
     """
 
 
@@ -164,20 +195,43 @@ class RefreshResult:
         )
 
 
+def _refusal_code(body: str) -> int | None:
+    """The endpoint's ``error_code`` from an error body, when parseable."""
+    try:
+        decoded = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    code = decoded.get("error_code")
+    if isinstance(code, bool) or not isinstance(code, int):
+        return None
+    return code
+
+
 def _classify_http_error(status: int, body: str) -> tuple[RefreshStatus, str]:
     """Map a transport failure onto a status, without guessing.
 
-    The split that matters is 4xx versus everything else:
+    The split that matters is "GitCode refused *this credential*" versus
+    everything else:
 
-    * a **4xx** means GitCode rejected *this refresh token*. It is expired,
-      revoked, or has already been rotated away -- all of which need a new sign
-      in. ``LOGIN_REQUIRED`` is correct.
-    * a **5xx** means GitCode is unwell. The refresh token is probably fine, and
-      telling the user to scan again would be both wrong and, a minute later,
-      visibly wrong. Reported as a network-class failure instead.
-    * **status 0** means no response was received at all -- DNS, TLS, timeout, a
-      refused connection. Also a network failure, and not a statement about the
-      credential. This case is easy to get wrong: 0 is not a 4xx, so a naive
+    * **401**, or a **400** carrying the endpoint's own ``400004
+      REFRESH_TOKEN_ERROR`` code, means the refresh token was looked at and
+      rejected -- expired, revoked, or already rotated. ``LOGIN_REQUIRED`` is
+      correct, and it is reached *only* here.
+    * **any other 4xx** is a response this code does not recognise: a changed
+      API, an unfamiliar validation message, a WAF interstitial. Reported as a
+      protocol error. The earlier behaviour -- every 4xx to LOGIN_REQUIRED --
+      sent users to re-scan for problems a re-scan cannot fix, and the real
+      endpoint's answer to a *bogus* token shows the refusal has a specific,
+      recognisable shape, so anything else is not a refusal.
+    * **429** is throttling: try later, the credential is fine. Grouped with
+      the network-class failures rather than given its own status, because the
+      caller's correct action is identical.
+    * **5xx** means GitCode is unwell -- same handling.
+    * **status 0** means no response was received at all -- DNS, TLS, timeout,
+      a refused connection. Also a network failure, and not a statement about
+      the credential. This case is easy to get wrong: 0 is not a 4xx, so a naive
       ``if 400 <= status < 500 ... else PROTOCOL_ERROR`` reports a wifi dropout
       as a changed API response.
 
@@ -192,9 +246,21 @@ def _classify_http_error(status: int, body: str) -> tuple[RefreshStatus, str]:
     detail = scrub_text(body)[:200] if body else f"HTTP {status}"
     if 500 <= status < 600:
         return RefreshStatus.NETWORK_ERROR, f"GitCode returned HTTP {status}: {detail}"
-    if 400 <= status < 500:
+    if status == 429:
+        return RefreshStatus.NETWORK_ERROR, (
+            f"GitCode throttled the refresh (HTTP 429); try again later: {detail}"
+        )
+    if status == 401:
         return RefreshStatus.LOGIN_REQUIRED, (
-            f"GitCode refused the refresh token (HTTP {status}): {detail}"
+            f"GitCode refused the refresh token (HTTP 401): {detail}"
+        )
+    if 400 <= status < 500:
+        if _refusal_code(body) == REFRESH_TOKEN_ERROR_CODE:
+            return RefreshStatus.LOGIN_REQUIRED, (
+                f"GitCode refused the refresh token (HTTP {status}): {detail}"
+            )
+        return RefreshStatus.PROTOCOL_ERROR, (
+            f"GitCode answered HTTP {status} with an unrecognised body: {detail}"
         )
     return RefreshStatus.PROTOCOL_ERROR, f"unexpected HTTP {status}: {detail}"
 
@@ -231,31 +297,37 @@ class GitCodeTokenRefresher:
         return self._last_status
 
     def describe(self) -> str:
-        return "GitCode refresh_token grant over plain HTTP"
+        return "GitCode account-token refresh over plain HTTP"
 
     def needs_refresh(
         self, credential: object, *, margin: float = DEFAULT_REFRESH_MARGIN
     ) -> bool:
         """Whether the credential is close enough to expiry to refresh now.
 
-        An **unknown** expiry is treated as needing a refresh. That is the
-        opposite of the choice :class:`~opencsi.auth.session.SessionManager`
-        makes for the session cookie, and deliberately so: a session cookie with
-        no ``expires`` never expires, whereas an access token with no recorded
-        expiry is one whose expiry this tool failed to record -- and refreshing
-        costs one request where not refreshing costs a scan.
+        An **unknown** expiry is *not* refreshed proactively. That is the
+        demand-driven behaviour GitCode's own client implements -- it refreshes
+        when an API call comes back 401 and then retries the call, and never
+        refreshes on a schedule -- and it is the evidence-backed choice here too.
+        The QR login response carries no ``expires_in``, so "unknown" is the
+        normal state of a QR credential; refreshing it on every renewal cycle
+        would spend one request per hour against a credential whose state the
+        response does not report, for a problem that the demand-driven retry in
+        :class:`RefreshingGitCodeRenewer` handles at the moment it actually
+        exists. A *known* expiry inside ``margin`` is refreshed proactively, and
+        ``force=True`` refreshes regardless -- probes and explicit user actions
+        still get a round trip on request.
         """
         expires_at = getattr(credential, "access_expires_at", None)
         if expires_at is None:
-            return True
+            return False
         return (expires_at - time.time()) <= margin
 
     def refresh(self, credential: object, *, force: bool = False) -> RefreshResult:
         """Attempt a refresh. Never raises; always reports.
 
-        ``force`` skips the expiry check, for ``opencsi login --refresh-gitcode``
-        and for the probe, which need the round trip to happen regardless of the
-        clock.
+        ``force`` skips the expiry check -- for the recovery retry in
+        :class:`RefreshingGitCodeRenewer` and for the probe, which need the
+        round trip to happen regardless of the clock.
         """
         refresh_token = getattr(credential, "refresh_token", None)
         if not refresh_token:
@@ -275,9 +347,7 @@ class GitCodeTokenRefresher:
                 detail="the GitCode access token still has life left",
             )
 
-        status, body = self._post(
-            {"grant_type": "refresh_token", "refresh_token": refresh_token}
-        )
+        status, body = self._post(credential, refresh_token)
         self._last_status = status
 
         if status != 200:
@@ -286,18 +356,31 @@ class GitCodeTokenRefresher:
 
         return self._parse(body, sent_refresh_token=refresh_token)
 
-    def _post(self, params: dict[str, str]) -> tuple[int, str]:
+    def _post(self, credential: object, refresh_token: str) -> tuple[int, str]:
         """POST and return ``(status, body)``; HTTP errors are returned, not raised.
 
         ``(0, "")`` means the request never produced a response -- DNS, TLS,
         timeout, a refused connection. The caller maps that to a network failure.
+
+        The request shape is the frontend's, verbatim in every field that could
+        matter: Bearer credential in the ``Authorization`` header, the refresh
+        token as the urlencoded body, JSON accepted. Unlike the OAuth-application
+        endpoint, nothing travels in the query string -- which also keeps the
+        refresh token out of any URL a proxy could log.
         """
-        query = urllib.parse.urlencode(params)
+        access_token = getattr(credential, "access_token", None)
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        if isinstance(access_token, str) and access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
         request = urllib.request.Request(
-            f"{self._token_url}?{query}",
+            self._token_url,
             method="POST",
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-            data=b"",
+            headers=headers,
+            data=urllib.parse.urlencode({"refresh_token": refresh_token}).encode("ascii"),
         )
         if self._use_proxy:
             opener = urllib.request.build_opener()
@@ -309,8 +392,8 @@ class GitCodeTokenRefresher:
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode("utf-8", "replace")
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            # Never the exception's own text: a URL can appear in it, and a URL
-            # built from this call contains the refresh token in its query.
+            # Never the exception's own text: an error message could echo parts
+            # of the request, and the request body carries the refresh token.
             return 0, type(exc).__name__
 
     def _parse(self, body: str, *, sent_refresh_token: str) -> RefreshResult:
@@ -324,6 +407,11 @@ class GitCodeTokenRefresher:
                 RefreshStatus.PROTOCOL_ERROR,
                 detail="GitCode returned 200 with a body that is not JSON",
             )
+        if isinstance(decoded, dict) and isinstance(decoded.get("data"), dict):
+            # The frontend reads the fields straight off the body; an envelope
+            # is accepted too so a future wrapper does not become a "dead
+            # credential" for users who never needed to re-scan.
+            decoded = decoded["data"]
         if not isinstance(decoded, dict):
             return RefreshResult(
                 RefreshStatus.PROTOCOL_ERROR,
@@ -463,15 +551,15 @@ class RefreshingGitCodeRenewer:
 
     So the two are composed here, in a class whose only job is the order.
 
-    The gate that matters
-    ---------------------
-    The refresh runs **only** when the GitCode access token is actually near
-    expiry. ``StoredGitCodeRefresher`` already decides that (``refresh(force=
-    False)`` against ``DEFAULT_REFRESH_MARGIN``), and this class must not
-    second-guess it into running every time: an openCsiTool session lives about an
-    hour while a GitCode token lives fifteen days, so an unconditional refresh
-    would spend a fortnight-long credential roughly 360 times for nothing -- and
-    with rotation, would replace a perfectly good refresh token every hour.
+    The proactive gate
+    ------------------
+    The pre-renewal refresh runs **only** when the GitCode access token's expiry
+    is *known* and near. ``StoredGitCodeRefresher`` already decides that
+    (``refresh(force=False)`` against ``DEFAULT_REFRESH_MARGIN``), and this class
+    must not second-guess it into running every time: an openCsiTool session
+    lives about an hour, and a QR-issued GitCode credential carries no recorded
+    expiry, so an unconditional pre-refresh would spend a request every hour on
+    a credential whose state the answer does not report.
 
     Failure policy
     --------------
@@ -491,6 +579,18 @@ class RefreshingGitCodeRenewer:
       original ordering wrong: it returned LOGIN_REQUIRED while the stored session
       had 56 minutes of life left, because a refused GitCode refresh was treated as
       final.
+
+    The demand-driven recovery
+    --------------------------
+    When the OAuth leg fails with ``LOGIN_REQUIRED`` -- which is what an expired
+    GitCode access token looks like: ``checkOrAuthorize`` answers 401 and the
+    session probe agrees -- and the pre-refresh did not just run, the refresh is
+    attempted once here and the renewal retried on success. This is the behaviour
+    GitCode's own frontend implements (an API call comes back 401, the client
+    refreshes the token, the call is retried), and it is the moment the refresh
+    is actually needed rather than a scheduled guess. One attempt per renewal:
+    a refresh token the server refuses is not asked for twice, and a refresh that
+    succeeded but still left the leg failing is reported with both facts.
     """
 
     name = "stored-oauth"
@@ -521,25 +621,12 @@ class RefreshingGitCodeRenewer:
         return bool(can()) if callable(can) else True
 
     def renew(self, *, timeout: float | None = None, before: object = None):
-        """Refresh if needed, then renew. Never raises; always reports.
-
-        A failed refresh never *by itself* ends the renewal. The only thing that
-        decides whether the user must scan again is whether the OAuth leg could
-        actually be completed, so the refresh result is carried into the failure
-        report rather than short-circuiting the attempt.
-
-        This was wrong in the first version, and a live run caught it: renewal
-        returned LOGIN_REQUIRED while the stored session still had 56 minutes of
-        life, because the GitCode refresh was refused and that was treated as
-        final. But the GitCode access token is a *separate* credential from the
-        openCsiTool session -- refusing to extend one says nothing about whether
-        the other still works, and the openCsiTool OAuth leg is the only thing
-        that can answer that.
-        """
+        """Refresh if needed, then renew. Never raises; always reports."""
         from .session import RenewalResult, RenewalStatus
 
         refresh = getattr(self._refresher, "refresh", None)
         refresh_failed_hard = False
+        refreshed_this_attempt = False
         if callable(refresh):
             try:
                 result = refresh(force=False)
@@ -550,33 +637,74 @@ class RefreshingGitCodeRenewer:
                 )
             self.last_refresh = result
             refresh_failed_hard = result.needs_login
+            refreshed_this_attempt = result.status is RefreshStatus.REFRESHED
 
         outcome = self._renewer.renew(timeout=timeout, before=before)
 
+        recovery_ran = False
         if (
-            refresh_failed_hard
-            and outcome.status is RenewalStatus.LOGIN_REQUIRED
+            outcome.status is RenewalStatus.LOGIN_REQUIRED
+            and callable(refresh)
+            and not refreshed_this_attempt
+            and not refresh_failed_hard
         ):
+            # The GitCode session the OAuth leg saw is gone and the proactive
+            # refresh had no reason to run. This is the moment a refresh is
+            # actually called for: force one, and retry the leg exactly once if
+            # a new credential landed.
+            try:
+                recovery = refresh(force=True)
+            except Exception as exc:  # noqa: BLE001 - a refresh fault must not abort renewal
+                recovery = RefreshResult(
+                    RefreshStatus.PROTOCOL_ERROR,
+                    detail=f"the GitCode refresh raised {type(exc).__name__}",
+                )
+            self.last_refresh = recovery
+            recovery_ran = True
+            if recovery.status is RefreshStatus.REFRESHED:
+                outcome = self._renewer.renew(timeout=timeout, before=before)
+
+        if outcome.status is not RenewalStatus.LOGIN_REQUIRED:
+            return outcome
+
+        refused = self.last_refresh is not None and self.last_refresh.needs_login
+        if refused:
             # Both halves are gone: the session could not be renewed *and* the
             # GitCode credential cannot be extended. Only now is a scan the honest
-            # answer -- and the refresh detail is included, because "sign in again"
-            # without saying why the refresh was refused is the kind of message
-            # that produces a support ticket instead of a fix.
+            # answer -- and both details are included, because "sign in again"
+            # without saying why each half failed is the kind of message that
+            # produces a support ticket instead of a fix.
             detail = (
                 "the openCsiTool session could not be renewed and the GitCode "
                 f"credential can no longer be refreshed "
                 f"({self.last_refresh.status.value if self.last_refresh else '?'})"
             )
+            if outcome.detail:
+                detail = f"{outcome.detail}; {detail}"
             if self.last_refresh and self.last_refresh.detail:
                 detail = f"{detail}: {self.last_refresh.detail}"
             return RenewalResult(RenewalStatus.LOGIN_REQUIRED, detail=detail)
+
+        if recovery_ran and self.last_refresh is not None and self.last_refresh.ok:
+            # A refresh succeeded but the leg still refused. The leg's own
+            # detail stands; the note is appended so the report carries both
+            # facts rather than implying nothing was tried.
+            note = (
+                "a refreshed GitCode credential was obtained, but the openCsiTool "
+                "session was still refused"
+            )
+            return RenewalResult(
+                RenewalStatus.LOGIN_REQUIRED,
+                detail=f"{outcome.detail or 'the session was refused'}; {note}",
+            )
 
         return outcome
 
     def describe(self) -> str:
         return (
-            "refresh the GitCode credential if it is near expiry, then renew the "
-            "openCsiTool session over HTTP"
+            "refresh the GitCode credential if it is near expiry, renew the "
+            "openCsiTool session over HTTP, and on a refused GitCode session "
+            "refresh once and retry"
         )
 
     def __repr__(self) -> str:
