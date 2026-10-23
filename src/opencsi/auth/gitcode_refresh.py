@@ -250,6 +250,14 @@ def _classify_http_error(status: int, body: str) -> tuple[RefreshStatus, str]:
         return RefreshStatus.NETWORK_ERROR, (
             f"GitCode throttled the refresh (HTTP 429); try again later: {detail}"
         )
+    if status == 418:
+        # CloudWAF's interstitial page. The credential was not looked at, so
+        # this must not read as "sign in again" -- and the remedy is headers,
+        # not a QR scan (see the Origin/Referer note in GitCodeTokenRefresher).
+        return RefreshStatus.PROTOCOL_ERROR, (
+            "GitCode's edge WAF (CloudWAF) intercepted the request (HTTP 418) "
+            f"before the credential was evaluated: {detail}"
+        )
     if status == 401:
         return RefreshStatus.LOGIN_REQUIRED, (
             f"GitCode refused the refresh token (HTTP 401): {detail}"
@@ -373,6 +381,14 @@ class GitCodeTokenRefresher:
             "User-Agent": USER_AGENT,
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
+            # Huawei CloudWAF answered HTTP 418 to a header-minimal POST during
+            # the 2026-10-24 audit (the credential was never evaluated); the
+            # same request with these two headers got the clean API answer.
+            # That is the same pattern docs/gitcode-qr-protocol.md §9.4 records
+            # for the QR flow, and the browser always sends them on a
+            # cross-site POST, so they cost nothing and unblock the endpoint.
+            "Origin": "https://gitcode.com",
+            "Referer": "https://gitcode.com/",
         }
         if isinstance(access_token, str) and access_token:
             headers["Authorization"] = f"Bearer {access_token}"

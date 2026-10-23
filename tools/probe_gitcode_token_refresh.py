@@ -89,6 +89,11 @@ def exchange(access_token: str, refresh_token: str, timeout: float) -> tuple[int
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
             "Authorization": f"Bearer {access_token}",
+            # CloudWAF answered 418 to the header-minimal first run (2026-10-24,
+            # credential untouched); with these two headers the same request
+            # reaches the API. The browser sends them on every cross-site POST.
+            "Origin": "https://gitcode.com",
+            "Referer": "https://gitcode.com/",
         },
         data=urllib.parse.urlencode({"refresh_token": refresh_token}).encode("ascii"),
     )

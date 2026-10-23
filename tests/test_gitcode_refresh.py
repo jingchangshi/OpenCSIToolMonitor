@@ -226,6 +226,19 @@ class FailureClassificationTest(unittest.TestCase):
         self.assertEqual(status, RefreshStatus.NETWORK_ERROR)
         self.assertNotEqual(status, RefreshStatus.LOGIN_REQUIRED)
 
+    def test_a_418_names_the_waf_and_not_the_credential(self) -> None:
+        """CloudWAF's interstitial is an environment answer, not a token answer.
+
+        Measured on 2026-10-24: a header-minimal refresh POST got CloudWAF's
+        HTML 418 page while the credential was never evaluated. The remedy is
+        Origin/Referer headers; "scan again" would be both wrong and, one
+        request later, visibly wrong.
+        """
+        status, detail = _classify_http_error(418, "<html>CloudWAF</html>")
+        self.assertEqual(status, RefreshStatus.PROTOCOL_ERROR)
+        self.assertNotEqual(status, RefreshStatus.LOGIN_REQUIRED)
+        self.assertIn("WAF", detail)
+
     def test_a_5xx_does_not_send_the_user_to_sign_in(self) -> None:
         """A server fault is not a credential fault.
 
@@ -300,6 +313,10 @@ class ExchangeTest(StubEndpointMixin, unittest.TestCase):
             "application/x-www-form-urlencoded",
             _Handler.last_headers.get("content-type", ""),
         )
+        # CloudWAF answered 418 to the header-minimal first run (2026-10-24);
+        # with Origin/Referer the same request reached the API.
+        self.assertEqual(_Handler.last_headers.get("origin"), "https://gitcode.com")
+        self.assertEqual(_Handler.last_headers.get("referer"), "https://gitcode.com/")
         self.assertEqual(
             _Handler.last_body.decode("ascii"),
             f"refresh_token={urllib.parse.quote(REFRESH)}",
