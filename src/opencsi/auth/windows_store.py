@@ -41,9 +41,11 @@ import ctypes
 import json
 import os
 import sys
+from collections.abc import Callable
+from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .store import (
     STORE_VERSION,
@@ -102,6 +104,96 @@ def supported() -> bool:
     "unsupported" rather than catching an exception at the first save.
     """
     return sys.platform == "win32"
+
+
+#: How long ``_StoreWriteLock`` waits for the writer slot before giving up.
+#: The critical section is two local file operations, so ten seconds of waiting
+#: means something is genuinely wrong rather than merely contended.
+_WRITE_LOCK_TIMEOUT_SECONDS = 10.0
+
+
+class _StoreWriteLock:
+    """A cross-process writer lock over one credential file.
+
+    Why it exists
+    -------------
+    The store's writes are read-modify-write cycles that must not interleave:
+    the tray renews the openCsiTool session while a CLI rotates the GitCode
+    refresh token, and both operations ride the same file. Without
+    synchronisation the writers collided in two measured ways
+    (``tests/test_store_multiprocess.py`` reproduces both):
+
+    * every writer stages its ciphertext through the *same* ``.tmp`` path, so
+      two writers hold that file open at once and the first ``os.replace``
+      fails with a Windows sharing violation -- a healthy renewal reported as
+      "the credential file could not be written". A rotation lost that way
+      leaves the server holding refresh token N+1 and the disk holding N, which
+      the next refresh cannot recover from;
+    * two writers truncating the shared ``.tmp`` concurrently can interleave
+      their ciphertext into one blob, and whoever replaces last corrupts the
+      store for every later reader.
+
+    The lock is a separate ``.lock`` file holding no bytes of interest -- it
+    never contains a credential (asserted by a test). The OS releases the lock
+    when the owning process dies, so a crashed writer cannot strand the next
+    one. Readers take no lock: ``os.replace`` is atomic, so a read sees either
+    the old file or the new one, never a mixture.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._lock_path = path.with_suffix(path.suffix + ".lock")
+
+    @contextmanager
+    def held(self) -> Iterator[None]:
+        """Hold the writer slot. Raises :class:`CredentialStoreError` on timeout."""
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle = open(self._lock_path, "a+b")
+            try:
+                handle.seek(0)
+                _lock_byte_with_retries(handle.fileno(), _WRITE_LOCK_TIMEOUT_SECONDS)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            finally:
+                handle.close()
+        else:
+            import fcntl
+
+            handle = open(self._lock_path, "a+b")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+
+
+def _lock_byte_with_retries(fd: int, timeout_seconds: float) -> None:
+    """Take a one-byte mandatory lock on Windows, retrying until the timeout.
+
+    ``msvcrt.LK_LOCK`` already retries once a second for ten attempts and then
+    raises; it has no timeout parameter, so the retry budget here is expressed
+    as a loop over ``LK_NDELAY`` instead. One attempt per poll keeps the wait
+    bounded without silently exceeding the caller's stated timeout by much.
+    """
+    import msvcrt
+    import time as _time
+
+    deadline = _time.monotonic() + max(1.0, timeout_seconds)
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return
+        except OSError:
+            if _time.monotonic() >= deadline:
+                raise
+            _time.sleep(0.1)
 
 
 def default_path() -> Path:
@@ -211,6 +303,7 @@ class DpapiCredentialStore:
                 "there is deliberately no plaintext fallback"
             )
         self._path = Path(path) if path is not None else default_path()
+        self._write_lock = _StoreWriteLock(self._path)
 
     @property
     def path(self) -> Path:
@@ -323,11 +416,26 @@ class DpapiCredentialStore:
 
     def save(self, bundle: CredentialBundle) -> None:
         """Replace the whole bundle."""
-        self._write(bundle)
+        with self._write_lock.held():
+            self._write(bundle)
+
+    def _write_merged(self, replace: Callable[[CredentialBundle], CredentialBundle]) -> None:
+        """Apply ``replace`` to the *current* on-disk bundle, under the lock.
+
+        The re-read happens inside the lock, not before it. That is the whole
+        point of the method: a caller that loaded the bundle and then wrote a
+        replacement would serialize its *writes* while still merging into its
+        own possibly stale view -- and would write back a half another process
+        had already rotated. Merging into a fresh read under the lock is what
+        makes ``save_gitcode``/``save_opencsi`` last-writer-wins per half
+        instead of last-full-bundle-wins.
+        """
+        with self._write_lock.held():
+            self._write(replace(self.load()))
 
     def save_gitcode(self, credential: StoredGitCodeCredential) -> None:
         """Persist the GitCode half, preserving the openCsiTool half."""
-        self._write(self.load().with_gitcode(credential))
+        self._write_merged(lambda bundle: bundle.with_gitcode(credential))
 
     def save_opencsi(self, credential: StoredOpenCsiCredential) -> None:
         """Persist the openCsiTool half, preserving the GitCode half.
@@ -337,14 +445,14 @@ class DpapiCredentialStore:
         bundle wholesale it would delete the GitCode refresh token that made the
         renewal possible -- so the *next* expiry would need another QR scan.
         """
-        self._write(self.load().with_opencsi(credential))
+        self._write_merged(lambda bundle: bundle.with_opencsi(credential))
 
     # ── clear ─────────────────────────────────────────────────────────────
     def clear_gitcode(self) -> None:
-        self._write(self.load().with_gitcode(None))
+        self._write_merged(lambda bundle: bundle.with_gitcode(None))
 
     def clear_opencsi(self) -> None:
-        self._write(self.load().with_opencsi(None))
+        self._write_merged(lambda bundle: bundle.with_opencsi(None))
 
     def clear_all(self) -> None:
         """Remove the credential file entirely.

@@ -384,10 +384,14 @@ class DpapiStoreTest(unittest.TestCase):
         Checked by scanning the directory after a write, because a
         "serialise to a temp file then encrypt" implementation would leave
         exactly the artifact this asserts is absent.
+
+        ``credentials.dat.lock`` is the cross-process writer lock. It holds no
+        credential bytes -- ``tests/test_store_multiprocess.py`` scans it
+        directly -- so its presence does not weaken the property under test.
         """
         self.store.save_gitcode(a_bundle().gitcode)
         leftovers = sorted(p.name for p in Path(self._dir.name).iterdir())
-        self.assertEqual(leftovers, ["credentials.dat"])
+        self.assertEqual(leftovers, ["credentials.dat", "credentials.dat.lock"])
 
     def test_the_temporary_file_is_cleaned_up(self) -> None:
         self.store.save_opencsi(a_bundle().opencsi)
