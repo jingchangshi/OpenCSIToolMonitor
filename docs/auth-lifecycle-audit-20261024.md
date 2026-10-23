@@ -200,6 +200,7 @@ GitCode:  StoredGitCodeRefresher → save_gitcode（旋转即原子写回；写�
 | `fffe881` | fix(auth): `SourceBoundRenewer` 身份门控（`last_source` 证据，renew 时判定） | `SourceIdentityGateTest`（3 项新增） |
 | `d97100d` | fix(auth): 401+有效会话 → `CONSENT_REQUIRED` | 新增 1 项 |
 | `5246175` | fix(tray): 自动刷新开关控制 `MonitorService.set_auto_refresh`，暂停时 tick 全跳过、手动命令不受影响 | `AutoRefreshSwitchTest`（6 项）+ 托盘传导 1 项 |
+| `9a3dc7d` | fix(auth): 刷新请求补 Origin/Referer（首次授权交换被 CloudWAF 418 拦截、凭据复核未动）；418 显式分类为 WAF 拦截而非凭据问题 | 请求形状断言 + 418 分类测试（新增） |
 
 未做重构：`SessionManager`/`MonitorService`/`Tray` 分层、只读业务 API 约束、脱敏通道均未触碰。未删除任何不利证据；失败路径测试（400004、写失败、身份拒绝）全部保留为断言。
 
@@ -257,6 +258,7 @@ opencsi tray --once --json        # 期望 state:OK
 ```
 
 - 若第 2 步返回 `400004 REFRESH_TOKEN_ERROR`：refresh_token 已死，转路线 B。存储凭据经完整性复核未动。
+- 执行记录（2026-10-24）：首次 `--execute` 被 CloudWAF 以 HTTP 418 拦截（凭据未被评估，复核未动）——缺 Origin/Referer 触发 WAF 启发式，已在 `9a3dc7d` 修复；带上这两头后重跑即是本次验收。
 - 若成功：本报告 L2 即可改判（交换成功 + 落盘 + 新进程重读 = 验收条件全满足）。请把输出（已自动脱敏）贴回给审计者。
 
 ### 9.3 路线 B（refresh_token 已死，重新扫码一次）
