@@ -7,28 +7,21 @@ follow-ups.
 
 ## P1 — Close the live GitCode refresh-token lifecycle
 
-**Status:** ROOT CAUSE CLOSED (2026-10-24 audit) — live exchange still NOT
-EXECUTED, requires explicit user opt-in.
+**Status:** CLOSED (2026-10-24). Full chain live-verified with the user's
+stored credential:
 
-**Resolved:** the 400 was a credential-family mismatch. The QR login's tokens
-belong to GitCode's *account-token* system, renewed with
-`POST https://web-api.gitcode.com/uc/api/v1/user/token/refresh`
-(`Authorization: Bearer <access_token>`, urlencoded `refresh_token` body) — the
-exact request GitCode's own frontend makes (current production bundle). The old
-target, `POST https://gitcode.com/oauth/token?grant_type=refresh_token`, serves
-the OAuth-application token system and answers a QR refresh token with the same
-"refresh_token不存在或已过期" it gives a fabricated one. The production refresher
-now targets the account-token endpoint, refreshes demand-driven (on a refused
-OAuth leg, once, then retries), and classifies only 401/400004 as a dead
-credential. See `docs/auth-lifecycle-audit-20261024.md`.
+1. `tools/probe_gitcode_token_refresh.py --execute` exchanged once: HTTP 200, a
+   NEW access token (fingerprint 7b2d60c8 -> 657b5d01, both len=300), the
+   **refresh token was NOT rotated** (1fa842e0 returned unchanged), persisted
+   to DPAPI and verified by re-read. The response carries no `expires_in`,
+   matching the bundle. (First attempt was blocked by CloudWAF 418 for missing
+   Origin/Referer -- fixed in `9a3dc7d`.)
+2. The probe process exited; a **fresh process** (`opencsi tray --once --json`)
+   loaded the new credential from DPAPI, renewed the openCsiTool session
+   without any scan (new cookie ~3597s), fetched real business data, state OK;
+   `login --status` ok:true (user confirmed, redacted in the audit report).
 
-**Remaining:** one live `A1/R1 -> A2/R2` exchange, because it may rotate the
-refresh token. `tools/probe_gitcode_token_refresh.py --execute` performs exactly
-one, persists the replacement before reporting, and verifies the store on
-failure. Run it only when a real rotation is acceptable.
-
-**Acceptance:** the exchange succeeds, A2/R2 is written to DPAPI, the process
-exits, a fresh process renews openCsiTool successfully without another QR scan.
+Root cause and evidence: `docs/auth-lifecycle-audit-20261024.md` §2/§5.
 
 ## P1 — Resolve unknown GitCode access-token expiry
 
