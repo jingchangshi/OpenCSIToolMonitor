@@ -75,6 +75,15 @@ section{padding:10px;border:1px solid #ddd;border-radius:8px;margin-top:8px}
     section.innerHTML = '<h2>Usage</h2><div class="usage-pane">magpie native usage</div>';
     document.getElementById("pageHost").appendChild(section);
     window.__usageReady = true;
+    // The measured hostile behaviour of the real page: the usage render pass
+    // rewrites the container's innerHTML AFTER the extension's panel has
+    // mounted, wiping anything that lived inside it (and Magpie also watches
+    // this container, so a child node can trigger the very re-render that
+    // removes it). Reproduced here on a timer: the panel must survive this.
+    setTimeout(function () {
+      section.innerHTML = '<h2>Usage</h2><div class="usage-pane">magpie native usage (re-rendered)</div>';
+      window.__hostileRenderDone = true;
+    }, 1200);
   }, 50);
   document.querySelectorAll("nav button").forEach(function (button) {
     button.addEventListener("click", function () {
@@ -145,19 +154,25 @@ async function main() {
     await page.goto("http://129.153.118.58:3430/?view=usage", { waitUntil: "domcontentloaded" });
     await sleep(1500); // the mock creates #view-usage after 50ms; the injector watches for it
 
-    // ── the panel is inside #view-usage exactly once ──────────────────────
+    // ── the panel mounts as the usage container's SIBLING ─────────────────
+    // Inner children are inside Magpie's innerHTML blast radius (measured:
+    // the panel appeared, then vanished when the native usage content
+    // landed). A previous-sibling placement is outside it.
     const injected = await page.evaluate(() => {
       const usage = document.getElementById("view-usage");
-      const host = usage && usage.querySelector("#opencsi-usage-panel-host");
+      const host = document.getElementById("opencsi-usage-panel-host");
       const frame = host && host.querySelector("iframe");
       return {
         usageExists: !!usage,
         hostPresent: !!host,
+        isPreviousSibling: !!(host && usage && host.nextElementSibling === usage),
+        sameParent: !!(host && usage && host.parentElement === usage.parentElement),
         frameSrc: frame ? frame.src : null,
         hostCount: document.querySelectorAll("#opencsi-usage-panel-host").length,
       };
     });
-    check("Magpie 注入：#view-usage 内出现面板宿主", injected.usageExists && injected.hostPresent,
+    check("Magpie 注入：面板为 Usage 容器的前置兄弟节点",
+      injected.usageExists && injected.hostPresent && injected.isPreviousSibling && injected.sameParent,
       JSON.stringify(injected));
     check("单实例：全文档只有一个面板宿主", injected.hostCount === 1);
 
@@ -178,7 +193,27 @@ async function main() {
     );
     check("恢复入口存在（重新登录按钮）", /重新登录 OpenCSI/.test(panelText));
 
-    // ── SPA view switch: panel survives, does not duplicate ───────────────
+    // ── the hostile innerHTML re-render must not remove the panel ─────────
+    await page.waitForFunction("window.__hostileRenderDone === true", { timeout: 8000 });
+    await sleep(400); // give the guards a beat to (not) react
+    const survived = await page.evaluate(() => {
+      const usage = document.getElementById("view-usage");
+      const host = document.getElementById("opencsi-usage-panel-host");
+      const native = usage && usage.querySelector(".usage-pane");
+      return {
+        hostPresent: !!host,
+        stillSibling: !!(host && usage && host.nextElementSibling === usage),
+        nativeText: native ? native.textContent : "",
+        hostCount: document.querySelectorAll("#opencsi-usage-panel-host").length,
+      };
+    });
+    check("敌对 innerHTML 重渲染后面板仍存在（兄弟节点在半径之外）",
+      survived.hostPresent && survived.stillSibling && survived.hostCount === 1,
+      JSON.stringify(survived));
+    check("Magpie 原生 Usage 内容未被移除", /re-rendered/.test(survived.nativeText),
+      survived.nativeText);
+
+    // ── SPA view switch: panel follows the usage container's visibility ───
     await page.evaluate(() => {
       document.querySelector('nav button[data-view="agents"]').click();
     });
@@ -187,11 +222,37 @@ async function main() {
       document.querySelector('nav button[data-view="usage"]').click();
     });
     await sleep(500);
-    const afterSwitch = await page.evaluate(() => ({
-      count: document.querySelectorAll("#opencsi-usage-panel-host").length,
-      usageHidden: document.getElementById("view-usage").hidden,
-    }));
-    check("SPA 切换后不重复挂载", afterSwitch.count === 1, JSON.stringify(afterSwitch));
+    await page.evaluate(() => {
+      document.querySelector('nav button[data-view="agents"]').click();
+    });
+    await sleep(400);
+    const onAgents = await page.evaluate(() => {
+      const host = document.getElementById("opencsi-usage-panel-host");
+      const usage = document.getElementById("view-usage");
+      return {
+        count: document.querySelectorAll("#opencsi-usage-panel-host").length,
+        usageHidden: usage.hidden,
+        hostHidden: host.hidden,
+      };
+    });
+    check("切换到其他视图：面板随容器隐藏", onAgents.count === 1 &&
+      onAgents.usageHidden === true && onAgents.hostHidden === true,
+      JSON.stringify(onAgents));
+    await page.evaluate(() => {
+      document.querySelector('nav button[data-view="usage"]').click();
+    });
+    await sleep(400);
+    const afterSwitch = await page.evaluate(() => {
+      const host = document.getElementById("opencsi-usage-panel-host");
+      return {
+        count: document.querySelectorAll("#opencsi-usage-panel-host").length,
+        usageHidden: document.getElementById("view-usage").hidden,
+        hostHidden: host.hidden,
+      };
+    });
+    check("切回 Usage：面板恢复显示且不重复挂载", afterSwitch.count === 1 &&
+      afterSwitch.usageHidden === false && afterSwitch.hostHidden === false,
+      JSON.stringify(afterSwitch));
 
     // ── the stale-tab recovery: remove the panel, retry via the SW ────────
     // The production failure this guards: a Magpie tab open before the

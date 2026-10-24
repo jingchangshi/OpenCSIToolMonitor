@@ -8,13 +8,16 @@
 // nothing — no cookies, no API payloads, no employee ids — is written into
 // the host page or passed to it.
 //
-// Re-entry is a first-class path, not an afterthought. The script runs from
-// the manifest (fresh navigations) *and* from chrome.scripting retries
-// (tabs that were open before the extension loaded, pages whose container a
-// re-render replaced). So:
-//   * first run installs the observers and mounts;
-//   * every later run re-mounts if the panel went missing, then stops —
-//     never a second panel, never a second set of observers.
+// WHERE the panel lives, and why it must be a *sibling*:
+// The usage container is created dynamically by Magpie's kernel, and both the
+// kernel and the page's own render passes write the container's innerHTML —
+// measured on a real page as "the panel appears, then vanishes when the
+// native usage content lands". Magpie also observes the container itself, so
+// a child we add is a child its render can (and does) wipe. Mounting as the
+// container's previous sibling puts the panel outside every innerHTML blast
+// radius; visibility then follows the container's `hidden` attribute, which
+// is how Magpie switches views — so the panel shows on Usage and hides on
+// every other view without any coupling to Magpie's state.
 (function () {
   "use strict";
 
@@ -60,50 +63,43 @@
     return host;
   }
 
-  function isMounted(container) {
-    return !!container.querySelector(":scope > #" + PANEL_ID);
-  }
-
-  function mount(container, url) {
-    // A stale copy anywhere else in the document goes first: a re-rendered
-    // container must never end up with two panels.
-    for (const stale of document.querySelectorAll("#" + PANEL_ID)) {
-      if (stale.parentElement !== container) stale.remove();
-    }
-    if (!isMounted(container)) container.prepend(buildHost(url));
-  }
-
   function findUsageContainer() {
     return document.getElementById("view-usage");
   }
 
   /**
-   * Make sure the panel is mounted right now. Idempotent; the entry the
-   * executeScript retry calls into.
+   * Make sure the panel sits as the usage container's previous sibling and
+   * mirrors its visibility. Idempotent; also the re-entry path for
+   * chrome.scripting retries.
    */
   function ensureMounted() {
     const url = panelUrl();
     if (!url) return false;
     const container = findUsageContainer();
-    if (container && container.isConnected) {
-      mount(container, url);
-      return true;
+    if (!container || !container.isConnected) return false;
+
+    // A stale copy anywhere in the document goes first — never two panels.
+    let host = document.getElementById(PANEL_ID);
+    if (host && host.parentElement !== container.parentElement) {
+      host.remove();
+      host = null;
     }
-    return false;
+    if (!host) {
+      host = buildHost(url);
+      container.parentElement.insertBefore(host, container);
+    }
+    // Follow the view switch: Usage visible ⇔ its container is not hidden.
+    host.hidden = container.hidden;
+    return true;
   }
 
   function start() {
     if (window.__opencsiUsagePanelInstalled) {
-      // A retry (chrome.scripting re-run): re-mount if a re-render detached
-      // the panel, then leave the existing observers alone.
-      window.__opencsiPanelEnsureMounted();
+      // A chrome.scripting retry: re-attach if a re-render moved things.
+      ensureMounted();
       return;
     }
     window.__opencsiUsagePanelInstalled = true;
-    window.__opencsiPanelEnsureMounted = ensureMounted;
-
-    const url = panelUrl();
-    if (!url) return;
 
     if (!ensureMounted()) {
       // The usage page is registered by plugin code that runs after this
@@ -117,27 +113,43 @@
       setTimeout(() => creator.disconnect(), 60000);
     }
 
-    // Re-attach if a re-render detaches the panel from the container, and
-    // keep the guard cheap: one observer on the usage container only.
-    const attachGuard = () => {
+    // Two persistent guards, both cheap:
+    //   * the container's own mutations — its innerHTML rewrites and its
+    //     `hidden` flips — re-sync position and visibility;
+    //   * if the container element itself is replaced (a re-registered page),
+    //     the attribute observation dies with it, so a document-wide observer
+    //     re-attaches to the new one.
+    const syncGuard = new MutationObserver(() => ensureMounted());
+    const attachSyncGuard = () => {
       const container = findUsageContainer();
       if (container && container.isConnected) {
-        guard.observe(container, { childList: true });
-        if (!isMounted(container)) mount(container, url);
+        syncGuard.observe(container, {
+          childList: true,
+          attributes: true,
+          attributeFilter: ["hidden"],
+        });
+        ensureMounted();
         return true;
       }
       return false;
     };
-    const guard = new MutationObserver(() => {
-      if (!isMounted(findUsageContainer() || document.body)) ensureMounted();
-    });
-    if (!attachGuard()) {
+    if (!attachSyncGuard()) {
       const late = new MutationObserver(() => {
-        if (attachGuard()) late.disconnect();
+        if (attachSyncGuard()) late.disconnect();
       });
       late.observe(document.documentElement, { childList: true, subtree: true });
       setTimeout(() => late.disconnect(), 60000);
     }
+
+    const reattachGuard = new MutationObserver(() => {
+      const container = findUsageContainer();
+      if (!container || !container.isConnected) return;
+      const host = document.getElementById(PANEL_ID);
+      if (!host || host.parentElement !== container.parentElement) {
+        ensureMounted();
+      }
+    });
+    reattachGuard.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   start();
