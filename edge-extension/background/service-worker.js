@@ -37,6 +37,90 @@ const auth = new BG.auth.AuthManager({
 
 let inflight = null; // single-flight refresh across concurrent page asks
 
+// ── injection into already-open tabs ───────────────────────────────────────
+// Manifest-declared content scripts only reach pages navigated AFTER the
+// extension was (re)loaded. A Magpie tab that was open during installation
+// never gets one, its panel never appears, and nothing ever wakes the worker
+// — which reads in edge://extensions as "service worker (inactive)". So the
+// install/startup hooks push the same files into every matching open tab.
+const INJECT_FILES = [
+  "core/models.js",
+  "core/aggregation.js",
+  "core/date.js",
+  "core/state.js",
+  "core/formatting.js",
+  "content/magpie-inject.js",
+];
+const MAGPIE_ORIGIN = { protocol: "http:", hostname: "129.153.118.58", port: "3430" };
+
+function isMagpieUrl(raw) {
+  try {
+    const url = new URL(raw);
+    return (
+      url.protocol === MAGPIE_ORIGIN.protocol &&
+      url.hostname === MAGPIE_ORIGIN.hostname &&
+      url.port === MAGPIE_ORIGIN.port
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function injectIntoTab(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: INJECT_FILES });
+    // The verdict the popup shows must be more than "the call did not throw":
+    // probe whether the usage container and the panel host are actually there,
+    // because a Magpie build without the usage plugin produces a successful
+    // injection and no panel.
+    let containerFound = null;
+    let hostMounted = null;
+    try {
+      const [probe] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => ({
+          container: !!document.getElementById("view-usage"),
+          host: !!document.getElementById("opencsi-usage-panel-host"),
+        }),
+      });
+      if (probe && probe.result) {
+        containerFound = probe.result.container;
+        hostMounted = probe.result.host;
+      }
+    } catch {
+      // The page may forbid script probing; the injection itself succeeded.
+    }
+    return { ok: true, containerFound, hostMounted };
+  } catch (error) {
+    return { ok: false, reason: String((error && error.message) || error) };
+  }
+}
+
+async function injectIntoOpenMagpieTabs() {
+  const tabs = await chrome.tabs.query({ url: "http://129.153.118.58/*" });
+  const results = [];
+  for (const tab of tabs) {
+    if (tab.id === undefined) continue;
+    const outcome = await injectIntoTab(tab.id);
+    results.push({ tabId: tab.id, url: tab.url, ...outcome });
+  }
+  return results;
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  injectIntoOpenMagpieTabs().then((results) => {
+    if (results.length) {
+      console.info("[opencsi] injected into already-open Magpie tabs:", JSON.stringify(results));
+    }
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  // Session-restored tabs reload and inject through the manifest path; this
+  // is a belt-and-braces pass for tabs the browser restores without a reload.
+  injectIntoOpenMagpieTabs().catch(() => {});
+});
+
 // ── snapshot storage (survives service-worker restarts) ────────────────────
 async function readSnapshot() {
   try {
@@ -151,6 +235,11 @@ function getSnapshot({ force = false } = {}) {
   return inflight;
 }
 
+// A narrow handle for extension-page UIs and the E2E harness: injection
+// entries only, no data. The popup drives these through retryInject messages;
+// the harness drives them directly.
+self.__opencsiSw = { injectIntoTab, injectIntoOpenMagpieTabs, isMagpieUrl };
+
 // ── messages ───────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
@@ -174,6 +263,33 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       case "authInfo":
         sendResponse(auth.describe());
         break;
+      case "retryInject": {
+        // The popup's "retry on this tab". The verdict names the exact reason
+        // when the tab is not a Magpie Usage page — a silent no would leave
+        // the user guessing.
+        (async () => {
+          const [tab] = await chrome.tabs.query({
+            active: true,
+            lastFocusedWindow: true,
+          });
+          if (!tab || tab.id === undefined) {
+            sendResponse({ ok: false, reason: "没有可操作的活动标签页" });
+            return;
+          }
+          if (!tab.url || !isMagpieUrl(tab.url)) {
+            sendResponse({
+              ok: false,
+              reason: `当前标签页 (${tab.url ? new URL(tab.url).host + (new URL(tab.url).port ? ":" + new URL(tab.url).port : "") : "未知"}) 不是匹配的 Magpie 页面 http://129.153.118.58:3430`,
+            });
+            return;
+          }
+          const outcome = await injectIntoTab(tab.id);
+          sendResponse({ ...outcome, url: tab.url });
+        })().catch((error) => {
+          sendResponse({ ok: false, reason: String((error && error.message) || error) });
+        });
+        break;
+      }
       case "renewNow":
         auth.onSessionExpired("手动触发恢复");
         sendResponse({ outcome: await auth.maybeRenew() });

@@ -13,6 +13,18 @@ OpenCSI 会话 Cookie。**不向 VPS 上报任何数据，不改动 Magpie 本�
 4. 打开 Magpie Usage 页：<http://129.153.118.58:3430/?view=usage>，
    页面顶部出现「公司 OpenCSI 用量」面板。
 
+**如果 Magpie 页面是在加载扩展之前就打开的**，旧标签页不会自动获得面板
+（清单式 content script 只对之后的导航生效）。两种补救，任选其一：
+
+- 刷新那个 Magpie 标签页；或
+- 点工具栏里的扩展图标 → 「在此标签页重试注入」——按钮会回报精确结果
+  （注入成功 / 当前页不匹配 / 找不到 `#view-usage` 容器），不再是静默失败。
+
+安装加载扩展时若已有打开的 Magpie 标签页，扩展会在 `onInstalled` 里对
+它们自动补注入，通常无需手动操作。扩展管理页显示「服务工作进程（非活动）」
+是 MV3 的正常待机态：事件驱动的 worker 空闲即挂起，打开一次 Magpie Usage
+页（或点扩展图标）就会唤醒。
+
 ## 会话过期与恢复
 
 OpenCSI 的会话 Cookie 约 1 小时过期。过期后：
@@ -53,7 +65,7 @@ background/
   auth-manager.js        认证状态机 + 后台标签页静默 SSO 恢复（单飞/冷却/一次一集）
 core/                    纯逻辑：models / aggregation / date / state / formatting
 content/magpie-inject.js  runtime origin 校验 + #view-usage 发现 + 单实例挂载
-panel/                   用量面板 iframe（index/panel.js/panel.css）+ 诊断页
+panel/                   用量面板 iframe（index/panel.js/panel.css）+ 诊断页 + 工具栏弹窗
 tests/                   Node 内建测试（node --test tests/），含 Python 黄金对照
 e2e/browser.e2e.js       真实浏览器端到端（Chromium for Testing + mock Magpie DOM）
 ```

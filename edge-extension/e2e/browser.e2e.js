@@ -193,6 +193,53 @@ async function main() {
     }));
     check("SPA 切换后不重复挂载", afterSwitch.count === 1, JSON.stringify(afterSwitch));
 
+    // ── the stale-tab recovery: remove the panel, retry via the SW ────────
+    // The production failure this guards: a Magpie tab open before the
+    // extension loaded never gets a manifest content script. The SW's
+    // onInstalled/executeScript path is what rescues it, so it is driven here
+    // through the same entry the popup uses.
+    const swHandle2 = browser.targets().find((t) => t.type() === "service_worker" &&
+      t.url().includes("service-worker.js"));
+    const sw2 = await swHandle2.worker();
+    await page.evaluate(() => {
+      document.getElementById("opencsi-usage-panel-host").remove();
+    });
+    await sleep(300);
+    // The childList guard may re-mount within milliseconds — by design. The
+    // removal is not asserted; what matters is that the executeScript retry
+    // is idempotent and its DOM probe reports the truth afterwards.
+    const pageTabId = await sw2.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ url: "http://129.153.118.58/*" });
+      return tabs.length ? tabs[0].id : null;
+    });
+    const retry = await sw2.evaluate(async (tabId) => {
+      if (tabId === null) return { ok: false, reason: "no matching tab" };
+      return await self.__opencsiSw.injectIntoTab(tabId);
+    }, pageTabId);
+    check(
+      "executeScript 重试：面板重新挂载（含 #view-usage 探针）",
+      retry.ok === true && retry.hostMounted === true && retry.containerFound === true,
+      JSON.stringify(retry)
+    );
+
+    // ── the toolbar popup page renders its controls ───────────────────────
+    const popupPage = await browser.newPage();
+    await popupPage.goto(worker.url().replace("background/service-worker.js", "panel/action.html"), {
+      waitUntil: "domcontentloaded",
+    });
+    await sleep(400);
+    const popupOk = await popupPage.evaluate(() => ({
+      retry: !!document.getElementById("retry"),
+      diag: !!document.getElementById("diag"),
+      verdict: (document.getElementById("verdict") || {}).textContent || "",
+    }));
+    check(
+      "工具栏弹窗可用（重试/诊断/判定文案）",
+      popupOk.retry && popupOk.diag && popupOk.verdict.length > 0,
+      JSON.stringify(popupOk)
+    );
+    await popupPage.close();
+
     // ── screenshots ───────────────────────────────────────────────────────
     fs.writeFileSync(path.join(OUT_DIR, "magpie-mock-page.png"),
       await page.screenshot({ fullPage: false }));

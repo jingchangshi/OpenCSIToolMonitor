@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body {
+    font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    width: 300px; margin: 0; padding: 12px;
+    background: #f8fafc; color: #0f172a; font-size: 13px; line-height: 1.5;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0f172a; color: #e2e8f0; }
+    .muted { color: #94a3b8; }
+    .card { background: #1e293b; }
+  }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  .card { background: #eff6ff; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
+  .muted { color: #64748b; font-size: 12px; }
+  .row { margin: 2px 0; }
+  button {
+    display: block; width: 100%; margin: 6px 0; padding: 6px 10px;
+    border: 0; border-radius: 8px; cursor: pointer; font: inherit; font-size: 13px;
+    background: #1d4ed8; color: #fff; font-weight: 600;
+  }
+  button.secondary { background: #e2e8f0; color: #0f172a; font-weight: normal; }
+  @media (prefers-color-scheme: dark) {
+    button.secondary { background: #334155; color: #e2e8f0; }
+  }
+  #verdict { margin-top: 6px; font-size: 12px; }
+  .ok { color: #16a34a; }
+  .bad { color: #b91c1c; }
+</style>
+</head>
+<body>
+<h1>OpenCSI Usage for Magpie</h1>
+<div class="card">
+  <div class="row">当前标签页：<span class="muted" id="tabInfo">读取中…</span></div>
+  <div class="row">注入判定：<span id="verdict" class="muted">…</span></div>
+  <div class="row">认证状态：<span class="muted" id="authInfo">读取中…</span></div>
+</div>
+<button id="retry">在此标签页重试注入 / 刷新面板</button>
+<button id="diag" class="secondary">打开诊断报告（脱敏）</button>
+<button id="openMagpie" class="secondary">打开 Magpie Usage 页面</button>
+<p class="muted">
+  如果 Magpie 页面是在加载（或重新加载）本扩展<b>之前</b>打开的，请刷新该页面，
+  或直接点上面的「重试注入」。
+</p>
+<script src="action.js"></script>
+</body>
+</html>

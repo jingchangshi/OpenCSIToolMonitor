@@ -8,15 +8,13 @@
 // nothing — no cookies, no API payloads, no employee ids — is written into
 // the host page or passed to it.
 //
-// The Usage container does not exist in Magpie's HTML: upstream's kernel.js
-// creates it dynamically (main.id = "view-" + key) when the usage plugin
-// registers, and the running version on the VPS may differ from upstream.
-// So the mount strategy is defensive, in order:
-//   1. an existing #view-usage;
-//   2. a container created later, caught by a MutationObserver;
-// and a childList observer re-attaches the panel if a re-render ever
-// detaches it. A single panel per page, always: a dataset flag and an id
-// guard make double-mounting impossible.
+// Re-entry is a first-class path, not an afterthought. The script runs from
+// the manifest (fresh navigations) *and* from chrome.scripting retries
+// (tabs that were open before the extension loaded, pages whose container a
+// re-render replaced). So:
+//   * first run installs the observers and mounts;
+//   * every later run re-mounts if the panel went missing, then stops —
+//     never a second panel, never a second set of observers.
 (function () {
   "use strict";
 
@@ -34,12 +32,10 @@
   ) {
     return;
   }
-  if (window.__opencsiUsagePanelInstalled) return;
-  window.__opencsiUsagePanelInstalled = true;
 
-  const panelUrl = (root) => {
+  const panelUrl = () => {
     try {
-      return root.chrome.runtime.getURL("panel/index.html");
+      return chrome.runtime.getURL("panel/index.html");
     } catch {
       return null;
     }
@@ -60,7 +56,6 @@
     frame.setAttribute("aria-label", "公司 OpenCSI 用量");
     frame.style.cssText =
       "display:block;width:100%;height:300px;border:0;background:transparent";
-    frame.allow = "";
     host.appendChild(frame);
     return host;
   }
@@ -70,21 +65,25 @@
   }
 
   function mount(container, url) {
-    if (isMounted(container)) return true;
-    // Detach a stale copy anywhere else in the document first: a re-rendered
+    // A stale copy anywhere else in the document goes first: a re-rendered
     // container must never end up with two panels.
     for (const stale of document.querySelectorAll("#" + PANEL_ID)) {
       if (stale.parentElement !== container) stale.remove();
     }
-    container.prepend(buildHost(url));
-    return true;
+    if (!isMounted(container)) container.prepend(buildHost(url));
   }
 
   function findUsageContainer() {
     return document.getElementById("view-usage");
   }
 
-  function tryMount(url) {
+  /**
+   * Make sure the panel is mounted right now. Idempotent; the entry the
+   * executeScript retry calls into.
+   */
+  function ensureMounted() {
+    const url = panelUrl();
+    if (!url) return false;
     const container = findUsageContainer();
     if (container && container.isConnected) {
       mount(container, url);
@@ -94,39 +93,44 @@
   }
 
   function start() {
-    const url = panelUrl(window);
-    if (!url) return; // no runtime API (should not happen in a content script)
+    if (window.__opencsiUsagePanelInstalled) {
+      // A retry (chrome.scripting re-run): re-mount if a re-render detached
+      // the panel, then leave the existing observers alone.
+      window.__opencsiPanelEnsureMounted();
+      return;
+    }
+    window.__opencsiUsagePanelInstalled = true;
+    window.__opencsiPanelEnsureMounted = ensureMounted;
 
-    if (!tryMount(url)) {
+    const url = panelUrl();
+    if (!url) return;
+
+    if (!ensureMounted()) {
       // The usage page is registered by plugin code that runs after this
       // content script. Watch for the container's creation.
-      const observer = new MutationObserver(() => {
-        if (tryMount(url)) observer.disconnect();
+      const creator = new MutationObserver(() => {
+        if (ensureMounted()) creator.disconnect();
       });
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-      // The observer must not outlive its usefulness forever if the page is
-      // something unexpected (an older Magpie without a usage plugin): give
-      // up after a minute rather than scanning every DOM change all day.
-      setTimeout(() => observer.disconnect(), 60000);
+      creator.observe(document.documentElement, { childList: true, subtree: true });
+      // Give up after a minute rather than scanning every DOM change all day
+      // on a page that turns out not to be a usage-capable Magpie.
+      setTimeout(() => creator.disconnect(), 60000);
     }
 
     // Re-attach if a re-render detaches the panel from the container, and
     // keep the guard cheap: one observer on the usage container only.
-    const guard = new MutationObserver(() => {
-      const container = findUsageContainer();
-      if (container && container.isConnected && !isMounted(container)) {
-        mount(container, url);
-      }
-    });
     const attachGuard = () => {
       const container = findUsageContainer();
-      if (container) {
+      if (container && container.isConnected) {
         guard.observe(container, { childList: true });
         if (!isMounted(container)) mount(container, url);
         return true;
       }
       return false;
     };
+    const guard = new MutationObserver(() => {
+      if (!isMounted(findUsageContainer() || document.body)) ensureMounted();
+    });
     if (!attachGuard()) {
       const late = new MutationObserver(() => {
         if (attachGuard()) late.disconnect();
@@ -136,9 +140,5 @@
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start, { once: true });
-  } else {
-    start();
-  }
+  start();
 })();
