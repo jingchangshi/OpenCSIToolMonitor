@@ -108,6 +108,7 @@
       note = "部分模型无法按 Token 估价，费用不完整";
     }
 
+    const fetchedAt = nowMs || Date.now();
     return {
       state,
       today: {
@@ -119,8 +120,10 @@
         note,
       },
       cumulative,
-      fetchedAt: nowMs || Date.now(),
-      fetchedAtText: "--:--", // rendered from fetchedAt in the panel's zone
+      fetchedAt,
+      // Formatted here, once, in the company zone: the panel never guesses a
+      // time and never renders the placeholder when a real query happened.
+      fetchedAtText: dateUtil.shanghaiClock(new Date(fetchedAt)),
       dataFreshTime: models.dataFreshTime(data),
       statisticDate: today,
       lastError: null,
@@ -137,6 +140,9 @@
     base.state = state;
     base.lastError = reason || null;
     base.recovery = recovery || null;
+    // A failed query keeps the last success's time — both the instant and its
+    // rendered text — because that is exactly what the numbers on screen are
+    // from. Only a snapshot with no success at all shows the placeholder.
     base.fetchedAt = previous ? base.fetchedAt : null;
     if (previous && previous.today && previous.state === STATE.OK) {
       base.today = { ...previous.today, stale: true };

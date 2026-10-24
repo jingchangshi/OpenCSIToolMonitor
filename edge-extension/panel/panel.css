@@ -1,34 +1,32 @@
-/* panel.css — the usage panel's own look, isolated in its iframe.
-   The theme follows prefers-color-scheme only: nothing here reads Magpie's
-   internal globals, so a Magpie theme change cannot break it, and a dark
-   Magpie around a light panel (or the reverse) stays legible because the
-   iframe draws its own card background. */
+/* panel.css — the compact summary card, styled to sit beside Magpie's native
+   usage cards: neutral background, ~10px radius, 1px light border, compact
+   padding, one accent colour. Single layer — the iframe body IS the card, so
+   there is no "outer card + inner blue card" stack. Theme follows
+   prefers-color-scheme only; nothing reads Magpie's internals. */
 :root {
-  --bg: #f8fafc;
-  --card: #eff6ff;
-  --card-line: #dbeafe;
-  --text: #0f172a;
-  --muted: #64748b;
-  --accent: #1d4ed8;
-  --ok: #16a34a;
-  --busy: #2563eb;
-  --warn: #b45309;
-  --error: #b91c1c;
-  --chip: #f1f5f9;
+  --bg: #ffffff;
+  --chip: #f4f5f7;
+  --line: #e3e5e8;
+  --text: #1f2328;
+  --muted: #6e7781;
+  --accent: #0969da;
+  --ok: #1a7f37;
+  --busy: #0969da;
+  --warn: #9a6700;
+  --error: #cf222e;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0f172a;
-    --card: #172554;
-    --card-line: #1e3a8a;
-    --text: #e2e8f0;
-    --muted: #94a3b8;
-    --accent: #60a5fa;
-    --ok: #4ade80;
-    --busy: #60a5fa;
-    --warn: #fbbf24;
-    --error: #f87171;
-    --chip: #1e293b;
+    --bg: #161b22;
+    --chip: #21262d;
+    --line: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --busy: #58a6ff;
+    --warn: #d29922;
+    --error: #f85149;
   }
 }
 * { box-sizing: border-box; }
@@ -39,61 +37,75 @@ body {
   color: var(--text);
   font-size: 13px;
   line-height: 1.45;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden; /* the radius clips; scroll lives in the model list */
 }
-.panel { padding: 10px 14px 8px; display: flex; flex-direction: column; gap: 8px; }
+.panel { padding: 10px 14px 8px; display: flex; flex-direction: column; gap: 6px; }
 .hidden { display: none !important; }
 .spacer { flex: 1; }
-.muted { color: var(--muted); font-size: 12px; }
+.muted { color: var(--muted); font-size: 11.5px; }
 
-.head { display: flex; align-items: center; gap: 8px; }
-.title { font-weight: 600; }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.head { display: flex; align-items: center; gap: 7px; }
+.title { font-weight: 600; font-size: 13.5px; }
+.badge {
+  font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 0 7px;
+  line-height: 16px;
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .state { font-size: 12px; font-weight: 600; }
+.subtle {
+  background: none; border: 0; padding: 1px 4px; cursor: pointer;
+  color: var(--muted); font: inherit; font-size: 11.5px; border-radius: 5px;
+}
+.subtle:hover { color: var(--text); background: var(--chip); }
+
+.reason {
+  background: var(--chip); border-radius: 8px; padding: 5px 10px;
+  font-size: 12px; color: var(--muted);
+}
+.reason.error { color: var(--error); }
+.reason.warn { color: var(--warn); }
+
+.numbers { display: flex; align-items: flex-end; gap: 16px; padding: 0 2px; }
+.metric { display: flex; flex-direction: column; gap: 0; min-width: 0; }
+.metric.right { margin-left: auto; text-align: right; }
+.label { font-size: 11.5px; color: var(--muted); }
+.big {
+  font-size: 24px; font-weight: 700; line-height: 1.25;
+  font-variant-numeric: tabular-nums; color: var(--accent);
+  white-space: nowrap;
+}
+.metric.right .big { color: var(--text); }
+
+.sub { font-size: 12.5px; color: var(--text); padding: 0 2px; }
+.sub.detail { color: var(--muted); font-size: 11.5px; margin-top: -4px; }
+
+.model-rows { display: flex; flex-direction: column; gap: 1px; }
+.model-rows.expanded { overflow-y: auto; max-height: 264px; }
+.model-row {
+  display: flex; align-items: baseline; gap: 8px; padding: 2px 6px;
+  border-radius: 6px; font-size: 12.5px;
+}
+.model-row:nth-child(odd) { background: var(--chip); }
+.model-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-row .tok { font-variant-numeric: tabular-nums; color: var(--muted); }
+.model-row .cst {
+  font-variant-numeric: tabular-nums; width: 84px; text-align: right;
+}
+.model-row.flat .name::after {
+  content: "包月"; margin-left: 6px; font-size: 10px; color: var(--muted);
+  border: 1px solid var(--muted); border-radius: 4px; padding: 0 3px;
+}
+
+.foot { display: flex; align-items: center; gap: 4px; }
 .link {
   background: none; border: 0; color: var(--accent); cursor: pointer;
-  font: inherit; font-size: 12px; padding: 2px 4px; border-radius: 6px;
+  font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px;
 }
 .link:hover { background: var(--chip); }
 .link.action {
   color: #fff; background: var(--accent); font-weight: 600; padding: 3px 10px;
 }
 .link.action:hover { filter: brightness(1.08); background: var(--accent); }
-.like-text { color: var(--muted); }
-
-.reason {
-  background: var(--chip); border-radius: 8px; padding: 6px 10px;
-  font-size: 12px; color: var(--muted);
-}
-.reason.error { color: var(--error); }
-.reason.warn { color: var(--warn); }
-
-.today {
-  background: var(--card); border: 1px solid var(--card-line);
-  border-radius: 10px; padding: 8px 12px;
-}
-.today-caption { display: flex; align-items: baseline; gap: 8px; font-weight: 600; font-size: 12px; color: var(--accent); }
-.numbers { display: flex; align-items: baseline; gap: 24px; margin-top: 2px; }
-.metric { display: flex; align-items: baseline; gap: 6px; flex: 1; justify-content: flex-end; }
-.metric:first-child { justify-content: flex-start; padding-left: 8px; }
-.big {
-  font-size: 24px; font-weight: 700; color: var(--accent);
-  font-variant-numeric: tabular-nums;
-}
-.metric:last-child .big { color: var(--text); }
-.unit { font-size: 11px; color: var(--muted); }
-
-.models-head { display: flex; align-items: center; gap: 8px; }
-.section-title { font-weight: 600; font-size: 12px; }
-.model-rows { display: flex; flex-direction: column; gap: 1px; }
-.model-rows.expanded { max-height: 180px; overflow-y: auto; }
-.model-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 4px; border-radius: 6px; }
-.model-row:nth-child(odd) { background: var(--chip); }
-.model-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-row .tok { font-variant-numeric: tabular-nums; color: var(--muted); }
-.model-row .cst { font-variant-numeric: tabular-nums; width: 84px; text-align: right; }
-.model-row.flat .name::after {
-  content: "包月"; margin-left: 6px; font-size: 10px; color: var(--muted);
-  border: 1px solid var(--muted); border-radius: 4px; padding: 0 3px;
-}
-
-.foot { display: flex; align-items: center; gap: 6px; font-size: 12px; }

@@ -272,11 +272,16 @@ class PopupController:
         startup_manager: Any | None = None,
         poll_ms: int = POLL_MS,
         clock: Callable[[], float] = time.monotonic,
+        today_provider: Callable[[], str] | None = None,
     ) -> None:
         self._service = service
         self._startup_manager = startup_manager
         self._poll_ms = poll_ms
         self._clock = clock
+        # The statistic day the panel labels its data with. Injectable so a
+        # test can pin it: the real clock rolled over midnight once already and
+        # re-classified every fixed-date fixture as 跨日.
+        self._today_provider = today_provider or self._real_today
         self._commands: "queue.Queue[tuple[str, Any]]" = queue.Queue()
         self._root: Any = None
         self._panel: Any = None
@@ -860,9 +865,13 @@ class PopupController:
         self._widgets["startup_var"].set(actual)
 
     # ── rendering ──────────────────────────────────────────────────────────
-    def _apply_snapshot(self, snapshot: MonitorSnapshot) -> None:
-        from datetime import date as _date
+    @staticmethod
+    def _real_today() -> str:
+        from datetime import date
 
+        return date.today().isoformat()
+
+    def _apply_snapshot(self, snapshot: MonitorSnapshot) -> None:
         from . import popup_presenter as pp
 
         startup: bool | None = None
@@ -877,7 +886,7 @@ class PopupController:
         auto = bool(getattr(self._service, "auto_refresh_enabled", True))
         self._view = pp.build_panel_view(
             snapshot,
-            today=_date.today().isoformat(),
+            today=self._today_provider(),
             auto_refresh=auto,
             startup=startup,
         )

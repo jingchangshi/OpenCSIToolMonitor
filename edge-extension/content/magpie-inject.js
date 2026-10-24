@@ -21,6 +21,9 @@
 (function () {
   "use strict";
 
+  const CoreResize = window.OpenCSICore && window.OpenCSICore.resize
+    ? window.OpenCSICore.resize
+    : null;
   const PANEL_ID = "opencsi-usage-panel-host";
   const EXPECTED = { protocol: "http:", hostname: "129.153.118.58", port: "3430" };
 
@@ -44,11 +47,32 @@
     }
   };
 
+  // The panel reports its content height through postMessage. The extension
+  // origin decides who may talk; core/resize.js decides what a valid request
+  // is. The listener survives frame recreation because it reads the current
+  // frame through panelFrame, never a captured stale reference.
+  let panelFrame = null;
+  const EXTENSION_ORIGIN = new URL(chrome.runtime.getURL("")).origin;
+  const MAGPIE_TARGET_ORIGIN = "http://129.153.118.58:3430";
+  window.addEventListener("message", (event) => {
+    if (event.source !== (panelFrame && panelFrame.contentWindow)) return;
+    if (event.origin !== EXTENSION_ORIGIN) return;
+    if (!CoreResize.isValidResizeMessage(event.data)) return;
+    const height = CoreResize.clampPanelHeight(event.data.height);
+    if (height === null || !panelFrame) return;
+    // Only real changes touch the DOM, so a ResizeObserver loop is impossible.
+    if (parseInt(panelFrame.style.height, 10) === height) return;
+    panelFrame.style.height = `${height}px`;
+  });
+
   function buildHost(url) {
     const host = document.createElement("div");
     host.id = PANEL_ID;
+    // Width mirrors the usage container's own measured width (see
+    // syncWidth): the panel lines up with whatever the native page uses,
+    // without hard-coding a pixel constant.
     host.style.cssText = [
-      "margin:0 0 10px",
+      "margin:0 auto 10px",
       "border-radius:10px",
       "overflow:hidden",
       "border:1px solid rgba(127,127,127,.28)",
@@ -57,10 +81,24 @@
     frame.src = url;
     frame.title = "公司 OpenCSI 用量";
     frame.setAttribute("aria-label", "公司 OpenCSI 用量");
-    frame.style.cssText =
-      "display:block;width:100%;height:300px;border:0;background:transparent";
+    // No fixed height: the panel reports its content height and this style
+    // is updated from the verified resize message. The initial value holds
+    // the first paint only.
+    frame.style.cssText = "display:block;width:100%;height:120px;border:0";
     host.appendChild(frame);
+    panelFrame = frame;
     return host;
+  }
+
+  /**
+   * Copy the usage container's own rendered width onto the panel host, so
+   * the card aligns with the native content whatever padding or max-width
+   * Magpie applies. Skipped while the container is hidden (width 0), so
+   * switching views cannot collapse the panel.
+   */
+  function syncWidth(container, host) {
+    const width = container.getBoundingClientRect().width;
+    if (width > 0) host.style.maxWidth = `${Math.round(width)}px`;
   }
 
   function findUsageContainer() {
@@ -90,6 +128,7 @@
     }
     // Follow the view switch: Usage visible ⇔ its container is not hidden.
     host.hidden = container.hidden;
+    syncWidth(container, host);
     return true;
   }
 

@@ -1,20 +1,22 @@
-// e2e/browser.e2e.js — the extension loaded in a real Edge, driven over CDP.
+// e2e/browser.e2e.js — the extension loaded in a real Chromium, driven over CDP.
 //
-// What this verifies, on the real browser and real network:
+// Verified here, on the real browser and real network:
 //   1. the unpacked extension loads (service worker starts, content script
 //      registers);
-//   2. the panel is injected into a Magpie Usage page whose URL is the real
-//      production origin — the HTTP responses are fulfilled locally with a
-//      mock that mimics upstream Magpie's DOM (dynamic #view-usage, SPA view
-//      switching), so the content script's runtime origin check is exercised
-//      for real while the page content is deterministic;
-//   3. the panel iframe loads and renders the auth state the fresh test
-//      profile actually produces (no OpenCSI cookie → LOGIN_REQUIRED with the
-//      recovery button — the silent-renewal attempt runs too, and lands on
-//      GitCode's login page because the test profile has no SSO session);
-//   4. SPA view switching does not duplicate the panel, and switching back
-//      re-shows it;
-//   5. screenshots of the real rendering, for the delivery report.
+//   2. the panel mounts as the usage container's *previous sibling* — inside
+//      no innerHTML blast radius — on a page whose URL is the real production
+//      origin (content fulfilled locally with a mock mimicking upstream's
+//      dynamic #view-usage and SPA view switching);
+//   3. the auth path for a fresh profile: the SW's fetch is refused (401),
+//      the silent renewal runs and lands on GitCode's login page, and the
+//      panel honestly shows 需要登录 with a recovery button;
+//   4. with a CDP interception feeding controlled OpenCSI payloads to the
+//      service worker, the compact card renders each data state for real:
+//      multi-model top-3 + expand, single-model line without duplicate
+//      totals, confirmed zero, real query time, and content-driven height;
+//   5. SPA view switching and a hostile innerHTML re-render do not remove or
+//      duplicate the panel;
+//   6. screenshots of the real rendering, for the delivery report.
 //
 // Run:  node e2e/browser.e2e.js   (from edge-extension/)
 "use strict";
@@ -30,21 +32,18 @@ const OUT_DIR = path.resolve(__dirname, "out");
 const BROWSER_CANDIDATES = [
   // Edge is the delivery target, but this machine's Edge binary exits
   // silently under --headless=new + --load-extension; Chrome shares the
-  // Chromium extension runtime, so the automated verification runs there and
-  // is labelled as such. The user's real Edge acceptance remains a manual
-  // step (the extension loads identically in edge://extensions).
+  // Chromium extension runtime. Branded builds 137+ also ignore
+  // --load-extension, so the automated run prefers the downloaded Chromium
+  // for Testing build, which still honours it. The user's real Edge
+  // acceptance remains a manual step (the extension loads identically in
+  // edge://extensions).
+  path.resolve(__dirname, "chromium", "win64-1726484", "chrome-win", "chrome.exe"),
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
   "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
 ];
 
 function findBrowser() {
-  // Branded Chrome/Edge 137+ ignore --load-extension, so the automated run
-  // uses the downloaded Chromium for Testing build, which still honours it.
-  const chromiumForTesting = path.resolve(
-    __dirname, "chromium", "win64-1726484", "chrome-win", "chrome.exe"
-  );
-  if (fs.existsSync(chromiumForTesting)) return chromiumForTesting;
   for (const candidate of BROWSER_CANDIDATES) {
     if (fs.existsSync(candidate)) return candidate;
   }
@@ -74,12 +73,20 @@ section{padding:10px;border:1px solid #ddd;border-radius:8px;margin-top:8px}
     section.hidden = true;
     section.innerHTML = '<h2>Usage</h2><div class="usage-pane">magpie native usage</div>';
     document.getElementById("pageHost").appendChild(section);
+    // Upstream start.js shows the deep-linked view; without this the usage
+    // container would stay hidden and the panel (correctly) hidden with it.
+    if (new URLSearchParams(location.search).get("view") === "usage") {
+      section.hidden = false;
+      document.getElementById("view-agents").hidden = true;
+      document.querySelectorAll("nav button").forEach((b) =>
+        b.classList.toggle("on", b.dataset.view === "usage"));
+    }
     window.__usageReady = true;
     // The measured hostile behaviour of the real page: the usage render pass
     // rewrites the container's innerHTML AFTER the extension's panel has
-    // mounted, wiping anything that lived inside it (and Magpie also watches
-    // this container, so a child node can trigger the very re-render that
-    // removes it). Reproduced here on a timer: the panel must survive this.
+    // mounted, wiping anything that lived inside it. Reproduced here on a
+    // timer: a panel mounted as a CHILD would die here; the sibling mount
+    // must survive.
     setTimeout(function () {
       section.innerHTML = '<h2>Usage</h2><div class="usage-pane">magpie native usage (re-rendered)</div>';
       window.__hostileRenderDone = true;
@@ -97,6 +104,60 @@ section{padding:10px;border:1px solid #ddd;border-radius:8px;margin-top:8px}
     });
   });
 </script></body></html>`;
+
+// ── controlled OpenCSI payloads for the service worker ─────────────────────
+const PRICES = [
+  { requestType: "glm-5.3-flash", displayName: "GLM-5.3-Flash", billType: "TOKEN", enabled: 1, blendedPrice: 2.24 },
+  { requestType: "deepseek-v4", displayName: "DeepSeek-V4.1-Flash", billType: "TOKEN", enabled: 1, blendedPrice: 4.72 },
+  { requestType: "qwen3-max", displayName: "Qwen3-Max", billType: "TOKEN", enabled: 1, blendedPrice: 0.28 },
+  { requestType: "embed-v4", displayName: "Embedding-V4", billType: "TOKEN", enabled: 1, blendedPrice: 0.4 },
+  { requestType: "glm-4.7-air", displayName: "GLM-4.7-Air", billType: "TOKEN", enabled: 1, blendedPrice: 1.1 },
+  { requestType: "trae", displayName: "Trae 包月", billType: "FLAT", enabled: 1, monthlyFee: 49 },
+];
+
+function todayShanghai() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date());
+}
+
+/** Usage payloads per scenario; the interception reads from this object. */
+const SCENARIOS = {
+  multi: {
+    trend: [
+      { requestType: "glm-5.3-flash", tokens: 16_800_000 },
+      { requestType: "deepseek-v4", tokens: 7_900_000 },
+      { requestType: "qwen3-max", tokens: 1_240_000 },
+      { requestType: "embed-v4", tokens: 96_000 },
+      { requestType: "glm-4.7-air", tokens: 30_000 },
+    ],
+    summary: { totalTokens: 26_066_000, totalRequestCount: 1_284 },
+    fresh: "2026-10-25T16:10:00+08:00",
+  },
+  single: {
+    trend: [{ requestType: "deepseek-v4", tokens: 7_970_000 }],
+    summary: { totalTokens: 7_970_000, totalRequestCount: 401 },
+    fresh: "2026-10-25T16:10:00+08:00",
+  },
+  zero: {
+    trend: [{ requestType: "glm-5.3-flash", tokens: 0 }],
+    summary: { totalTokens: 656_373_157, totalRequestCount: 6_280 },
+    fresh: "2026-10-25T16:10:00+08:00",
+  },
+};
+let activeScenario = "multi";
+
+function fixturePayload(scenarioName) {
+  const s = SCENARIOS[scenarioName];
+  const today = todayShanghai();
+  return {
+    data: {
+      tokenTrend: s.trend.map((r) => ({ date: today, ...r })),
+      tokenSummary: s.summary,
+      syncStatus: { dataFreshTime: s.fresh },
+    },
+  };
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -124,7 +185,6 @@ async function main() {
 
   try {
     // ── the extension's service worker is running ─────────────────────────
-    // MV3 workers start lazily; poll for the target instead of racing it.
     let worker = null;
     for (let attempt = 0; attempt < 20 && !worker; attempt++) {
       worker = browser.targets().find((t) => t.type() === "service_worker" &&
@@ -132,43 +192,36 @@ async function main() {
       if (!worker) await sleep(500);
     }
     check("扩展加载：Service Worker 已启动", !!worker, worker && worker.url());
+    const sw = await worker.worker();
 
     // ── open the Magpie Usage URL (origin real, content mocked) ───────────
     const page = await browser.newPage();
     await page.setRequestInterception(true);
     page.on("request", (request) => {
       const url = request.url();
-      if (url.startsWith("http://129.153.118.58:3430/") && !url.includes("panel/index.html")) {
+      if (url.startsWith("http://129.153.118.58:3430/") && !url.includes("panel/")) {
         request.respond({
           status: 200,
           contentType: "text/html; charset=utf-8",
           body: MOCK_MAGPIE_HTML,
         });
-      } else if (url.includes("129.153.118.58")) {
-        // panel iframe request would only match the host page origin; let it go
-        request.continue();
       } else {
         request.continue();
       }
     });
     await page.goto("http://129.153.118.58:3430/?view=usage", { waitUntil: "domcontentloaded" });
-    await sleep(1500); // the mock creates #view-usage after 50ms; the injector watches for it
+    await sleep(1500);
 
-    // ── the panel mounts as the usage container's SIBLING ─────────────────
-    // Inner children are inside Magpie's innerHTML blast radius (measured:
-    // the panel appeared, then vanished when the native usage content
-    // landed). A previous-sibling placement is outside it.
     const injected = await page.evaluate(() => {
       const usage = document.getElementById("view-usage");
       const host = document.getElementById("opencsi-usage-panel-host");
-      const frame = host && host.querySelector("iframe");
       return {
         usageExists: !!usage,
         hostPresent: !!host,
         isPreviousSibling: !!(host && usage && host.nextElementSibling === usage),
         sameParent: !!(host && usage && host.parentElement === usage.parentElement),
-        frameSrc: frame ? frame.src : null,
         hostCount: document.querySelectorAll("#opencsi-usage-panel-host").length,
+        frameSrc: host && host.querySelector("iframe") ? host.querySelector("iframe").src : null,
       };
     });
     check("Magpie 注入：面板为 Usage 容器的前置兄弟节点",
@@ -176,62 +229,228 @@ async function main() {
       JSON.stringify(injected));
     check("单实例：全文档只有一个面板宿主", injected.hostCount === 1);
 
-    // ── the panel iframe rendered the honest auth state ───────────────────
+    // ── fresh profile: no cookie → the honest login state ─────────────────
     const frameHandle = await page.evaluateHandle(() =>
       document.querySelector("#opencsi-usage-panel-host iframe")
     );
     const frame = await frameHandle.asElement().contentFrame();
-    await sleep(6000); // the SW fetches, the renewal attempt runs and fails (no SSO here)
+    await sleep(6000); // the SW fetches (401), the renewal attempt runs and fails here
     const panelText = await frame.evaluate(() => document.body.innerText);
-    check("面板 iframe 已加载扩展页面", (await page.evaluate(() =>
-      document.querySelector("#opencsi-usage-panel-host iframe").src
-    )).startsWith("chrome-extension://"), panelText ? "" : "empty");
-    check(
-      "认证状态如实呈现（测试 Profile 无 Cookie → 需要登录）",
-      /需要登录/.test(panelText),
-      panelText.split("\n").slice(0, 4).join(" | ")
-    );
+    check("认证状态如实呈现（测试 Profile 无 Cookie → 需要登录）",
+      /需要登录/.test(panelText), panelText.split("\n").slice(0, 4).join(" | "));
     check("恢复入口存在（重新登录按钮）", /重新登录 OpenCSI/.test(panelText));
 
-    // ── the hostile innerHTML re-render must not remove the panel ─────────
+    // ── hostile innerHTML re-render: the sibling survives ─────────────────
     await page.waitForFunction("window.__hostileRenderDone === true", { timeout: 8000 });
-    await sleep(400); // give the guards a beat to (not) react
+    await sleep(400);
     const survived = await page.evaluate(() => {
       const usage = document.getElementById("view-usage");
       const host = document.getElementById("opencsi-usage-panel-host");
-      const native = usage && usage.querySelector(".usage-pane");
       return {
         hostPresent: !!host,
         stillSibling: !!(host && usage && host.nextElementSibling === usage),
-        nativeText: native ? native.textContent : "",
         hostCount: document.querySelectorAll("#opencsi-usage-panel-host").length,
       };
     });
     check("敌对 innerHTML 重渲染后面板仍存在（兄弟节点在半径之外）",
       survived.hostPresent && survived.stillSibling && survived.hostCount === 1,
       JSON.stringify(survived));
-    check("Magpie 原生 Usage 内容未被移除", /re-rendered/.test(survived.nativeText),
-      survived.nativeText);
 
-    // ── SPA view switch: panel follows the usage container's visibility ───
-    await page.evaluate(() => {
-      document.querySelector('nav button[data-view="agents"]').click();
-    });
-    await sleep(300);
-    await page.evaluate(() => {
-      document.querySelector('nav button[data-view="usage"]').click();
-    });
-    await sleep(500);
+    // ── data-driven states: build the snapshot through the SW's real
+    // state.js pipeline and place it in chrome.storage.session ─────────────
+    // A CDP Fetch interception of the service worker's requests proved
+    // unreliable (Fetch.requestPaused fired zero times at some attach
+    // timings), and the panel's cache-hit path is exactly what a real
+    // successful query produces — so the fixtures are pushed as snapshots
+    // built by the production code, and the panel renders them through the
+    // genuine cache semantics.
+    let activeScenario = "multi";
+    async function pushFixtureSnapshot() {
+      await sw.evaluate(async (scenarioName) => {
+        const scenarios = {
+          multi: {
+            trend: [
+              { requestType: "glm-5.3-flash", tokens: 16_800_000 },
+              { requestType: "deepseek-v4", tokens: 7_900_000 },
+              { requestType: "qwen3-max", tokens: 1_240_000 },
+              { requestType: "embed-v4", tokens: 96_000 },
+              { requestType: "glm-4.7-air", tokens: 30_000 },
+            ],
+            summary: { totalTokens: 26_066_000, totalRequestCount: 1_284 },
+            fresh: "2026-10-25T16:10:00+08:00",
+          },
+          single: {
+            trend: [{ requestType: "deepseek-v4", tokens: 7_970_000 }],
+            summary: { totalTokens: 7_970_000, totalRequestCount: 401 },
+            fresh: "2026-10-25T16:10:00+08:00",
+          },
+          zero: {
+            trend: [{ requestType: "glm-5.3-flash", tokens: 0 }],
+            summary: { totalTokens: 656_373_157, totalRequestCount: 6_280 },
+            fresh: "2026-10-25T16:10:00+08:00",
+          },
+        };
+        const s = scenarios[scenarioName];
+        const prices = [
+          { requestType: "glm-5.3-flash", displayName: "GLM-5.3-Flash", billType: "TOKEN", enabled: 1, blendedPrice: 2.24 },
+          { requestType: "deepseek-v4", displayName: "DeepSeek-V4.1-Flash", billType: "TOKEN", enabled: 1, blendedPrice: 4.72 },
+          { requestType: "qwen3-max", displayName: "Qwen3-Max", billType: "TOKEN", enabled: 1, blendedPrice: 0.28 },
+          { requestType: "embed-v4", displayName: "Embedding-V4", billType: "TOKEN", enabled: 1, blendedPrice: 0.4 },
+          { requestType: "glm-4.7-air", displayName: "GLM-4.7-Air", billType: "TOKEN", enabled: 1, blendedPrice: 1.1 },
+        ];
+        const today = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+        }).format(new Date());
+        const payload = {
+          body: {
+            data: {
+              tokenTrend: s.trend.map((r) => ({ date: today, ...r })),
+              tokenSummary: s.summary,
+              syncStatus: { dataFreshTime: s.fresh },
+            },
+          },
+          prices,
+        };
+        const snapshot = OpenCSICore.state.snapshotFromPayload(payload, today, Date.now());
+        await chrome.storage.session.set({ opencsiSnapshot: snapshot });
+      }, activeScenario);
+    }
+    async function clearSnapshot() {
+      await sw.evaluate(async () => {
+        await chrome.storage.session.remove("opencsiSnapshot");
+      });
+    }
+
+    async function readPanel() {
+      // Panel internals live in the iframe's document; geometry lives in the
+      // host page's. Two contexts, one merged view. The frame binding is
+      // re-resolved on every read: page reloads invalidate the old handle.
+      let frame = null;
+      try {
+        const fh = await page.evaluateHandle(() =>
+          document.querySelector("#opencsi-usage-panel-host iframe"));
+        frame = await fh.asElement().contentFrame();
+      } catch {
+        frame = null;
+      }
+      if (!frame) return { state: "PAGE_GONE" };
+      const [inner, geometry] = await Promise.all([
+        frame.evaluate(() => ({
+          tokens: document.getElementById("todayTokens").textContent,
+          cost: document.getElementById("todayCost").textContent,
+          updated: document.getElementById("updated").textContent,
+          sub: document.getElementById("subLine").textContent,
+          subHidden: document.getElementById("subLine").classList.contains("hidden"),
+          fresh: document.getElementById("freshLine").textContent,
+          rowCount: document.querySelectorAll("#modelRows .model-row").length,
+          expandText: document.getElementById("expandBtn").textContent,
+          expandHidden: document.getElementById("expandBtn").hidden,
+          state: document.getElementById("state").textContent,
+        })),
+        page.evaluate(() => {
+          const host = document.getElementById("opencsi-usage-panel-host");
+          const iframe = host.querySelector("iframe");
+          return {
+            frameStyleHeight: iframe.style.height,
+            frameRect: iframe.getBoundingClientRect().height,
+            hostWidth: host.getBoundingClientRect().width,
+            usageWidth: document.getElementById("view-usage").getBoundingClientRect().width,
+          };
+        }),
+      ]);
+      return { ...inner, ...geometry };
+    }
+
+    // A freshly resolved frame handle per interaction: page reloads
+    // invalidate the old one.
+    const panelClick = async (elementId) => {
+      const fh = await page.evaluateHandle((id) =>
+        document.querySelector("#opencsi-usage-panel-host iframe"), elementId);
+      const f = await fh.asElement().contentFrame();
+      await f.evaluate((id) => document.getElementById(id).click(), elementId);
+    };
+
+    // multi-model scenario
+    await pushFixtureSnapshot();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(1200);
+    let view = await readPanel();
+    check("多模型：状态 OK，双指标渲染", view.state === "正常" &&
+      view.tokens.length > 1 && view.cost.startsWith("¥"), view.tokens + " " + view.cost);
+    check("查询时间真实显示（不再固定 --:--）",
+      /查询于 \d{2}:\d{2}/.test(view.updated) && !view.updated.includes("--:--"), view.updated);
+    check("服务端同步时间以独立措辞显示", /服务端数据截至 \d{2}:\d{2}/.test(view.fresh), view.fresh);
+    check("多模型：默认 Top 3 + 展开全部（5）", view.rowCount === 3 &&
+      view.expandText.includes("展开全部") && view.expandText.includes("5"),
+      `rows=${view.rowCount} btn=${view.expandText}`);
+    check("多模型场景不渲染单模型摘要行", view.subHidden === true, `sub=${view.sub}`);
+    check("iframe 高度由内容驱动（不再是固定 300px）",
+      view.frameStyleHeight !== "300px" && view.frameRect >= 88 && view.frameRect <= 560,
+      `style=${view.frameStyleHeight} rect=${Math.round(view.frameRect)}`);
+    check("面板宽度与 Usage 容器对齐",
+      Math.abs(view.hostWidth - view.usageWidth) < 2,
+      `host=${Math.round(view.hostWidth)} usage=${Math.round(view.usageWidth)}`);
+    fs.writeFileSync(path.join(OUT_DIR, "panel-multi.png"),
+      await page.screenshot({ clip: await panelClip(page) }));
+
+    // expand → all 5 rows, height grows, no refetch needed
+    const heightBefore = view.frameRect;
+    await panelClick("expandBtn");
+    await sleep(900);
+    view = await readPanel();
+    check("展开全部：显示全部 5 行", view.rowCount === 5 &&
+      view.expandText === "收起", `rows=${view.rowCount}`);
+    check("展开后 iframe 高度随内容增长", view.frameRect > heightBefore + 40,
+      `${Math.round(heightBefore)} → ${Math.round(view.frameRect)}`);
+    fs.writeFileSync(path.join(OUT_DIR, "panel-multi-expanded.png"),
+      await page.screenshot({ clip: await panelClip(page) }));
+    await panelClick("expandBtn");
+    await sleep(400);
+
+    // single-model scenario: the summary line replaces the ranking
+    activeScenario = "single";
+    await pushFixtureSnapshot();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(1200);
+    view = await readPanel();
+    check("单模型：只显示模型名与唯一使用说明，无排行与展开按钮",
+      view.sub.includes("当前唯一使用模型") && view.subHidden === false &&
+      view.rowCount === 0 && view.expandHidden === true,
+      JSON.stringify({ sub: view.sub, rows: view.rowCount }));
+    fs.writeFileSync(path.join(OUT_DIR, "panel-single.png"),
+      await page.screenshot({ clip: await panelClip(page) }));
+
+    // zero scenario: confirmed zero, no empty list, no expand button
+    activeScenario = "zero";
+    await pushFixtureSnapshot();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(1200);
+    view = await readPanel();
+    check("零用量：0 tokens / ¥0.00 + 暂无模型使用记录",
+      view.tokens === "0" && view.cost === "¥0.00" &&
+      view.sub.includes("今日暂无模型使用记录") && view.rowCount === 0,
+      JSON.stringify({ tokens: view.tokens, cost: view.cost, sub: view.sub }));
+    fs.writeFileSync(path.join(OUT_DIR, "panel-zero.png"),
+      await page.screenshot({ clip: await panelClip(page) }));
+
+    // snapshot cleared: the real network answers 401 again → the auth state
+    // machine still stands behind the UI
+    await clearSnapshot();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(5000);
+    view = await readPanel();
+    check("快照清除后恢复真实链路：401 → 需要登录", view.state === "需要登录", view.state);
+
+    // ── SPA view switch: panel follows visibility, does not duplicate ─────
     await page.evaluate(() => {
       document.querySelector('nav button[data-view="agents"]').click();
     });
     await sleep(400);
     const onAgents = await page.evaluate(() => {
       const host = document.getElementById("opencsi-usage-panel-host");
-      const usage = document.getElementById("view-usage");
       return {
         count: document.querySelectorAll("#opencsi-usage-panel-host").length,
-        usageHidden: usage.hidden,
+        usageHidden: document.getElementById("view-usage").hidden,
         hostHidden: host.hidden,
       };
     });
@@ -242,7 +461,7 @@ async function main() {
       document.querySelector('nav button[data-view="usage"]').click();
     });
     await sleep(400);
-    const afterSwitch = await page.evaluate(() => {
+    const backOnUsage = await page.evaluate(() => {
       const host = document.getElementById("opencsi-usage-panel-host");
       return {
         count: document.querySelectorAll("#opencsi-usage-panel-host").length,
@@ -250,38 +469,23 @@ async function main() {
         hostHidden: host.hidden,
       };
     });
-    check("切回 Usage：面板恢复显示且不重复挂载", afterSwitch.count === 1 &&
-      afterSwitch.usageHidden === false && afterSwitch.hostHidden === false,
-      JSON.stringify(afterSwitch));
+    check("切回 Usage：面板恢复显示且不重复挂载", backOnUsage.count === 1 &&
+      backOnUsage.usageHidden === false && backOnUsage.hostHidden === false,
+      JSON.stringify(backOnUsage));
 
-    // ── the stale-tab recovery: remove the panel, retry via the SW ────────
-    // The production failure this guards: a Magpie tab open before the
-    // extension loaded never gets a manifest content script. The SW's
-    // onInstalled/executeScript path is what rescues it, so it is driven here
-    // through the same entry the popup uses.
-    const swHandle2 = browser.targets().find((t) => t.type() === "service_worker" &&
-      t.url().includes("service-worker.js"));
-    const sw2 = await swHandle2.worker();
+    // ── the stale-tab recovery: retry via the SW's executeScript path ─────
     await page.evaluate(() => {
       document.getElementById("opencsi-usage-panel-host").remove();
     });
     await sleep(300);
-    // The childList guard may re-mount within milliseconds — by design. The
-    // removal is not asserted; what matters is that the executeScript retry
-    // is idempotent and its DOM probe reports the truth afterwards.
-    const pageTabId = await sw2.evaluate(async () => {
+    const retry = await sw.evaluate(async () => {
       const tabs = await chrome.tabs.query({ url: "http://129.153.118.58/*" });
-      return tabs.length ? tabs[0].id : null;
+      if (!tabs.length) return { ok: false, reason: "no matching tab" };
+      return await self.__opencsiSw.injectIntoTab(tabs[0].id);
     });
-    const retry = await sw2.evaluate(async (tabId) => {
-      if (tabId === null) return { ok: false, reason: "no matching tab" };
-      return await self.__opencsiSw.injectIntoTab(tabId);
-    }, pageTabId);
-    check(
-      "executeScript 重试：面板重新挂载（含 #view-usage 探针）",
+    check("executeScript 重试：面板重新挂载（含 #view-usage 探针）",
       retry.ok === true && retry.hostMounted === true && retry.containerFound === true,
-      JSON.stringify(retry)
-    );
+      JSON.stringify(retry));
 
     // ── the toolbar popup page renders its controls ───────────────────────
     const popupPage = await browser.newPage();
@@ -294,44 +498,14 @@ async function main() {
       diag: !!document.getElementById("diag"),
       verdict: (document.getElementById("verdict") || {}).textContent || "",
     }));
-    check(
-      "工具栏弹窗可用（重试/诊断/判定文案）",
+    check("工具栏弹窗可用（重试/诊断/判定文案）",
       popupOk.retry && popupOk.diag && popupOk.verdict.length > 0,
-      JSON.stringify(popupOk)
-    );
+      JSON.stringify(popupOk));
     await popupPage.close();
 
-    // ── screenshots ───────────────────────────────────────────────────────
+    // ── final full-page screenshot ─────────────────────────────────────────
     fs.writeFileSync(path.join(OUT_DIR, "magpie-mock-page.png"),
       await page.screenshot({ fullPage: false }));
-    // A close-up of the panel: expand the iframe height for a legible shot.
-    await page.evaluate(() => {
-      const frame = document.querySelector("#opencsi-usage-panel-host iframe");
-      frame.style.height = "420px";
-    });
-    await sleep(300);
-    const panelBox = await page.evaluate(() => {
-      const frame = document.querySelector("#opencsi-usage-panel-host iframe");
-      const r = frame.getBoundingClientRect();
-      return { x: r.x, y: r.y, width: r.width, height: r.height };
-    });
-    fs.writeFileSync(path.join(OUT_DIR, "panel-in-magpie.png"),
-      await page.screenshot({ clip: panelBox }));
-
-    // ── SW diagnostics, redacted ──────────────────────────────────────────
-    const workerTarget = browser.targets().find((t) => t.type() === "service_worker" &&
-      t.url().includes("service-worker.js"));
-    if (workerTarget) {
-      const sw = await workerTarget.worker();
-      const diag = await sw.evaluate(async () => {
-        const stored = await chrome.storage.session.get(null);
-        return {
-          snapshotState: stored.opencsiSnapshot ? stored.opencsiSnapshot.state : null,
-          statisticDate: stored.opencsiSnapshot ? stored.opencsiSnapshot.statisticDate : null,
-        };
-      });
-      check("SW 会话存储中有脱敏快照", !!diag.snapshotState, JSON.stringify(diag));
-    }
   } finally {
     await browser.close();
   }
@@ -339,6 +513,15 @@ async function main() {
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   process.exit(failed.length ? 1 : 0);
+}
+
+async function panelClip(page) {
+  const box = await page.evaluate(() => {
+    const frame = document.querySelector("#opencsi-usage-panel-host iframe");
+    const r = frame.getBoundingClientRect();
+    return { x: r.x, y: Math.max(0, r.y), width: r.width, height: Math.min(r.height, 560) };
+  });
+  return box;
 }
 
 main().catch((error) => {

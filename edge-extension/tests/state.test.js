@@ -23,6 +23,40 @@ function payload(trend, freshTime) {
   };
 }
 
+test("查询时间被真实格式化，不再是固定占位符", () => {
+  // 2026-10-25 08:10 UTC = 上海 16:10。
+  const snap = state.snapshotFromPayload(
+    payload([{ date: "2026-10-25", requestType: "glm", tokens: 1_000 }], "2026-10-25T16:10:00+08:00"),
+    "2026-10-25",
+    Date.UTC(2026, 9, 25, 8, 10, 0)
+  );
+  assert.strictEqual(snap.fetchedAtText, "16:10");
+});
+
+test("失败保留上次成功查询时间（瞬间与文本）", () => {
+  const good = state.snapshotFromPayload(
+    payload([{ date: TODAY, requestType: "glm", tokens: 1_000 }], "2026-10-24T08:00:00+08:00"),
+    TODAY,
+    Date.UTC(2026, 9, 24, 0, 5, 0)
+  );
+  assert.strictEqual(good.fetchedAtText, "08:05");
+  const failed = state.snapshotWithFailure(
+    good,
+    state.STATE.SERVER_ERROR,
+    "HTTP 502",
+    null,
+    Date.UTC(2026, 9, 24, 1, 0, 0)
+  );
+  assert.strictEqual(failed.fetchedAtText, "08:05", "失败不能丢掉上次成功时间");
+  assert.strictEqual(failed.fetchedAt, good.fetchedAt);
+});
+
+test("从未成功过时才是占位符", () => {
+  const empty = state.emptySnapshot();
+  assert.strictEqual(empty.fetchedAt, null);
+  assert.strictEqual(empty.fetchedAtText, "--:--");
+});
+
 test("正常数据：OK，今日 Token 与费用由 trend 聚合", () => {
   const snap = state.snapshotFromPayload(
     payload([{ date: TODAY, requestType: "glm", tokens: 2_000_000 }], "2026-10-24T07:00:00+08:00"),

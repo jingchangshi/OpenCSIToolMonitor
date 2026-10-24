@@ -473,7 +473,9 @@ class PanelInteractionTest(unittest.TestCase):
         from opencsi.tray.popup import PopupController
 
         self.service = _FakeService()
-        self.controller = PopupController(self.service, poll_ms=10)
+        self.controller = PopupController(
+            self.service, poll_ms=10, today_provider=lambda: TODAY
+        )
         self.controller._root = type(self).root
         self.controller._build_panel()
         self.controller._apply_snapshot(self.service.snapshot)
