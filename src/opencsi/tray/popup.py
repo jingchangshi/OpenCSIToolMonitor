@@ -323,6 +323,10 @@ class PopupController:
         self._subscription = self._service.subscribe(
             lambda snapshot: self.enqueue("snapshot", snapshot)
         )
+        # Seed with whatever the service already holds: if the monitor fetched
+        # between its start and this subscription, waiting for the next publish
+        # would leave the panel on its placeholder for up to a whole interval.
+        self._apply_snapshot(self._service.snapshot)
         self._root.after(self._poll_ms, self._drain)
         self._root.mainloop()
         self._teardown()

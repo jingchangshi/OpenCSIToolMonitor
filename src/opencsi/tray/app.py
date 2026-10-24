@@ -525,9 +525,14 @@ class TrayApp:
         self._unsubscribe_attention = self._service.subscribe_attention(
             self._notify_attention
         )
-        # At sign-in the panel stays hidden: the icon is the whole surface until
-        # the user asks for more. The monitor's first fetch still runs, so the
-        # numbers are there the moment the user clicks.
+        # Start the monitor BEFORE the loops. Its absence was a real defect: the
+        # panel subscribed to snapshots that were never published, sat at
+        # 启动中 forever, and 立即刷新 enqueued into a command queue with no
+        # consumer -- every click a no-op. With the worker running, the first
+        # fetch happens immediately, so the numbers are there the moment the
+        # user clicks (the panel itself stays hidden at sign-in; the icon is
+        # the whole surface until then).
+        self._service.start()
         icon.run_detached()
         try:
             controller.run()

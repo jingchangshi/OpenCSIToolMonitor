@@ -1569,6 +1569,68 @@ class TrayAppLogicTest(unittest.TestCase):
         app._dispatch("autorefresh")
         self.assertTrue(app._auto_refresh)
 
+    def _pystray_ready() -> bool:
+        try:
+            import pystray  # noqa: F401
+
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    @unittest.skipUnless(_pystray_ready(), "pystray not installed")
+    def test_the_panel_session_starts_the_monitor_and_it_fetches(self) -> None:
+        """The resident panel path must start the worker -- and prove it ran.
+
+        The first version of ``_run_with_panel`` subscribed to snapshots but
+        never called ``service.start()``: the panel sat at 启动中 forever, and
+        立即刷新 enqueued into a command queue with no consumer. This test
+        runs the real MonitorService against a fake client and asserts, after
+        the session ends, that the worker actually fetched.
+        """
+        from unittest import mock
+
+        from opencsi.monitor import MonitorConfig, MonitorService
+        from opencsi.tray.app import TrayApp
+        from opencsi.tray.single_instance import SingleInstance
+
+        class _Client:
+            calls = 0
+
+            def get_my_tools(self, *a, **k):
+                type(self).calls += 1
+                return _make_my_tools()
+
+        class _Session:
+            credentials = object()
+
+            def status(self):
+                from opencsi.auth.session import CredentialStatus
+
+                return CredentialStatus(True, "cdp", None, 1800.0)
+
+            def needs_renewal(self, margin=None):
+                return False
+
+            def renew(self, **k):
+                from opencsi.auth.session import RenewalResult, RenewalStatus
+
+                return RenewalResult(RenewalStatus.ALREADY_VALID)
+
+        service = MonitorService(
+            _Client(), session=_Session(), config=MonitorConfig()
+        )
+        app = TrayApp(service)
+        with mock.patch("pystray.Icon.run_detached", lambda self, setup=None: None),                 mock.patch.object(SingleInstance, "acquire", lambda self: True),                 mock.patch.object(SingleInstance, "release", lambda self: None),                 mock.patch(
+                    "opencsi.tray.popup.PopupController.run", lambda self: None
+                ):
+            code = app._run_with_panel()
+        self.assertEqual(code, 0)
+        self.assertGreaterEqual(_Client.calls, 1, "the monitor worker never fetched")
+        self.assertTrue(
+            service.snapshot.has_data,
+            "the first fetch never reached the snapshot the panel renders",
+        )
+
     def test_panel_action_routes_to_the_panel_request(self) -> None:
         """Left-click is the panel's toggle, and only a enqueue away."""
         app, _service = self._app()
