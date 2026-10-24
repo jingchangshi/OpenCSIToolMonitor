@@ -1,0 +1,291 @@
+{
+  "prices": [
+    {
+      "requestType": "glm-5.3-flash",
+      "displayName": "GLM-5.3-Flash",
+      "billType": "TOKEN",
+      "enabled": 1,
+      "blendedPrice": 2.24
+    },
+    {
+      "requestType": "deepseek-v4-flash",
+      "displayName": "DeepSeek-V4-Flash",
+      "billType": "TOKEN",
+      "enabled": 1,
+      "blendedPrice": 4.72
+    },
+    {
+      "requestType": "qwen3-max",
+      "displayName": "Qwen3-Max",
+      "billType": "TOKEN",
+      "enabled": 1,
+      "blendedPrice": 0.28
+    },
+    {
+      "requestType": "trae-subscription",
+      "displayName": "Trae 包月",
+      "billType": "FLAT",
+      "enabled": 1,
+      "monthlyFee": 49.0
+    },
+    {
+      "requestType": "mystery-metered",
+      "displayName": "Mystery",
+      "billType": "METER",
+      "enabled": 1
+    },
+    {
+      "requestType": "unpriced-token",
+      "displayName": "NoPrice",
+      "billType": "TOKEN",
+      "enabled": 1
+    }
+  ],
+  "cases": {
+    "normal_day": {
+      "trend": [
+        {
+          "date": "2026-10-24",
+          "requestType": "glm-5.3-flash",
+          "tokens": 41000000
+        },
+        {
+          "date": "2026-10-24",
+          "requestType": "deepseek-v4-flash",
+          "tokens": 11852000
+        },
+        {
+          "date": "2026-10-24",
+          "requestType": "qwen3-max",
+          "tokens": 2180000
+        },
+        {
+          "date": "2026-10-24",
+          "requestType": "trae-subscription",
+          "tokens": 340000
+        },
+        {
+          "date": "2026-10-24",
+          "requestType": "mystery-metered",
+          "tokens": 12000
+        },
+        {
+          "date": "2026-10-23",
+          "requestType": "glm-5.3-flash",
+          "tokens": 999999999
+        }
+      ],
+      "today": "2026-10-24",
+      "result": {
+        "date": "2026-10-24",
+        "totalTokens": 55384000,
+        "totalCost": null,
+        "currency": "CNY",
+        "models": [
+          {
+            "requestType": "glm-5.3-flash",
+            "displayName": "GLM-5.3-Flash",
+            "billType": "TOKEN",
+            "tokens": 41000000,
+            "cost": 91.84,
+            "monthlyFee": null,
+            "note": null
+          },
+          {
+            "requestType": "deepseek-v4-flash",
+            "displayName": "DeepSeek-V4-Flash",
+            "billType": "TOKEN",
+            "tokens": 11852000,
+            "cost": 55.94144,
+            "monthlyFee": null,
+            "note": null
+          },
+          {
+            "requestType": "qwen3-max",
+            "displayName": "Qwen3-Max",
+            "billType": "TOKEN",
+            "tokens": 2180000,
+            "cost": 0.6104,
+            "monthlyFee": null,
+            "note": null
+          },
+          {
+            "requestType": "trae-subscription",
+            "displayName": "Trae 包月",
+            "billType": "FLAT",
+            "tokens": 340000,
+            "cost": null,
+            "monthlyFee": 49.0,
+            "note": "flat monthly fee; not billed per token"
+          },
+          {
+            "requestType": "mystery-metered",
+            "displayName": "Mystery",
+            "billType": "METER",
+            "tokens": 12000,
+            "cost": null,
+            "monthlyFee": null,
+            "note": "unsupported bill type 'METER'"
+          }
+        ],
+        "knownData": true
+      }
+    },
+    "confirmed_zero": {
+      "trend": [
+        {
+          "date": "2026-10-24",
+          "requestType": "glm-5.3-flash",
+          "tokens": 0
+        },
+        {
+          "date": "2026-10-24",
+          "requestType": "qwen3-max",
+          "tokens": 0
+        }
+      ],
+      "today": "2026-10-24",
+      "result": {
+        "date": "2026-10-24",
+        "totalTokens": 0,
+        "totalCost": 0.0,
+        "currency": "CNY",
+        "models": [
+          {
+            "requestType": "glm-5.3-flash",
+            "displayName": "GLM-5.3-Flash",
+            "billType": "TOKEN",
+            "tokens": 0,
+            "cost": 0.0,
+            "monthlyFee": null,
+            "note": null
+          },
+          {
+            "requestType": "qwen3-max",
+            "displayName": "Qwen3-Max",
+            "billType": "TOKEN",
+            "tokens": 0,
+            "cost": 0.0,
+            "monthlyFee": null,
+            "note": null
+          }
+        ],
+        "knownData": true
+      }
+    },
+    "not_synced": {
+      "trend": [
+        {
+          "date": "2026-10-23",
+          "requestType": "glm-5.3-flash",
+          "tokens": 123
+        }
+      ],
+      "today": "2026-10-24",
+      "result": {
+        "date": "2026-10-24",
+        "totalTokens": 0,
+        "totalCost": 0.0,
+        "currency": "CNY",
+        "models": [],
+        "knownData": false
+      }
+    },
+    "partial_price_unknown": {
+      "trend": [
+        {
+          "date": "2026-10-24",
+          "requestType": "glm-5.3-flash",
+          "tokens": 1000000
+        },
+        {
+          "date": "2026-10-24",
+          "requestType": "unpriced-token",
+          "tokens": 500000
+        },
+        {
+          "date": "2026-10-24",
+          "requestType": "unknown-model-xyz",
+          "tokens": 250000
+        }
+      ],
+      "today": "2026-10-24",
+      "result": {
+        "date": "2026-10-24",
+        "totalTokens": 1750000,
+        "totalCost": null,
+        "currency": "CNY",
+        "models": [
+          {
+            "requestType": "glm-5.3-flash",
+            "displayName": "GLM-5.3-Flash",
+            "billType": "TOKEN",
+            "tokens": 1000000,
+            "cost": 2.24,
+            "monthlyFee": null,
+            "note": null
+          },
+          {
+            "requestType": "unpriced-token",
+            "displayName": "NoPrice",
+            "billType": "TOKEN",
+            "tokens": 500000,
+            "cost": null,
+            "monthlyFee": null,
+            "note": "token-billed but no blended price configured"
+          },
+          {
+            "requestType": "unknown-model-xyz",
+            "displayName": "unknown-model-xyz",
+            "billType": "UNKNOWN",
+            "tokens": 250000,
+            "cost": null,
+            "monthlyFee": null,
+            "note": "no price configured for this request type"
+          }
+        ],
+        "knownData": true
+      }
+    },
+    "huge_day": {
+      "trend": [
+        {
+          "date": "2026-10-24",
+          "requestType": "glm-5.3-flash",
+          "tokens": 10299999999
+        }
+      ],
+      "today": "2026-10-24",
+      "result": {
+        "date": "2026-10-24",
+        "totalTokens": 10299999999,
+        "totalCost": 23071.999997760002,
+        "currency": "CNY",
+        "models": [
+          {
+            "requestType": "glm-5.3-flash",
+            "displayName": "GLM-5.3-Flash",
+            "billType": "TOKEN",
+            "tokens": 10299999999,
+            "cost": 23071.999997760002,
+            "monthlyFee": null,
+            "note": null
+          }
+        ],
+        "knownData": true
+      }
+    },
+    "empty_trend": {
+      "trend": [],
+      "today": "2026-10-24",
+      "result": {
+        "date": "2026-10-24",
+        "totalTokens": 0,
+        "totalCost": 0.0,
+        "currency": "CNY",
+        "models": [],
+        "knownData": false
+      }
+    }
+  }
+}

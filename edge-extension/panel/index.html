@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>公司 OpenCSI 用量</title>
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+<main id="panel" class="panel" aria-live="polite">
+  <header class="head">
+    <span class="title">公司 OpenCSI 用量</span>
+    <span class="spacer"></span>
+    <span class="dot" id="dot"></span>
+    <span class="state" id="state">加载中</span>
+    <button id="diagLink" class="link like-text" type="button" title="打开诊断报告">诊断</button>
+  </header>
+  <div class="reason hidden" id="reason"></div>
+
+  <section class="today" id="todayCard">
+    <div class="today-caption"><span id="todayTitle">今日用量</span><span class="spacer"></span><span class="muted" id="todayNote"></span></div>
+    <div class="numbers">
+      <div class="metric">
+        <span class="big" id="todayTokens">--</span>
+        <span class="unit">tokens</span>
+      </div>
+      <div class="metric">
+        <span class="big" id="todayCost">--</span>
+        <span class="unit">估算费用</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="models">
+    <div class="models-head">
+      <span class="section-title">今日各模型用量</span>
+      <span class="spacer"></span>
+      <button id="expandBtn" class="link" type="button" hidden>展开全部</button>
+    </div>
+    <div id="modelRows" class="model-rows"></div>
+  </section>
+
+  <footer class="foot">
+    <span class="muted" id="updated">最近更新：--:--</span>
+    <span class="spacer"></span>
+    <button id="refreshBtn" class="link" type="button">立即刷新</button>
+    <button id="loginBtn" class="link action" type="button" hidden>重新登录 OpenCSI</button>
+  </footer>
+</main>
+<script src="../core/models.js"></script>
+<script src="../core/aggregation.js"></script>
+<script src="../core/date.js"></script>
+<script src="../core/state.js"></script>
+<script src="../core/formatting.js"></script>
+<script src="panel.js"></script>
+</body>
+</html>

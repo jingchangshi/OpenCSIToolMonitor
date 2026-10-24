@@ -1,0 +1,7 @@
+# Node runtime artifacts of the extension's own tooling — nothing here is
+# needed to run the extension itself, which is plain JS loaded by the browser.
+node_modules/
+e2e/node_modules/
+e2e/out/
+e2e/chromium/
+e2e/package-lock.json

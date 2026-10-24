@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>OpenCSI 扩展诊断</title>
+<link rel="stylesheet" href="panel.css">
+<style>
+  body { padding: 16px; max-width: 720px; }
+  h1 { font-size: 16px; }
+  pre {
+    background: var(--chip); border-radius: 8px; padding: 12px;
+    font-size: 12px; overflow-x: auto; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<main class="panel" style="gap:12px">
+  <h1>OpenCSI 扩展诊断报告（脱敏）</h1>
+  <p class="muted">
+    本报告只包含状态码、时间、主机名与扩展配置 —— 不含 Cookie、Token 或任何 API
+    原始响应值。复制下面的内容发给维护者即可定位认证或注入问题。
+  </p>
+  <pre id="report">生成中…</pre>
+  <button id="copyBtn" class="link action" type="button" style="align-self:flex-start">复制报告</button>
+</main>
+<script src="diag.js"></script>
+</body>
+</html>

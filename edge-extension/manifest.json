@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "OpenCSI Usage for Magpie",
+  "version": "0.1.0",
+  "description": "在公司 Magpie Web 的 Usage 页面内嵌公司 OpenCSI 今日用量与估算费用（只读，复用浏览器登录态）。",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://opencsitool.com/*",
+    "http://129.153.118.58/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://129.153.118.58/*"],
+      "js": [
+        "core/models.js",
+        "core/aggregation.js",
+        "core/date.js",
+        "core/state.js",
+        "core/formatting.js",
+        "content/magpie-inject.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["panel/*"],
+      "matches": ["http://129.153.118.58/*"]
+    }
+  ]
+}
