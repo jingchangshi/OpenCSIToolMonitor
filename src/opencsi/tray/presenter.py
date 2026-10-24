@@ -207,6 +207,7 @@ def actions_for(
     *,
     auto_refresh: bool = True,
     startup_enabled: bool | None = None,
+    panel_supported: bool = False,
 ) -> list[Action]:
     """The menu, in order, for the current state.
 
@@ -223,9 +224,22 @@ def actions_for(
     machine where it cannot work would be a control that silently does nothing,
     which is worse than not offering it.
     """
-    items: list[Action] = [
-        Action("headline", headline_for(snapshot), enabled=False, default=True)
-    ]
+    # When the usage panel is available, the tray's left click -- which the
+    # pystray win32 backend routes to the first ``default=True`` item -- must
+    # open the panel, in every state. The state-specific recovery actions keep
+    # their places in the right-click menu but lose their default marks: two
+    # bold items is noise, and the panel itself carries the recovery steps.
+    items: list[Action] = []
+    if panel_supported:
+        items.append(Action("panel", "显示用量面板", default=True))
+    items.append(
+        Action(
+            "headline",
+            headline_for(snapshot),
+            enabled=False,
+            default=not panel_supported,
+        )
+    )
     if snapshot.daily_usage is not None:
         daily = snapshot.daily_usage
         items.append(
@@ -257,13 +271,21 @@ def actions_for(
         # not need a browser at all: the credential arrives over plain HTTP and
         # the OAuth leg is plain HTTP too. On a machine where the browser is the
         # broken part, offering only browser-based routes is a closed loop.
-        items.append(Action("login_qr", "扫码登录（无需浏览器）", default=True))
+        items.append(
+            Action("login_qr", "扫码登录（无需浏览器）", default=not panel_supported)
+        )
         items.append(Action("launch_browser", "启动浏览器并登录"))
         items.append(Action("login", "打开登录页面"))
     elif snapshot.state is MonitorState.LOGIN_REQUIRED:
         # QR first for the same reason, and because it is the shorter path: no
         # window to open, no sign-in form to fill in, one scan.
-        items.append(Action("login_qr", "扫码登录 / Scan to sign in...", default=True))
+        items.append(
+            Action(
+                "login_qr",
+                "扫码登录 / Scan to sign in...",
+                default=not panel_supported,
+            )
+        )
         items.append(Action("login", "在浏览器中登录"))
     elif snapshot.state is MonitorState.CONSENT_REQUIRED:
         # "Sign in" would be the wrong offer: the SSO session is alive and the
@@ -271,7 +293,9 @@ def actions_for(
         # GitCode's consent page, so the action opens that page rather than a
         # login form. Wording follows the same shape as BROWSER_UNAVAILABLE --
         # name the step, not the symptom.
-        items.append(Action("login", "打开页面并批准授权", default=True))
+        items.append(
+            Action("login", "打开页面并批准授权", default=not panel_supported)
+        )
         items.append(Action("renew", "重试静默续期"))
     elif snapshot.state is MonitorState.AUTH_ERROR:
         items.append(Action("renew", "立即续期"))

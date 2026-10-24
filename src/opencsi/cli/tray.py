@@ -254,11 +254,18 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
         finally:
             service.stop()
 
+        from ..tray.popup import panel_supported
+
+        panel = panel_supported()
+
         def render() -> None:
             ctx.out("tray: ok")
             ctx.out(f"state: {icon_state}")
             ctx.out(f"menu items: {len([m for m in menu if not m.id.startswith('sep')])}")
             ctx.out(f"tooltip: {tooltip.replace(chr(10), ' / ')}")
+            # Frozen builds bundle tcl/tk by opt-in; a build that lost it
+            # degrades silently to the legacy menu unless this line says so.
+            ctx.out(f"panel: {'available' if panel else 'unavailable'}")
 
         ctx.emit(
             {
@@ -266,6 +273,7 @@ def _run_tray(ctx: CliContext, config, *, allow_multiple: bool, check: bool) -> 
                 "state": icon_state,
                 "menu": [m.id for m in menu],
                 "tooltip": tooltip,
+                "panel_available": panel,
             },
             render,
         )

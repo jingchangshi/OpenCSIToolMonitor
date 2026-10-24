@@ -1569,6 +1569,21 @@ class TrayAppLogicTest(unittest.TestCase):
         app._dispatch("autorefresh")
         self.assertTrue(app._auto_refresh)
 
+    def test_panel_action_routes_to_the_panel_request(self) -> None:
+        """Left-click is the panel's toggle, and only a enqueue away."""
+        app, _service = self._app()
+        sent: list[str] = []
+        app._panel_request = sent.append
+        app._dispatch("panel")
+        self.assertEqual(sent, ["toggle"])
+
+    def test_panel_action_without_a_panel_is_ignored(self) -> None:
+        """A machine without tcl/tk: the menu has no panel entry and the
+        dispatch stays silent rather than crashing the tray thread."""
+        app, _service = self._app()
+        app._panel_request = None
+        app._dispatch("panel")  # must not raise
+
     def test_the_auto_refresh_toggle_reaches_the_service(self) -> None:
         """The checkbox controls the worker, or it is a checkbox that lies.
 

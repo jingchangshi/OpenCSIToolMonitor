@@ -36,6 +36,20 @@ from .single_instance import SingleInstance
 
 log = logging.getLogger("opencsi.tray")
 
+
+def _popup_usable() -> bool:
+    """Whether the usage panel can run on this machine.
+
+    Imported lazily and answered honestly: a machine without tcl/tk gets the
+    legacy pure-menu tray, which still does everything except the panel.
+    """
+    try:
+        from .popup import panel_supported
+
+        return panel_supported()
+    except Exception:  # noqa: BLE001 - the tray must not die on a probe
+        return False
+
 #: Returned by :meth:`TrayApp.run` when another tray already holds the mutex.
 #:
 #: Named rather than a bare ``2`` because the entry point has to recognise this
@@ -94,6 +108,7 @@ class TrayApp:
         on_open: Callable[[], None] | None = None,
         on_launch_browser: Callable[[], None] | None = None,
         single_instance: SingleInstance | None = None,
+        panel_request: "Callable[[str], None] | None" = None,
     ) -> None:
         self._service = service
         self._session = session if session is not None else getattr(service, "_session", None)
@@ -102,6 +117,10 @@ class TrayApp:
         self._on_open = on_open
         self._on_launch_browser = on_launch_browser
         self._single = single_instance or SingleInstance()
+        #: The usage panel's enqueue, when the panel is running. ``None`` means
+        #: the legacy pure-menu tray, which the menu then reflects: no panel
+        #: entry, and the state-specific default actions keep their marks.
+        self._panel_request = panel_request
 
         self._icon: Any = None
         self._auto_refresh = True
@@ -173,6 +192,7 @@ class TrayApp:
             self._service.snapshot,
             auto_refresh=self._auto_refresh,
             startup_enabled=self._startup,
+            panel_supported=self._panel_request is not None,
         )
 
     def _pystray_menu(self):
@@ -227,7 +247,12 @@ class TrayApp:
 
     def _dispatch(self, action_id: str) -> None:
         """Perform a menu action. Runs on the pystray message thread."""
-        if action_id == "refresh":
+        if action_id == "panel":
+            # Left-click. Enqueue only: this thread owns the tray message
+            # loop, and blocking it would freeze every future click.
+            if self._panel_request is not None:
+                self._panel_request("toggle")
+        elif action_id == "refresh":
             # Enqueue only: the worker does the blocking fetch, so the icon
             # stays responsive.
             self._service.refresh_now()
@@ -371,14 +396,18 @@ class TrayApp:
 
     def quit(self) -> None:
         """Stop the worker and remove the icon."""
-        try:
-            self._service.stop()
-        finally:
-            if self._icon is not None:
-                try:
-                    self._icon.stop()
-                except Exception:  # noqa: BLE001
-                    pass
+        self._service.stop()
+        if self._panel_request is not None:
+            # The Tk mainloop owns the process lifetime now: stopping the icon
+            # while the panel lived on would strand a window with no tray. The
+            # panel ends its loop; the caller stops the icon afterwards.
+            self._panel_request("quit")
+            return
+        if self._icon is not None:
+            try:
+                self._icon.stop()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _notify_attention(self, snapshot: MonitorSnapshot) -> None:
         """Show one notification when the session needs the user.
@@ -455,6 +484,82 @@ class TrayApp:
             except Exception as exc:  # noqa: BLE001
                 log.debug("could not rebuild the menu: %s", type(exc).__name__)
 
+    def _run_with_panel(self) -> int:
+        """The resident tray with the usage panel: Tk owns the main thread.
+
+        ``pystray.run_detached()`` exists precisely for integrating with another
+        mainloop; the panel's Tk mainloop is that other mainloop. Each thread
+        owns one thing -- Tk owns every widget, the pystray thread owns the tray
+        message loop, the monitor worker owns the network -- and they meet only
+        in the panel's command queue. ``start_service`` is not honoured here
+        because the panel is meaningless without a monitor to display; callers
+        that pass ``start_service=False`` (``--check``) never reach this branch.
+        """
+        from .popup import PopupController
+
+        if not self._single.acquire():
+            log.error("another OpenCSI tray is already running")
+            return ALREADY_RUNNING_EXIT
+
+        import pystray
+
+        controller = PopupController(
+            self._service,
+            startup_manager=self._startup_manager_or_none(),
+        )
+        self._panel_request = controller.enqueue
+
+        icon = pystray.Icon(
+            "opencsi",
+            icon=make_icon(self._service.snapshot.state.value),
+            title=self.tooltip(self._service.snapshot),
+            menu=self._pystray_menu(),
+        )
+        self._icon = icon
+        self._last_icon_state = self._service.snapshot.state.value
+        self._last_menu_signature = tuple(
+            (a.id, a.label, a.enabled, a.checked) for a in self.build_menu()
+        )
+
+        self._unsubscribe = self._service.subscribe(lambda _s: self._refresh_view())
+        self._unsubscribe_attention = self._service.subscribe_attention(
+            self._notify_attention
+        )
+        # At sign-in the panel stays hidden: the icon is the whole surface until
+        # the user asks for more. The monitor's first fetch still runs, so the
+        # numbers are there the moment the user clicks.
+        icon.run_detached()
+        try:
+            controller.run()
+        finally:
+            self._panel_request = None
+            if self._unsubscribe_attention is not None:
+                try:
+                    self._unsubscribe_attention()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._unsubscribe_attention = None
+            self._unsubscribe = None
+            self._service.stop()
+            try:
+                icon.stop()
+                thread = getattr(icon, "_thread", None)
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=5.0)
+            except Exception:  # noqa: BLE001
+                pass
+            self._single.release()
+        return 0
+
+    def _startup_manager_or_none(self):
+        """The startup manager for the panel's toggle, or ``None``."""
+        try:
+            from .startup import StartupManager
+
+            return StartupManager()
+        except Exception:  # noqa: BLE001 - startup state is optional
+            return None
+
     def run(self, *, blocking: bool = True, start_service: bool = True) -> int:
         """Start the tray. Returns the process exit code.
 
@@ -470,6 +575,9 @@ class TrayApp:
         available, reason = tray_available()
         if not available:
             raise TrayUnavailableError(f"the tray cannot start: {reason}")
+
+        if blocking and start_service and _popup_usable():
+            return self._run_with_panel()
 
         if blocking and not self._single.acquire():
             log.error("another OpenCSI tray is already running")

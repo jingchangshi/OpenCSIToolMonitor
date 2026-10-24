@@ -37,9 +37,12 @@ ROOT = Path(SPECPATH).resolve().parent
 #:   PIL.ImageOps                         -> opencsi.auth.qr_render (trim_white)
 #:   winreg                               -> opencsi.tray.startup
 #:   segno                                -> opencsi.auth.qr_render (encode_text)
-#: PIL.ImageTk / PIL.ImageQt are deliberately absent: pystray can use them, but
-#: on Windows it uses the native backend, and pulling in Tk would add ~10 MB for
-#: a code path this build never takes.
+#:   tkinter                              -> opencsi.tray.popup (the usage panel)
+#: PIL.ImageTk / PIL.ImageQt remain deliberately absent: pystray still uses the
+#: native backend on Windows. tkinter is wanted now because the usage panel is
+#: a Tk window; the import inside opencsi.tray.popup is lazy, so analysis
+#: cannot see it, and PyInstaller must bundle the tcl/tk runtime for the frozen
+#: tray to be able to show the panel at all.
 _WANTED = [
     "pystray",
     "pystray._win32",
@@ -49,6 +52,7 @@ _WANTED = [
     "PIL.ImageFont",
     "winreg",
     "segno",
+    "tkinter",
 ]
 
 
@@ -93,7 +97,6 @@ _common = dict(
     # Trim what this project provably never uses. Each exclusion is a real
     # dependency of something in the import graph that is irrelevant here.
     excludes=[
-        "tkinter",
         "unittest",
         "pytest",
         "pydoc",
