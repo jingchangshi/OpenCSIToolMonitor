@@ -133,6 +133,28 @@ class TodayCardTest(unittest.TestCase):
         self.assertEqual(view.today.tokens_display, "0")
         self.assertEqual(view.today.cost_display, "¥0.00")
 
+    def test_server_freshness_date_uses_shanghai_not_local_zone(self) -> None:
+        """The freshness verdict must not depend on the machine's timezone.
+
+        A stamp at 00:30 Shanghai is still 16:30 the *previous* day in UTC:
+        under a local-zone conversion a UTC CI runner read it as yesterday
+        (flipping a zero day to NOT_READY) while a UTC+8 host read it as
+        today. The company statistic day is a Shanghai date by contract.
+        Pinned at the boundary, both sides.
+        """
+        self.assertEqual(
+            pp._parse_server_date("2026-10-24T00:30:00+08:00"), "2026-10-24"
+        )
+        self.assertEqual(
+            pp._parse_server_date("2026-10-23T23:59:00+08:00"), "2026-10-23"
+        )
+        # A UTC-stamped 16:30 is 00:30 Shanghai the NEXT day.
+        self.assertEqual(
+            pp._parse_server_date("2026-10-24T16:30:00+00:00"), "2026-10-25"
+        )
+        self.assertIsNone(pp._parse_server_date("garbage"))
+        self.assertIsNone(pp._parse_server_date(None))
+
     def test_empty_trend_without_freshness_is_not_ready(self) -> None:
         """Scenario 3a: the server has not synced today; zero would be a lie."""
         daily = a_daily(models=(), total_cost=0.0)

@@ -1,8 +1,8 @@
-/* panel.css — the OpenCSI card's inside, designed to live inside Magpie's
-   native .subscription-card frame: that frame carries the border, radius,
-   background and padding, so this stylesheet stays frame-less (transparent
-   background, no border, no outer padding) and lays out the content only.
-   Theme follows prefers-color-scheme, matching Magpie's light/dark tokens. */
+/* panel.css — the OpenCSI card's inside, styled to sit inside Magpie's
+   native .subscription-card frame (that frame carries border/radius/
+   background/padding; this sheet stays frame-less and lays out content).
+   Metrics mirror Magpie's own card typography: 12.5px heads, tabular
+   numbers, one accent colour, light/dark via prefers-color-scheme. */
 :root {
   --text: #1f2328;
   --muted: #6e7781;
@@ -41,29 +41,48 @@ body {
 .spacer { flex: 1; }
 .muted { color: var(--muted); font-size: 11px; }
 
-.head { display: flex; align-items: center; gap: 6px; }
+.head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .title { font-weight: 600; font-size: 12.5px; }
-.src { font-size: 10.5px; color: var(--muted); }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.state { font-size: 11.5px; font-weight: 600; }
+.src { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+  flex: none;
+}
+/* Focus/hover visibility for the state dot (it is the OK-state surface) */
+.dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dot { cursor: default; }
+.state-text { font-size: 11.5px; font-weight: 600; white-space: nowrap; }
 
 .reason {
   background: var(--chip); border-radius: 6px; padding: 4px 8px;
-  font-size: 11.5px; color: var(--muted);
+  font-size: 11.5px; color: var(--muted); margin: 0;
 }
 .reason.error { color: var(--error); }
 .reason.warn { color: var(--warn); }
 
-.numbers { display: flex; flex-direction: column; gap: 5px; }
-.metric { display: flex; flex-direction: column; gap: 0; }
-.label { font-size: 11px; color: var(--muted); }
+/* Core metrics: two columns with baseline alignment; a 260px card fits
+   "2,519.9 万" + "¥5.04" side by side — and the flex-wrap fallback stacks
+   them when a longer value would squeeze either below readability. */
+.numbers {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 4px 12px; padding-top: 2px;
+}
+.metric { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.metric.right { text-align: right; align-items: flex-end; }
+.label { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .big {
   font-size: 19px; font-weight: 700; line-height: 1.3;
   font-variant-numeric: tabular-nums; color: var(--text);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis;
 }
+/* When stacked (wrap), left-align both so the eye tracks one column */
+.numbers.stacked .metric.right { text-align: left; align-items: flex-start; }
 
-.sub { font-size: 12px; padding: 0 1px; }
+.sub { font-size: 12px; padding: 0 1px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub .sub-note { color: var(--muted); font-size: 11px; }
+
 .model-rows { display: flex; flex-direction: column; gap: 1px; }
 .model-rows.expanded { overflow-y: auto; max-height: 300px; }
 .model-row {
@@ -71,31 +90,42 @@ body {
   border-radius: 5px; font-size: 12px;
 }
 .model-row:nth-child(odd) { background: var(--chip); }
-.model-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-row .name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .model-row .tok { font-variant-numeric: tabular-nums; color: var(--muted); }
 .model-row .cst { font-variant-numeric: tabular-nums; width: 68px; text-align: right; }
-.model-row.flat .name::after {
-  content: "包月"; margin-left: 5px; font-size: 9.5px; color: var(--muted);
-  border: 1px solid var(--muted); border-radius: 4px; padding: 0 3px;
+.model-row .bill {
+  font-size: 9.5px; color: var(--muted); border: 1px solid var(--muted);
+  border-radius: 4px; padding: 0 3px; margin-left: 5px; flex: none;
 }
 
 .viewall {
   background: none; border: 0; cursor: pointer; color: var(--accent);
   font: inherit; font-size: 11.5px; text-align: left; padding: 1px 4px;
-  border-radius: 5px;
+  border-radius: 5px; align-self: flex-start;
 }
-.viewall:hover { background: var(--chip); }
+.viewall:hover, .viewall:focus-visible { background: var(--chip); }
+.viewall:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.foot { display: flex; align-items: center; gap: 2px; }
+.foot { display: flex; align-items: center; gap: 2px; min-height: 20px; }
 .iconlink {
   background: none; border: 0; cursor: pointer; color: var(--muted);
-  font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 5px;
+  font-size: 13px; line-height: 1; padding: 2px 5px; border-radius: 5px;
 }
-.iconlink:hover { color: var(--text); background: var(--chip); }
+.iconlink:hover, .iconlink:focus-visible { color: var(--text); background: var(--chip); }
+.iconlink:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.iconlink[disabled] { opacity: .5; cursor: default; }
+/* Refresh in progress: a quiet spin on the button itself */
+.iconlink.spinning { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 .action {
   align-self: stretch;
   background: var(--accent); color: #fff; border: 0; border-radius: 7px;
   font: inherit; font-size: 12px; font-weight: 600; padding: 5px 10px;
   cursor: pointer;
 }
-.action:hover { filter: brightness(1.08); }
+.action:hover, .action:focus-visible { filter: brightness(1.08); }
+.action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

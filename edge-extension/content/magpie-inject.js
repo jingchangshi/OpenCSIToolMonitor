@@ -126,24 +126,54 @@
   }
 
   // ── lifecycle wiring ────────────────────────────────────────────────────
+  // Observer singleton, held in closures rather than on DOM elements: the
+  // previous version stored a flag it never set, so its document-wide
+  // reattach observer called attachGridGuard on every mutation and piled up
+  // one grid observer per mutation — unbounded growth across Magpie's quota
+  // refreshes. The closure state is the single source of truth: one grid
+  // observer at most, swapped only when the grid ELEMENT itself is replaced.
+  let observedGrid = null;
+  let gridObserver = null;
+  let gridObserverCount = 0; // diagnostics: how many observers were created
+
   function attachGridGuard(grid) {
+    if (grid === observedGrid && gridObserver) return; // same element: no-op
+    if (gridObserver) gridObserver.disconnect(); // new element: swap, not stack
+    observedGrid = grid;
+    gridObserverCount += 1;
     // renderQuotas wipes the grid on every data refresh: re-insert. The
     // class filter is the .sorting guard — watched via attributes so the
     // retry after a drag ends is immediate.
-    const gridGuard = new MutationObserver(() => {
+    gridObserver = new MutationObserver(() => {
       const live = findQuotaGrid();
       if (!live || !live.isConnected) return;
+      if (live !== observedGrid) return; // a newer element took over
       if (!live.classList.contains("sorting")) ensureCard();
     });
-    gridGuard.observe(grid, { childList: true, attributes: true, attributeFilter: ["class"] });
+    gridObserver.observe(grid, { childList: true, attributeFilter: ["class"] });
     ensureCard();
+    publishObserverDiagnostics();
+  }
+
+  // Observer diagnostics for the E2E. Content scripts run in an isolated
+  // world, so a page-world evaluate cannot read a window property set here —
+  // the count is mirrored onto the card element's dataset (DOM is the one
+  // object both worlds see) each time it changes.
+  function publishObserverDiagnostics() {
+    const card = document.getElementById(PANEL_ID);
+    if (!card) return;
+    card.dataset.observerCount = String(gridObserverCount);
+    card.dataset.observing = gridObserver && observedGrid !== null &&
+      observedGrid.isConnected ? "1" : "0";
   }
 
   function start() {
-    console.info("[opencsi-inject] start; installed:", !!window.__opencsiUsageCardInstalled);
     if (window.__opencsiUsageCardInstalled) {
-      // A chrome.scripting retry: re-attach if a refresh moved things.
+      // A chrome.scripting retry: re-attach if a refresh moved things. The
+      // closure singleton makes this idempotent — a re-run cannot stack.
       ensureCard();
+      const live = findQuotaGrid();
+      if (live && live.isConnected) attachGridGuard(live);
       return;
     }
     window.__opencsiUsageCardInstalled = true;
@@ -153,7 +183,9 @@
       attachGridGuard(grid);
     } else {
       // The usage page (and with it the quota grid) is registered by plugin
-      // code that runs after this content script. Watch for its creation.
+      // code that runs after this content script. Watch for its creation;
+      // attachGridGuard's singleton guard makes the handoff safe even if the
+      // creator fires more than once.
       const creator = new MutationObserver(() => {
         const live = findQuotaGrid();
         if (live && live.isConnected) {
@@ -166,13 +198,12 @@
       setTimeout(() => creator.disconnect(), 60000);
     }
 
-    // A re-registered usage page can replace the grid element itself; a
-    // document-wide guard re-attaches the childList observer to the new one.
+    // A re-registered usage page can replace the grid ELEMENT itself; this
+    // document-wide watcher swaps the singleton onto the new element. The
+    // attach is a no-op while the element is unchanged, so it cannot grow.
     const reattach = new MutationObserver(() => {
       const live = findQuotaGrid();
-      if (live && live.isConnected && !live.__opencsiGridGuard) {
-        attachGridGuard(live);
-      }
+      if (live && live.isConnected) attachGridGuard(live);
     });
     reattach.observe(document.documentElement, { childList: true, subtree: true });
   }

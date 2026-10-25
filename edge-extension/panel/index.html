@@ -7,27 +7,21 @@
 <link rel="stylesheet" href="panel.css">
 </head>
 <body>
-<script>
-  // temporary debug trap (removed before delivery)
-  window.onerror = function (m, s, l) {
-    document.title = "ERR:" + String(m).slice(0, 80) + "@" + String(s || "").split("/").pop() + ":" + l;
-  };
-</script>
 <main id="panel" class="panel" aria-live="polite">
   <header class="head">
-    <span class="title">OpenCSI</span>
-    <span class="src">公司模型服务</span>
+    <span class="title">OpenCSI</span><span class="src">公司服务</span>
     <span class="spacer"></span>
-    <span class="dot" id="dot"></span>
+    <span class="dot" id="dot" role="status"></span>
+    <span class="state-text hidden" id="stateText"></span>
   </header>
-  <div class="reason hidden" id="reason"></div>
+  <p class="reason hidden" id="reason"></p>
 
-  <section class="numbers">
+  <section class="numbers" id="numbers">
     <div class="metric">
       <span class="label">今日 Tokens</span>
       <span class="big" id="todayTokens">--</span>
     </div>
-    <div class="metric">
+    <div class="metric right" id="costMetric">
       <span class="label">今日估算费用</span>
       <span class="big" id="todayCost">--</span>
     </div>
@@ -35,13 +29,13 @@
 
   <div class="sub hidden" id="subLine"></div>
   <div class="model-rows hidden" id="modelRows"></div>
-  <button id="expandBtn" class="viewall hidden" type="button">查看全部</button>
+  <button id="expandBtn" class="viewall hidden" type="button">另 N 个模型 · 查看详情</button>
 
   <footer class="foot">
     <span class="muted" id="updated">…</span>
     <span class="spacer"></span>
-    <button id="refreshBtn" class="iconlink" type="button" title="立即刷新">⟳</button>
-    <button id="diagLink" class="iconlink" type="button" title="诊断报告">ⓘ</button>
+    <button id="refreshBtn" class="iconlink" type="button" title="立即刷新" aria-label="立即刷新">⟳</button>
+    <button id="diagLink" class="iconlink" type="button" title="诊断报告" aria-label="打开诊断报告">ⓘ</button>
   </footer>
   <button id="loginBtn" class="action" type="button" hidden>重新登录 OpenCSI</button>
 </main>

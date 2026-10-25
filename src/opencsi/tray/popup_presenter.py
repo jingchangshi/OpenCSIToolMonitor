@@ -25,7 +25,7 @@ The rules that matter, each of which is easy to get subtly wrong:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 from ..monitor import MonitorSnapshot, MonitorState
@@ -120,6 +120,14 @@ class PanelView:
 #: Neutral Win11-style palette. Blue is reserved for the usage area, green for
 #: a healthy state, warm colours for attention states; backgrounds stay
 #: white/grey so a dark desktop cannot wash the panel out.
+#: Asia/Shanghai as a fixed +08:00 offset. The zone has had no DST since
+#: 1991, so the offset IS the zone for date arithmetic. zoneinfo is avoided
+#: deliberately: Windows CPython ships without the tz database (no tzdata
+#: wheel in a stdlib-only install), and the project pins zero runtime deps.
+from datetime import timedelta as _timedelta
+
+SHANGHAI_OFFSET = timezone(_timedelta(hours=8))
+
 COLOR_OK = "#16a34a"
 COLOR_INFO = "#2563eb"
 COLOR_BUSY = "#64748b"
@@ -211,16 +219,28 @@ def format_clock(moment: datetime | None) -> str:
 
 
 def _parse_server_date(text: str | None) -> str | None:
-    """The local calendar date of the server's freshness stamp, if parseable.
+    """The Shanghai calendar date of the server's freshness stamp, if parseable.
 
-    ``syncStatus.dataFreshTime`` arrives as an ISO string with an offset. A
-    stamp that cannot be parsed yields ``None`` and the caller treats the
+    ``syncStatus.dataFreshTime`` arrives as an ISO string with an offset. The
+    freshness comparison decides whether the server's data covers the
+    *company statistic day* — an Asia/Shanghai date by contract, not a date in
+    whatever zone this process runs in. Converting via the local zone made the
+    verdict machine-dependent: the same stamp read 2026-10-24 on a UTC+8 host
+    and 2026-10-23 on a UTC CI runner, flipping a genuinely-zero day to
+    NOT_READY. Fixed to Shanghai explicitly.
+
+    A stamp that cannot be parsed yields ``None`` and the caller treats the
     freshness as unknown rather than as fresh.
     """
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text).astimezone().date().isoformat()
+        stamped = datetime.fromisoformat(text)
+        if stamped.tzinfo is None:
+            # A naive stamp is already in the server's zone; assume the
+            # company zone rather than the runner's local one.
+            stamped = stamped.replace(tzinfo=SHANGHAI_OFFSET)
+        return stamped.astimezone(SHANGHAI_OFFSET).date().isoformat()
     except ValueError:
         return None
 

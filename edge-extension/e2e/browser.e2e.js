@@ -307,6 +307,10 @@ async function main() {
       { requestType: "embed-v4", tokens: 96_000 },
       { requestType: "glm-4.7-air", tokens: 30_000 },
     ];
+    const TINY = [
+      { requestType: "glm-5.3-flash", tokens: 1000 }, // ×2.24/M = ¥0.00224 < 分
+      { requestType: "glm-4.7-air", tokens: 500_000 }, // priced normally
+    ];
     const SINGLE = [{ requestType: "deepseek-v4", tokens: 7_970_000 }];
     const ZERO = [{ requestType: "glm-5.3-flash", tokens: 0 }];
 
@@ -380,14 +384,39 @@ async function main() {
       view.tokens === "2,606.6 万" && view.cost === "¥75.34",
       view.tokens + " " + view.cost);
     check("查询时间真实显示", /查询于 \d{2}:\d{2}/.test(view.updated), view.updated);
-    check("多模型：默认 Top 2 + 查看全部（5）", view.rowCount === 2 &&
-      view.expandText.includes("查看全部") && view.expandText.includes("5"),
+    check("多模型：默认 Top 1 + 「另 4 个模型 · 查看详情」", view.rowCount === 1 &&
+      view.expandText.includes("另 4 个模型") && view.expandText.includes("查看详情"),
       `rows=${view.rowCount} btn=${view.expandText}`);
     check("iframe 高度由内容驱动（不再是固定 300px）",
       view.frameStyleHeight !== "300px" && /^\d+px$/.test(view.frameStyleHeight),
       `style=${view.frameStyleHeight}`);
     fs.writeFileSync(path.join(OUT_DIR, "card-multi.png"),
       await page.screenshot({ clip: await cardClip(page) }));
+
+    // ── P0-3: the footer must be fully visible inside the iframe ─────────
+    const bottom = await (async () => {
+      const f = await panelFrame();
+      return f.evaluate(() => {
+        const foot = document.querySelector(".foot");
+        const fr = foot.getBoundingClientRect();
+        const vh = window.innerHeight;
+        const refresh = document.getElementById("refreshBtn");
+        const diag = document.getElementById("diagLink");
+        const rr = refresh.getBoundingClientRect();
+        const dr = diag.getBoundingClientRect();
+        return {
+          footVisible: fr.bottom <= vh + 0.5 && fr.top >= -0.5,
+          buttonsVisible:
+            rr.bottom <= vh + 0.5 && rr.top >= -0.5 &&
+            dr.bottom <= vh + 0.5 && dr.top >= -0.5,
+          scrollVsDoc: document.documentElement.scrollHeight <= Math.ceil(vh) + 1,
+          vh: Math.round(vh), sh: document.documentElement.scrollHeight,
+        };
+      });
+    })();
+    check("底部操作栏完整可见（无 iframe 裁剪）",
+      bottom.footVisible && bottom.buttonsVisible && bottom.scrollVsDoc,
+      JSON.stringify(bottom));
 
     // ── 4-5: rectangles pairwise disjoint; explicit grid areas applied ─────
     let geo = await gridGeometry();
@@ -408,8 +437,8 @@ async function main() {
     await panelClick("expandBtn");
     await sleep(900);
     view = await readPanel();
-    check("OpenCSI 展开：全部 5 行", view.rowCount === 5 && view.expandText === "收起",
-      `rows=${view.rowCount}`);
+    check("OpenCSI 展开详情：全部 5 行 + 收起入口", view.rowCount === 5 &&
+      view.expandText === "收起详情", `rows=${view.rowCount}`);
     check("展开后 iframe 高度随内容增长（网格随之重排）",
       view.frameRect > frameBefore + 40,
       `iframe ${Math.round(frameBefore)} → ${Math.round(view.frameRect)}, card ${Math.round(view.cardRect)}`);
@@ -436,6 +465,79 @@ async function main() {
     check("零用量：0 tokens / ¥0.00 + 今日暂无模型用量",
       view.tokens === "0" && view.cost === "¥0.00" && view.sub.includes("今日暂无模型用量"),
       JSON.stringify({ tokens: view.tokens, sub: view.sub }));
+
+    // ── small money: a positive sub-cent amount is ¥<0.01, never ¥0.00 ────
+    await pushFixtureSnapshot(TINY);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(1400);
+    view = await readPanel();
+    await panelClick("expandBtn"); // the default shows only the top model
+    await sleep(600);
+    const tinyRow = await (async () => {
+      const f = await panelFrame();
+      return f.evaluate(() => {
+        const rows = [...document.querySelectorAll("#modelRows .model-row")];
+        return rows.map((r) => r.textContent);
+      });
+    })();
+    await panelClick("expandBtn");
+    await sleep(400);
+    check("小金额：¥<0.01 而非免费的 ¥0.00",
+      tinyRow.some((t) => t.includes("¥<0.01")) && !tinyRow.some((t) => /¥0\.00/.test(t)),
+      JSON.stringify(tinyRow));
+
+    // ── dual-column headline: no truncation at card width ──────────────────
+    const cols = await (async () => {
+      const f = await panelFrame();
+      return f.evaluate(() => {
+        const a = document.getElementById("todayTokens");
+        const b = document.getElementById("todayCost");
+        return {
+          aClipped: a.scrollWidth > a.clientWidth + 1,
+          bClipped: b.scrollWidth > b.clientWidth + 1,
+          stacked: document.getElementById("numbers").classList.contains("stacked"),
+        };
+      });
+    })();
+    check("双列指标不截断（或已自动切换上下布局）",
+      (!cols.aClipped && !cols.bClipped) || cols.stacked, JSON.stringify(cols));
+
+    // ── P0-1: a REAL click on the refresh button triggers a real round trip.
+    // With the fixture cleared, a forced refresh hits the real network and the
+    // honest auth state must appear — proving the click→message→SW path. ────
+    await clearFixture();
+    const refreshClick = await (async () => {
+      const f = await panelFrame();
+      return f.evaluate(() => {
+        const btn = document.getElementById("refreshBtn");
+        btn.click(); // a genuine DOM click, not a function call
+        return true;
+      });
+    })();
+    let refreshOutcome = "";
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const f = await panelFrame();
+      refreshOutcome = await f.evaluate(() =>
+        (document.getElementById("dot") || { title: "" }).title);
+      if (refreshOutcome && refreshOutcome !== "正在刷新" &&
+          refreshOutcome !== "正在恢复登录") break;
+      await sleep(1500);
+    }
+    check("手动刷新按钮（真实点击）触发真实刷新并恢复状态",
+      refreshClick && refreshOutcome.length > 0 && refreshOutcome !== "加载中",
+      `outcome: ${refreshOutcome}`);
+    check("刷新节流：按钮存在且可再次点击", await (async () => {
+      const f = await panelFrame();
+      return f.evaluate(() => {
+        const btn = document.getElementById("refreshBtn");
+        return btn && !btn.disabled;
+      });
+    })());
+
+    // restore the fixture for the remaining checks
+    await pushFixtureSnapshot(MULTI);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(1400);
 
     // ── 11: login-expired state inside the grid card ───────────────────────
     // Deterministic half: the failure snapshot built by the production state
@@ -484,7 +586,7 @@ async function main() {
 
     // ── 6: three viewport widths, no overlap, order intact ─────────────────
     for (const width of [480, 900, 1400]) {
-      await page.setViewport({ width, height: 1000 });
+      await page.setViewport({ width, height: 1000, deviceScaleFactor: 1 });
       await sleep(700);
       geo = await gridGeometry();
       const firstId = await page.evaluate(() =>
@@ -496,6 +598,19 @@ async function main() {
         fs.writeFileSync(path.join(OUT_DIR, "grid-900.png"), await page.screenshot());
       }
     }
+
+    // ── browser zoom: 125% and 150% scale factors keep the grid sane ──────
+    for (const dsf of [1.25, 1.5]) {
+      await page.setViewport({ width: 1400, height: 1000, deviceScaleFactor: dsf });
+      await sleep(700);
+      geo = await gridGeometry();
+      const firstAtZoom = await page.evaluate(() =>
+        document.getElementById("subscriptionUsage").children[0].id);
+      check(`缩放 ${Math.round(dsf * 100)}%：不重叠且 OpenCSI 仍第一格`,
+        geo.overlaps.length === 0 && firstAtZoom === "opencsi-usage-card",
+        JSON.stringify(geo.overlaps));
+    }
+    await page.setViewport({ width: 1400, height: 1000, deviceScaleFactor: 1 });
 
     // ── 7: view switch away and back ────────────────────────────────────────
     await page.evaluate(() => window.__mock.showView("agents"));
@@ -516,24 +631,56 @@ async function main() {
       backOnUsage.count === 1,
       JSON.stringify({ onAgents, backOnUsage }));
 
-    // ── 8+14: native quota refreshes keep exactly one OpenCSI card ─────────
-    for (let i = 0; i < 5; i++) {
+    // ── 8+14: native quota refreshes keep exactly one OpenCSI card, and the
+    // observer singleton holds — 100 refreshes must not grow observers, cards
+    // or DOM nodes (P0-2's regression test). ────────────────────────────────
+    const baselineNodes = await page.evaluate(() => document.getElementsByTagName("*").length);
+    const diagBefore = await page.evaluate(() => {
+      const card = document.getElementById("opencsi-usage-card");
+      return card
+        ? { observerCount: Number(card.dataset.observerCount) }
+        : { observerCount: -1 };
+    });
+    for (let i = 0; i < 100; i++) {
       await page.evaluate(() => window.__mock.renderQuotasLite());
-      await sleep(150);
+      if (i % 20 === 19) await sleep(120); // let observers settle in batches
     }
-    const afterRefreshes = await page.evaluate(() => {
+    await sleep(500);
+    const afterRefreshes = await page.evaluate((baseline) => {
       const grid = document.getElementById("subscriptionUsage");
       return {
         ours: document.querySelectorAll("#opencsi-usage-card").length,
         first: grid.children[0].id,
         native: [...grid.children].filter((k) => k.dataset.provider).map((k) => k.dataset.provider),
+        nodeDelta: document.getElementsByTagName("*").length - baseline,
+        diag: {
+          observerCount: Number(grid.children[0].dataset.observerCount || -1),
+        },
       };
-    });
-    check("五次原生刷新后仍只有一张 OpenCSI 卡且在第一格",
+    }, baselineNodes);
+    check("100 次原生刷新后仍只有一张 OpenCSI 卡且在第一格",
       afterRefreshes.ours === 1 && afterRefreshes.first === "opencsi-usage-card" &&
       JSON.stringify(afterRefreshes.native) ===
       JSON.stringify(["opencode-go", "codex", "workbuddy", "deepseek"]),
       JSON.stringify(afterRefreshes));
+    check("观察器注册受控（刷新不增长观察器）",
+      afterRefreshes.diag.observerCount <= diagBefore.observerCount + 1,
+      `before=${diagBefore.observerCount} after=${afterRefreshes.diag.observerCount}`);
+    check("DOM 节点数不持续增长",
+      afterRefreshes.nodeDelta <= 5,
+      `delta=${afterRefreshes.nodeDelta} nodes over 100 refreshes`);
+
+    // After the stress the grid must still respond to height changes.
+    await panelClick("expandBtn");
+    await sleep(700);
+    await panelClick("expandBtn");
+    await sleep(500);
+    const stillPacking = await page.evaluate(() => {
+      const areas = [...document.getElementById("subscriptionUsage").children]
+        .map((c) => c.style.gridArea);
+      return areas.every((a) => a && a.includes("span"));
+    });
+    check("压力刷新后网格仍响应高度变化", stillPacking);
 
     // ── 12: native reorder keeps OpenCSI first and unharmed ─────────────────
     await page.evaluate(() => window.__mock.moveUsageLite("deepseek", 0));
