@@ -599,6 +599,47 @@ async function main() {
       }
     }
 
+    // ── theme follows Magpie's manual choice, not the OS ────────────────────
+    // Force dark via Magpie's own attribute, then rebuild the card the way
+    // a real quota refresh does (renderQuotas wipe → our guard re-inserts).
+    // A page reload would drop the attribute here — the mock does not
+    // persist it, while real Magpie re-applies its saved theme on load.
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "dark";
+    });
+    await page.evaluate(() => window.__mock.renderQuotasLite());
+    await sleep(1500);
+    const themeAfterRebuild = await page.evaluate(() => {
+      const f = document.querySelector("#opencsi-usage-card iframe");
+      return { srcHasDark: f.src.includes("theme=dark") };
+    });
+    let panelThemeAttr = "";
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const f = await panelFrame();
+      panelThemeAttr = await f.evaluate(() =>
+        document.documentElement.dataset.opencsiTheme || "").catch(() => "");
+      if (panelThemeAttr) break;
+      await sleep(400);
+    }
+    check("主题：Magpie 手动 dark → 重建卡片 URL 携带 theme=dark 且面板应用",
+      themeAfterRebuild.srcHasDark && panelThemeAttr === "dark",
+      JSON.stringify(themeAfterRebuild) + ` attr=${panelThemeAttr}`);
+    // Live flip back to light without reload (postMessage relay)
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "light";
+    });
+    await sleep(800);
+    const liveTheme = await (async () => {
+      const f = await panelFrame();
+      return f.evaluate(() => document.documentElement.dataset.opencsiTheme || "");
+    })();
+    check("主题：实时切换 light（postMessage 中继，无需重载）",
+      liveTheme === "light", `attr=${liveTheme}`);
+    await page.evaluate(() => {
+      delete document.documentElement.dataset.theme;
+    });
+    await sleep(300);
+
     // ── browser zoom: 125% and 150% scale factors keep the grid sane ──────
     for (const dsf of [1.25, 1.5]) {
       await page.setViewport({ width: 1400, height: 1000, deviceScaleFactor: dsf });

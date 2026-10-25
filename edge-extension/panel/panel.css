@@ -27,6 +27,19 @@
     --line: #30363d;
   }
 }
+/* The host-relayed theme wins over the OS media query: Magpie's manual
+   choice is authoritative for the card's look. Same tokens as above. */
+:root[data-opencsi-theme="dark"] {
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+  --ok: #3fb950; --busy: #58a6ff; --warn: #d29922; --error: #f85149;
+  --chip: #21262d; --line: #30363d;
+}
+:root[data-opencsi-theme="light"] {
+  --text: #1f2328; --muted: #6e7781; --accent: #0969da;
+  --ok: #1a7f37; --busy: #0969da; --warn: #9a6700; --error: #cf222e;
+  --chip: #f4f5f7; --line: #e3e5e8;
+}
+
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {

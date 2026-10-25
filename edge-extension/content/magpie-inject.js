@@ -75,6 +75,33 @@
     panelFrame.style.height = `${height}px`;
   });
 
+  // ── theme relay ─────────────────────────────────────────────────────────
+  // Magpie's theme lives on <html data-theme="dark|light">; when absent it
+  // follows the system. The panel iframe cannot see the host's attribute
+  // (isolated document, and prefers-color-scheme inside the iframe follows
+  // the OS, not Magpie's manual choice), so the content script resolves it:
+  // explicit attr wins, else the system query. Visual only — never used for
+  // any request or authentication.
+  function resolveHostTheme() {
+    const attr = document.documentElement.dataset.theme;
+    if (attr === "dark" || attr === "light") return attr;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  }
+
+  function pushThemeToPanel(frame) {
+    if (!frame || !frame.contentWindow) return;
+    try {
+      frame.contentWindow.postMessage(
+        { type: "OPENCSI_PANEL_THEME", theme: resolveHostTheme() },
+        EXTENSION_ORIGIN
+      );
+    } catch {
+      // the frame may not be ready; the URL param covers the initial paint
+    }
+  }
+
   // ── the card ────────────────────────────────────────────────────────────
   function buildCard(url) {
     // The .subscription-card class carries Magpie's own frame: padding,
@@ -87,12 +114,13 @@
     card.style.padding = "0";
     card.style.overflow = "hidden";
     const frame = document.createElement("iframe");
-    frame.src = url;
+    frame.src = `${url}?theme=${resolveHostTheme()}`;
     frame.title = "OpenCSI";
     frame.setAttribute("aria-label", "OpenCSI 公司模型服务用量");
     frame.style.cssText = "display:block;width:100%;height:150px;border:0";
     card.appendChild(frame);
     panelFrame = frame;
+    frame.addEventListener("load", () => pushThemeToPanel(frame));
     return card;
   }
 
@@ -166,6 +194,13 @@
     card.dataset.observing = gridObserver && observedGrid !== null &&
       observedGrid.isConnected ? "1" : "0";
   }
+
+  // Magpie flips data-theme when the user changes it in Settings; relay at
+  // once so the card follows without a reload.
+  new MutationObserver(() => pushThemeToPanel(panelFrame)).observe(
+    document.documentElement,
+    { attributes: true, attributeFilter: ["data-theme"] }
+  );
 
   function start() {
     if (window.__opencsiUsageCardInstalled) {

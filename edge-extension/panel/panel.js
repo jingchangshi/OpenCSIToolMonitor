@@ -48,6 +48,26 @@
   let lastSnapshot = null;
   let lastSentHeight = 0;
 
+  // ── visual theme ────────────────────────────────────────────────────────
+  // The card follows Magpie's theme, not the OS: the host page relays its
+  // resolved light/dark (URL param for the first paint, postMessage for live
+  // changes). Strictly validated and strictly visual — no other use.
+  function applyTheme(theme) {
+    if (theme !== "dark" && theme !== "light") return;
+    document.documentElement.dataset.opencsiTheme = theme;
+  }
+  try {
+    applyTheme(new URLSearchParams(location.search).get("theme"));
+  } catch {
+    /* no or malformed param: CSS falls back to prefers-color-scheme */
+  }
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    if (event.origin !== "http://129.153.118.58:3430") return;
+    const data = event.data;
+    if (data && data.type === "OPENCSI_PANEL_THEME") applyTheme(data.theme);
+  });
+
   // ── height reporting ────────────────────────────────────────────────────
   function postHeight() {
     const height = Core.resize.clampPanelHeight(
