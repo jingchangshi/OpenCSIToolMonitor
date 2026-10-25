@@ -49,7 +49,15 @@ body {
   font-size: 12.5px;
   line-height: 1.4;
 }
-.panel { display: flex; flex-direction: column; gap: 5px; }
+/* The injector zeroes the host .subscription-card's own padding (it is
+   10px 12px 11px in Magpie) so the two never double up — which makes this
+   the sole owner of the interior padding. Same metrics as the native card,
+   read from app.css, so the content sits exactly where Magpie's own cards
+   put theirs. */
+.panel {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 10px 12px 11px;
+}
 .hidden { display: none !important; }
 .spacer { flex: 1; }
 .muted { color: var(--muted); font-size: 11px; }
@@ -78,7 +86,7 @@ body {
    them when a longer value would squeeze either below readability. */
 .numbers {
   display: flex; flex-wrap: wrap; align-items: baseline;
-  gap: 4px 12px; padding-top: 2px;
+  gap: 4px 12px; padding: 3px 0 2px;
 }
 .metric { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .metric.right { text-align: right; align-items: flex-end; }
