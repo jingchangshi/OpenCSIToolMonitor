@@ -1,12 +1,9 @@
-/* panel.css — the compact summary card, styled to sit beside Magpie's native
-   usage cards: neutral background, ~10px radius, 1px light border, compact
-   padding, one accent colour. Single layer — the iframe body IS the card, so
-   there is no "outer card + inner blue card" stack. Theme follows
-   prefers-color-scheme only; nothing reads Magpie's internals. */
+/* panel.css — the OpenCSI card's inside, designed to live inside Magpie's
+   native .subscription-card frame: that frame carries the border, radius,
+   background and padding, so this stylesheet stays frame-less (transparent
+   background, no border, no outer padding) and lays out the content only.
+   Theme follows prefers-color-scheme, matching Magpie's light/dark tokens. */
 :root {
-  --bg: #ffffff;
-  --chip: #f4f5f7;
-  --line: #e3e5e8;
   --text: #1f2328;
   --muted: #6e7781;
   --accent: #0969da;
@@ -14,12 +11,11 @@
   --busy: #0969da;
   --warn: #9a6700;
   --error: #cf222e;
+  --chip: #f4f5f7;
+  --line: #e3e5e8;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #161b22;
-    --chip: #21262d;
-    --line: #30363d;
     --text: #e6edf3;
     --muted: #8b949e;
     --accent: #58a6ff;
@@ -27,85 +23,79 @@
     --busy: #58a6ff;
     --warn: #d29922;
     --error: #f85149;
+    --chip: #21262d;
+    --line: #30363d;
   }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
   font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
-  background: var(--bg);
+  background: transparent; /* the .subscription-card frame shows through */
   color: var(--text);
-  font-size: 13px;
-  line-height: 1.45;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  overflow: hidden; /* the radius clips; scroll lives in the model list */
+  font-size: 12.5px;
+  line-height: 1.4;
 }
-.panel { padding: 10px 14px 8px; display: flex; flex-direction: column; gap: 6px; }
+.panel { display: flex; flex-direction: column; gap: 5px; }
 .hidden { display: none !important; }
 .spacer { flex: 1; }
-.muted { color: var(--muted); font-size: 11.5px; }
+.muted { color: var(--muted); font-size: 11px; }
 
-.head { display: flex; align-items: center; gap: 7px; }
-.title { font-weight: 600; font-size: 13.5px; }
-.badge {
-  font-size: 10.5px; color: var(--muted);
-  border: 1px solid var(--line); border-radius: 999px; padding: 0 7px;
-  line-height: 16px;
-}
+.head { display: flex; align-items: center; gap: 6px; }
+.title { font-weight: 600; font-size: 12.5px; }
+.src { font-size: 10.5px; color: var(--muted); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.state { font-size: 12px; font-weight: 600; }
-.subtle {
-  background: none; border: 0; padding: 1px 4px; cursor: pointer;
-  color: var(--muted); font: inherit; font-size: 11.5px; border-radius: 5px;
-}
-.subtle:hover { color: var(--text); background: var(--chip); }
+.state { font-size: 11.5px; font-weight: 600; }
 
 .reason {
-  background: var(--chip); border-radius: 8px; padding: 5px 10px;
-  font-size: 12px; color: var(--muted);
+  background: var(--chip); border-radius: 6px; padding: 4px 8px;
+  font-size: 11.5px; color: var(--muted);
 }
 .reason.error { color: var(--error); }
 .reason.warn { color: var(--warn); }
 
-.numbers { display: flex; align-items: flex-end; gap: 16px; padding: 0 2px; }
-.metric { display: flex; flex-direction: column; gap: 0; min-width: 0; }
-.metric.right { margin-left: auto; text-align: right; }
-.label { font-size: 11.5px; color: var(--muted); }
+.numbers { display: flex; flex-direction: column; gap: 5px; }
+.metric { display: flex; flex-direction: column; gap: 0; }
+.label { font-size: 11px; color: var(--muted); }
 .big {
-  font-size: 24px; font-weight: 700; line-height: 1.25;
-  font-variant-numeric: tabular-nums; color: var(--accent);
-  white-space: nowrap;
+  font-size: 19px; font-weight: 700; line-height: 1.3;
+  font-variant-numeric: tabular-nums; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.metric.right .big { color: var(--text); }
 
-.sub { font-size: 12.5px; color: var(--text); padding: 0 2px; }
-.sub.detail { color: var(--muted); font-size: 11.5px; margin-top: -4px; }
-
+.sub { font-size: 12px; padding: 0 1px; }
 .model-rows { display: flex; flex-direction: column; gap: 1px; }
-.model-rows.expanded { overflow-y: auto; max-height: 264px; }
+.model-rows.expanded { overflow-y: auto; max-height: 300px; }
 .model-row {
-  display: flex; align-items: baseline; gap: 8px; padding: 2px 6px;
-  border-radius: 6px; font-size: 12.5px;
+  display: flex; align-items: baseline; gap: 6px; padding: 1px 4px;
+  border-radius: 5px; font-size: 12px;
 }
 .model-row:nth-child(odd) { background: var(--chip); }
 .model-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-row .tok { font-variant-numeric: tabular-nums; color: var(--muted); }
-.model-row .cst {
-  font-variant-numeric: tabular-nums; width: 84px; text-align: right;
-}
+.model-row .cst { font-variant-numeric: tabular-nums; width: 68px; text-align: right; }
 .model-row.flat .name::after {
-  content: "包月"; margin-left: 6px; font-size: 10px; color: var(--muted);
+  content: "包月"; margin-left: 5px; font-size: 9.5px; color: var(--muted);
   border: 1px solid var(--muted); border-radius: 4px; padding: 0 3px;
 }
 
-.foot { display: flex; align-items: center; gap: 4px; }
-.link {
-  background: none; border: 0; color: var(--accent); cursor: pointer;
-  font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px;
+.viewall {
+  background: none; border: 0; cursor: pointer; color: var(--accent);
+  font: inherit; font-size: 11.5px; text-align: left; padding: 1px 4px;
+  border-radius: 5px;
 }
-.link:hover { background: var(--chip); }
-.link.action {
-  color: #fff; background: var(--accent); font-weight: 600; padding: 3px 10px;
+.viewall:hover { background: var(--chip); }
+
+.foot { display: flex; align-items: center; gap: 2px; }
+.iconlink {
+  background: none; border: 0; cursor: pointer; color: var(--muted);
+  font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 5px;
 }
-.link.action:hover { filter: brightness(1.08); background: var(--accent); }
+.iconlink:hover { color: var(--text); background: var(--chip); }
+.action {
+  align-self: stretch;
+  background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+  font: inherit; font-size: 12px; font-weight: 600; padding: 5px 10px;
+  cursor: pointer;
+}
+.action:hover { filter: brightness(1.08); }

@@ -238,7 +238,12 @@ function getSnapshot({ force = false } = {}) {
 // A narrow handle for extension-page UIs and the E2E harness: injection
 // entries only, no data. The popup drives these through retryInject messages;
 // the harness drives them directly.
-self.__opencsiSw = { injectIntoTab, injectIntoOpenMagpieTabs, isMagpieUrl };
+self.__opencsiSw = {
+  injectIntoTab,
+  injectIntoOpenMagpieTabs,
+  isMagpieUrl,
+  authState: () => auth.state,
+};
 
 // ── messages ───────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

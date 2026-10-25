@@ -15,16 +15,15 @@
   const REFRESH_MS = 5 * 60 * 1000;
   const CLICK_THROTTLE_MS = 3000;
   const MAGPIE_ORIGIN = "http://129.153.118.58:3430";
+  const CARD_VISIBLE_ROWS = 2; // the grid card is narrow: two model rows by default
 
   const el = (id) => document.getElementById(id);
   const ui = {
     dot: el("dot"),
-    state: el("state"),
     reason: el("reason"),
     todayTokens: el("todayTokens"),
     todayCost: el("todayCost"),
     subLine: el("subLine"),
-    freshLine: el("freshLine"),
     modelRows: el("modelRows"),
     expandBtn: el("expandBtn"),
     updated: el("updated"),
@@ -83,7 +82,7 @@
   // ── rendering ───────────────────────────────────────────────────────────
   function render(snapshot) {
     if (!snapshot) {
-      ui.state.textContent = "暂不可用";
+      ui.dot.title = "暂不可用";
       ui.reason.textContent = "无法获得用量数据，请点击「刷新」重试";
       ui.reason.className = "reason error";
       postHeight();
@@ -94,9 +93,10 @@
       label: snapshot.state,
       color: "var(--muted)",
     };
+    // The state's whole surface on the compact card: the dot's colour and
+    // its tooltip carry the label.
     ui.dot.style.background = meta.color;
-    ui.state.textContent = meta.label;
-    ui.state.style.color = meta.color;
+    ui.dot.title = meta.label;
 
     const showReason =
       snapshot.lastError || snapshot.recovery || (snapshot.today && snapshot.today.note);
@@ -141,18 +141,14 @@
     const models = today.models || [];
     ui.modelRows.textContent = "";
     // The container starts `hidden` in the markup and its visibility is owned
-    // here: a ranking is rendered for 2+ models only, and forgetting to unhide
-    // would shrink the card while the rows quietly exist underneath.
+    // here: a ranking is rendered for 2+ models only.
     ui.modelRows.classList.toggle("hidden", models.length <= 1);
     if (models.length <= 1) return;
 
-    if (models.length <= 3 && !expanded) {
-      ui.modelRows.classList.remove("expanded");
-      for (const model of models) ui.modelRows.appendChild(modelRow(model));
-      return;
-    }
-    const rows = expanded ? models : models.slice(0, 3);
-    ui.modelRows.classList.add("expanded");
+    // Default shows the top TWO models (task §6.3); 查看全部 expands to all,
+    // scrolling internally so the card stays inside Magpie's height budget.
+    const rows = expanded ? models : models.slice(0, CARD_VISIBLE_ROWS);
+    ui.modelRows.classList.toggle("expanded", expanded);
     for (const model of rows) ui.modelRows.appendChild(modelRow(model));
   }
 
@@ -183,7 +179,7 @@
     // NOT_READY and friends carry their own note in the reason line instead of
     // borrowing this one.
     if (snapshot.state === "OK" && (today.tokens || 0) === 0) {
-      sub.textContent = "今日暂无模型使用记录";
+      sub.textContent = "今日暂无模型用量";
       return;
     }
     if (models.length === 1) {
@@ -213,18 +209,20 @@
     ui.updated.textContent = text;
 
     // The server's own sync stamp is a different fact from our query time and
-    // is labelled as such, shown only when it parses.
+    // is labelled as such — carried as the updated line's tooltip, because
+    // the compact card has no separate line for it.
     const freshTime = snapshot.dataFreshTime
       ? Core.date.shanghaiClock(snapshot.dataFreshTime)
       : null;
-    ui.freshLine.textContent =
-      freshTime && freshTime !== "--:--" ? `服务端数据截至 ${freshTime}` : "";
-    ui.freshLine.classList.toggle("hidden", !ui.freshLine.textContent);
+    ui.updated.title =
+      freshTime && freshTime !== "--:--"
+        ? `服务端数据截至 ${freshTime} · 统计时区 Asia/Shanghai`
+        : `统计时区 Asia/Shanghai`;
 
     const models = (snapshot.today && snapshot.today.models) || [];
-    const hasMore = models.length > 3;
+    const hasMore = models.length > CARD_VISIBLE_ROWS;
     ui.expandBtn.hidden = !hasMore;
-    ui.expandBtn.textContent = expanded ? `收起` : `展开全部（${models.length}）`;
+    ui.expandBtn.textContent = expanded ? `收起` : `查看全部（${models.length}）`;
   }
 
   // ── interactions ────────────────────────────────────────────────────────
@@ -233,7 +231,7 @@
     render(snapshot);
   }
 
-  function manualRefresh() {
+    function manualRefresh() {
     const now = Date.now();
     if (now - lastRefreshClick < CLICK_THROTTLE_MS) return; // no API hammering
     lastRefreshClick = now;
@@ -242,11 +240,12 @@
   }
 
   ui.refreshBtn.addEventListener("click", manualRefresh);
-  ui.loginBtn.addEventListener("click", () => send({ type: "openLogin" }));
   ui.expandBtn.addEventListener("click", () => {
     expanded = !expanded;
     render(lastSnapshot); // re-render only: no API call, no iframe rebuild
   });
+  ui.loginBtn.addEventListener("click", () => send({ type: "openLogin" }));
+
   el("diagLink").addEventListener("click", () => {
     window.open(chrome.runtime.getURL("panel/diag.html"), "_blank");
   });

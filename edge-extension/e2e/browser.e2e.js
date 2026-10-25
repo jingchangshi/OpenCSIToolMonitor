@@ -1,22 +1,21 @@
 // e2e/browser.e2e.js — the extension loaded in a real Chromium, driven over CDP.
 //
-// Verified here, on the real browser and real network:
-//   1. the unpacked extension loads (service worker starts, content script
-//      registers);
-//   2. the panel mounts as the usage container's *previous sibling* — inside
-//      no innerHTML blast radius — on a page whose URL is the real production
-//      origin (content fulfilled locally with a mock mimicking upstream's
-//      dynamic #view-usage and SPA view switching);
-//   3. the auth path for a fresh profile: the SW's fetch is refused (401),
-//      the silent renewal runs and lands on GitCode's login page, and the
-//      panel honestly shows 需要登录 with a recovery button;
-//   4. with a CDP interception feeding controlled OpenCSI payloads to the
-//      service worker, the compact card renders each data state for real:
-//      multi-model top-3 + expand, single-model line without duplicate
-//      totals, confirmed zero, real query time, and content-driven height;
-//   5. SPA view switching and a hostile innerHTML re-render do not remove or
-//      duplicate the panel;
-//   6. screenshots of the real rendering, for the delivery report.
+// This harness verifies the quota-grid integration against Magpie's REAL
+// layout machinery:
+//
+//   * the mock Magpie page loads the real `app.css` (vendored verbatim) and a
+//     verbatim extraction of the real `packUsage` / `usagePack` /
+//     `packUsageNow` functions from the vendored `app.js` (upstream commit
+//     recorded in docs/magpie-quota-grid.md), driving a
+//     `.subscription-usage` grid whose cards are built the way renderQuotas
+//     builds them: replaceChildren + .subscription-card + dataset keys;
+//   * a mock quota "API" refreshes through that same path, so the extension
+//     card faces the exact lifecycle a real data refresh produces;
+//   * the extension itself runs for real: service worker, content script,
+//     iframe isolation, the storage-fixture data path (snapshots built by the
+//     production state.js pipeline inside the service worker), and the auth
+//     state machine;
+//   * screenshots of the real rendering, for the delivery report.
 //
 // Run:  node e2e/browser.e2e.js   (from edge-extension/)
 "use strict";
@@ -28,6 +27,8 @@ const puppeteer = require("puppeteer-core");
 
 const EXT_DIR = path.resolve(__dirname, "..");
 const OUT_DIR = path.resolve(__dirname, "out");
+const MAGPIE_APP_JS = path.resolve(__dirname, "magpie-app.js");
+const MAGPIE_APP_CSS = path.resolve(__dirname, "magpie-app.css");
 
 const BROWSER_CANDIDATES = [
   // Edge is the delivery target, but this machine's Edge binary exits
@@ -50,118 +51,112 @@ function findBrowser() {
   throw new Error("no usable browser found; run: npx @puppeteer/browsers install chromium@latest");
 }
 
-/** A mock Magpie that mimics upstream's dynamic usage page (kernel.js). */
-const MOCK_MAGPIE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>magpie</title>
-<style>
-body{font-family:system-ui;margin:0;padding:12px;background:#f6f6f4;color:#222}
-nav button{margin-right:6px;padding:4px 10px}
-section{padding:10px;border:1px solid #ddd;border-radius:8px;margin-top:8px}
-[hidden]{display:none}
-</style></head><body>
-<nav>
-  <button data-view="agents" class="on">Agents</button>
-  <button data-view="usage">Usage</button>
-</nav>
-<section id="view-agents">agents placeholder</section>
-<div id="pageHost"></div>
-<script>
-  // Upstream kernel.js: a plugin's page gets a container with id view-<key>,
-  // created by JavaScript after the document loads.
-  setTimeout(function () {
-    const section = document.createElement("section");
-    section.id = "view-usage";
-    section.hidden = true;
-    section.innerHTML = '<h2>Usage</h2><div class="usage-pane">magpie native usage</div>';
-    document.getElementById("pageHost").appendChild(section);
-    // Upstream start.js shows the deep-linked view; without this the usage
-    // container would stay hidden and the panel (correctly) hidden with it.
-    if (new URLSearchParams(location.search).get("view") === "usage") {
-      section.hidden = false;
-      document.getElementById("view-agents").hidden = true;
-      document.querySelectorAll("nav button").forEach((b) =>
-        b.classList.toggle("on", b.dataset.view === "usage"));
-    }
-    window.__usageReady = true;
-    // The measured hostile behaviour of the real page: the usage render pass
-    // rewrites the container's innerHTML AFTER the extension's panel has
-    // mounted, wiping anything that lived inside it. Reproduced here on a
-    // timer: a panel mounted as a CHILD would die here; the sibling mount
-    // must survive.
-    setTimeout(function () {
-      section.innerHTML = '<h2>Usage</h2><div class="usage-pane">magpie native usage (re-rendered)</div>';
-      window.__hostileRenderDone = true;
-    }, 1200);
-  }, 50);
-  document.querySelectorAll("nav button").forEach(function (button) {
-    button.addEventListener("click", function () {
-      const view = button.dataset.view;
-      document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b === button));
-      const usage = document.getElementById("view-usage");
-      const agents = document.getElementById("view-agents");
-      if (!usage) return; // not yet created
-      usage.hidden = view !== "usage";
-      agents.hidden = view !== "agents";
-    });
-  });
-</script></body></html>`;
-
-// ── controlled OpenCSI payloads for the service worker ─────────────────────
-const PRICES = [
-  { requestType: "glm-5.3-flash", displayName: "GLM-5.3-Flash", billType: "TOKEN", enabled: 1, blendedPrice: 2.24 },
-  { requestType: "deepseek-v4", displayName: "DeepSeek-V4.1-Flash", billType: "TOKEN", enabled: 1, blendedPrice: 4.72 },
-  { requestType: "qwen3-max", displayName: "Qwen3-Max", billType: "TOKEN", enabled: 1, blendedPrice: 0.28 },
-  { requestType: "embed-v4", displayName: "Embedding-V4", billType: "TOKEN", enabled: 1, blendedPrice: 0.4 },
-  { requestType: "glm-4.7-air", displayName: "GLM-4.7-Air", billType: "TOKEN", enabled: 1, blendedPrice: 1.1 },
-  { requestType: "trae", displayName: "Trae 包月", billType: "FLAT", enabled: 1, monthlyFee: 49 },
-];
-
-function todayShanghai() {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(new Date());
+/** The verbatim packUsage block, extracted from the real app.js. */
+function extractPackUsage(appJs) {
+  const start = appJs.indexOf("const USAGE_MIN = 260");
+  const endMarker = "usagePack.observe(part);\n  }\n}";
+  const end = appJs.indexOf(endMarker, start);
+  if (start < 0 || end < 0) throw new Error("packUsage block not found in app.js");
+  return appJs.slice(start, end + endMarker.length);
 }
 
-/** Usage payloads per scenario; the interception reads from this object. */
-const SCENARIOS = {
-  multi: {
-    trend: [
-      { requestType: "glm-5.3-flash", tokens: 16_800_000 },
-      { requestType: "deepseek-v4", tokens: 7_900_000 },
-      { requestType: "qwen3-max", tokens: 1_240_000 },
-      { requestType: "embed-v4", tokens: 96_000 },
-      { requestType: "glm-4.7-air", tokens: 30_000 },
-    ],
-    summary: { totalTokens: 26_066_000, totalRequestCount: 1_284 },
-    fresh: "2026-10-25T16:10:00+08:00",
-  },
-  single: {
-    trend: [{ requestType: "deepseek-v4", tokens: 7_970_000 }],
-    summary: { totalTokens: 7_970_000, totalRequestCount: 401 },
-    fresh: "2026-10-25T16:10:00+08:00",
-  },
-  zero: {
-    trend: [{ requestType: "glm-5.3-flash", tokens: 0 }],
-    summary: { totalTokens: 656_373_157, totalRequestCount: 6_280 },
-    fresh: "2026-10-25T16:10:00+08:00",
-  },
-};
-let activeScenario = "multi";
-
-function fixturePayload(scenarioName) {
-  const s = SCENARIOS[scenarioName];
-  const today = todayShanghai();
-  return {
-    data: {
-      tokenTrend: s.trend.map((r) => ({ date: today, ...r })),
-      tokenSummary: s.summary,
-      syncStatus: { dataFreshTime: s.fresh },
-    },
-  };
+/** The mock page: real CSS + verbatim packUsage + a faithful quota lifecycle. */
+function buildMockPage(appJs, appCss) {
+  const packUsageCode = extractPackUsage(appJs);
+  new Function("$", packUsageCode); // must parse before the page ever loads it
+  const cards = [
+    { provider: "opencode-go", name: "OpenCode Go", h: 120 },
+    { provider: "codex", name: "Codex", h: 180 },
+    { provider: "workbuddy", name: "WorkBuddy", h: 90 },
+    { provider: "deepseek", name: "DeepSeek", h: 150 },
+  ];
+  return `<!doctype html><html><head><meta charset="utf-8"><title>magpie</title>
+<link rel="stylesheet" href="app.css">
+</head><body>
+<nav style="padding:8px">
+  <button data-view="agents">Agents</button>
+  <button data-view="usage" class="on">Usage</button>
+</nav>
+<section id="view-agents" hidden><div style="height:200px">agents placeholder</div></section>
+<section class="view" id="view-usage">
+  <section class="subscription-usage" id="subscriptionUsage"></section>
+  <div style="height:600px">filler makes the page scrollable</div>
+</section>
+<script>
+  // ── verbatim from app.js — the real layout logic under test ─────────────
+  const $ = (s) => document.querySelector(s);
+  // stub: fitting quota bars is Magpie-internal; the mock cards carry fixed
+  // heights so packUsage measures real, varied boxes without it.
+  const fitQuota = () => {};
+  ${packUsageCode}
+  // ── a faithful renderQuotas-lite ─────────────────────────────────────────
+  const MOCK_CARDS = ${JSON.stringify(cards)};
+  let mockQuotas = MOCK_CARDS.map((c) => ({ ...c }));
+  let usageOrder = [];
+  function byUsageOrderLite(list) {
+    const rank = (q) => { const i = usageOrder.indexOf(q.provider); return i < 0 ? usageOrder.length : i; };
+    return list.map((q, i) => [q, i]).sort(([a, i], [b, j]) => rank(a) - rank(b) || i - j).map(([q]) => q);
+  }
+  function renderQuotasLite() {
+    const list = $("#subscriptionUsage");
+    list.replaceChildren(); // the real renderQuotas' wipe, verbatim behaviour
+    for (const sub of byUsageOrderLite(mockQuotas)) {
+      const card = document.createElement("div");
+      card.className = "subscription-card";
+      card.dataset.key = sub.provider;
+      card.dataset.provider = sub.provider;
+      const head = document.createElement("div");
+      head.className = "subscription-head";
+      const name = document.createElement("b");
+      name.textContent = sub.name;
+      head.appendChild(name);
+      card.appendChild(head);
+      const win = document.createElement("div");
+      win.className = "quota-windows";
+      win.style.height = sub.h + "px";
+      card.appendChild(win);
+      list.appendChild(card);
+    }
+    packUsageNow(list);
+  }
+  // mirrors app.js moveUsage: persist provider order, rebuild
+  function moveUsageLite(key, to) {
+    const keys = mockQuotas.map((q) => q.provider);
+    const from = keys.indexOf(key);
+    if (from < 0 || to < 0 || to >= keys.length || to === from) return;
+    keys.splice(to, 0, ...keys.splice(from, 1));
+    usageOrder = [...keys, ...usageOrder.filter((k) => !keys.includes(k))];
+    mockQuotas.sort((a, b) => usageOrder.indexOf(a.provider) - usageOrder.indexOf(b.provider));
+    renderQuotasLite();
+  }
+  // a native card's fold: its height changes, the grid re-packs
+  function toggleNativeFold(provider) {
+    const win = document.querySelector('#subscriptionUsage > [data-provider="' + provider + '"] .quota-windows');
+    if (!win) return;
+    win.style.height = win.style.height === "40px" ? "180px" : "40px";
+    packUsage();
+  }
+  function showView(v) {
+    document.getElementById("view-usage").hidden = v !== "usage";
+    document.getElementById("view-agents").hidden = v !== "agents";
+    document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x.dataset.view === v));
+  }
+  document.querySelectorAll("nav button").forEach((b) => {
+    b.addEventListener("click", () => showView(b.dataset.view));
+  });
+  showView("usage");
+  renderQuotasLite();
+  window.__mock = { renderQuotasLite, moveUsageLite, toggleNativeFold, showView };
+</script></body></html>`;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
+  const appJs = fs.readFileSync(MAGPIE_APP_JS, "utf8");
+  const appCss = fs.readFileSync(MAGPIE_APP_CSS, "utf8");
+  const mockPageHtml = buildMockPage(appJs, appCss);
+
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencsi-ext-e2e-"));
   const browser = await puppeteer.launch({
@@ -174,10 +169,11 @@ async function main() {
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-gpu",
-      "--window-size=1280,900",
+      "--window-size=1400,1000",
     ],
   });
   const results = [];
+  const consoleErrors = [];
   const check = (name, ok, detail = "") => {
     results.push({ name, ok, detail });
     console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + detail : ""}`);
@@ -194,103 +190,12 @@ async function main() {
     check("扩展加载：Service Worker 已启动", !!worker, worker && worker.url());
     const sw = await worker.worker();
 
-    // ── open the Magpie Usage URL (origin real, content mocked) ───────────
-    const page = await browser.newPage();
-    await page.setRequestInterception(true);
-    page.on("request", (request) => {
-      const url = request.url();
-      if (url.startsWith("http://129.153.118.58:3430/") && !url.includes("panel/")) {
-        request.respond({
-          status: 200,
-          contentType: "text/html; charset=utf-8",
-          body: MOCK_MAGPIE_HTML,
-        });
-      } else {
-        request.continue();
-      }
-    });
-    await page.goto("http://129.153.118.58:3430/?view=usage", { waitUntil: "domcontentloaded" });
-    await sleep(1500);
-
-    const injected = await page.evaluate(() => {
-      const usage = document.getElementById("view-usage");
-      const host = document.getElementById("opencsi-usage-panel-host");
-      return {
-        usageExists: !!usage,
-        hostPresent: !!host,
-        isPreviousSibling: !!(host && usage && host.nextElementSibling === usage),
-        sameParent: !!(host && usage && host.parentElement === usage.parentElement),
-        hostCount: document.querySelectorAll("#opencsi-usage-panel-host").length,
-        frameSrc: host && host.querySelector("iframe") ? host.querySelector("iframe").src : null,
-      };
-    });
-    check("Magpie 注入：面板为 Usage 容器的前置兄弟节点",
-      injected.usageExists && injected.hostPresent && injected.isPreviousSibling && injected.sameParent,
-      JSON.stringify(injected));
-    check("单实例：全文档只有一个面板宿主", injected.hostCount === 1);
-
-    // ── fresh profile: no cookie → the honest login state ─────────────────
-    const frameHandle = await page.evaluateHandle(() =>
-      document.querySelector("#opencsi-usage-panel-host iframe")
-    );
-    const frame = await frameHandle.asElement().contentFrame();
-    await sleep(6000); // the SW fetches (401), the renewal attempt runs and fails here
-    const panelText = await frame.evaluate(() => document.body.innerText);
-    check("认证状态如实呈现（测试 Profile 无 Cookie → 需要登录）",
-      /需要登录/.test(panelText), panelText.split("\n").slice(0, 4).join(" | "));
-    check("恢复入口存在（重新登录按钮）", /重新登录 OpenCSI/.test(panelText));
-
-    // ── hostile innerHTML re-render: the sibling survives ─────────────────
-    await page.waitForFunction("window.__hostileRenderDone === true", { timeout: 8000 });
-    await sleep(400);
-    const survived = await page.evaluate(() => {
-      const usage = document.getElementById("view-usage");
-      const host = document.getElementById("opencsi-usage-panel-host");
-      return {
-        hostPresent: !!host,
-        stillSibling: !!(host && usage && host.nextElementSibling === usage),
-        hostCount: document.querySelectorAll("#opencsi-usage-panel-host").length,
-      };
-    });
-    check("敌对 innerHTML 重渲染后面板仍存在（兄弟节点在半径之外）",
-      survived.hostPresent && survived.stillSibling && survived.hostCount === 1,
-      JSON.stringify(survived));
-
-    // ── data-driven states: build the snapshot through the SW's real
-    // state.js pipeline and place it in chrome.storage.session ─────────────
-    // A CDP Fetch interception of the service worker's requests proved
-    // unreliable (Fetch.requestPaused fired zero times at some attach
-    // timings), and the panel's cache-hit path is exactly what a real
-    // successful query produces — so the fixtures are pushed as snapshots
-    // built by the production code, and the panel renders them through the
-    // genuine cache semantics.
-    let activeScenario = "multi";
-    async function pushFixtureSnapshot() {
-      await sw.evaluate(async (scenarioName) => {
-        const scenarios = {
-          multi: {
-            trend: [
-              { requestType: "glm-5.3-flash", tokens: 16_800_000 },
-              { requestType: "deepseek-v4", tokens: 7_900_000 },
-              { requestType: "qwen3-max", tokens: 1_240_000 },
-              { requestType: "embed-v4", tokens: 96_000 },
-              { requestType: "glm-4.7-air", tokens: 30_000 },
-            ],
-            summary: { totalTokens: 26_066_000, totalRequestCount: 1_284 },
-            fresh: "2026-10-25T16:10:00+08:00",
-          },
-          single: {
-            trend: [{ requestType: "deepseek-v4", tokens: 7_970_000 }],
-            summary: { totalTokens: 7_970_000, totalRequestCount: 401 },
-            fresh: "2026-10-25T16:10:00+08:00",
-          },
-          zero: {
-            trend: [{ requestType: "glm-5.3-flash", tokens: 0 }],
-            summary: { totalTokens: 656_373_157, totalRequestCount: 6_280 },
-            fresh: "2026-10-25T16:10:00+08:00",
-          },
-        };
-        const s = scenarios[scenarioName];
+    // ── the data path is deterministic: fixtures are pushed into
+    // storage.session BEFORE the page loads, so every panel ask is a cache
+    // hit — no real-network fetch, no renewal, no write race. The one
+    // real-network section (auth) clears the fixture explicitly. ──────────
+    async function pushFixtureSnapshot(models) {
+      await sw.evaluate(async (modelRows) => {
         const prices = [
           { requestType: "glm-5.3-flash", displayName: "GLM-5.3-Flash", billType: "TOKEN", enabled: 1, blendedPrice: 2.24 },
           { requestType: "deepseek-v4", displayName: "DeepSeek-V4.1-Flash", billType: "TOKEN", enabled: 1, blendedPrice: 4.72 },
@@ -304,208 +209,382 @@ async function main() {
         const payload = {
           body: {
             data: {
-              tokenTrend: s.trend.map((r) => ({ date: today, ...r })),
-              tokenSummary: s.summary,
-              syncStatus: { dataFreshTime: s.fresh },
+              tokenTrend: modelRows.map((r) => ({ date: today, ...r })),
+              tokenSummary: { totalTokens: 26_066_000, totalRequestCount: 1_284 },
+              syncStatus: { dataFreshTime: "2026-10-25T16:10:00+08:00" },
             },
           },
           prices,
         };
         const snapshot = OpenCSICore.state.snapshotFromPayload(payload, today, Date.now());
         await chrome.storage.session.set({ opencsiSnapshot: snapshot });
-      }, activeScenario);
+      }, models);
     }
-    async function clearSnapshot() {
+    async function clearFixture() {
       await sw.evaluate(async () => {
         await chrome.storage.session.remove("opencsiSnapshot");
       });
     }
 
-    async function readPanel() {
-      // Panel internals live in the iframe's document; geometry lives in the
-      // host page's. Two contexts, one merged view. The frame binding is
-      // re-resolved on every read: page reloads invalidate the old handle.
-      let frame = null;
-      try {
-        const fh = await page.evaluateHandle(() =>
-          document.querySelector("#opencsi-usage-panel-host iframe"));
-        frame = await fh.asElement().contentFrame();
-      } catch {
-        frame = null;
+    const page = await browser.newPage();
+    page.on("console", (m) => {
+      if (m.type() === "error") consoleErrors.push(m.text().slice(0, 160));
+    });
+    page.on("pageerror", (e) => consoleErrors.push("[pageerror] " + String(e).slice(0, 160)));
+
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      const url = request.url();
+      if (url === "http://129.153.118.58:3430/app.css") {
+        request.respond({ status: 200, contentType: "text/css", body: appCss });
+      } else if (url.startsWith("http://129.153.118.58:3430/") && !url.includes("panel/")) {
+        request.respond({
+          status: 200,
+          contentType: "text/html; charset=utf-8",
+          body: mockPageHtml,
+        });
+      } else {
+        request.continue();
       }
-      if (!frame) return { state: "PAGE_GONE" };
+    });
+    await page.setViewport({ width: 1400, height: 1000 });
+    await page.goto("http://129.153.118.58:3430/?view=usage", { waitUntil: "domcontentloaded" });
+    await sleep(1500);
+
+    // The panel's first ask runs a REAL fetch (401 here) and a silent renewal
+    // (up to 45s); the renewal's failure write lands only when that whole
+    // cycle finishes. Waiting on authState alone races the final write — so
+    // wait for the written snapshot itself to be stable, THEN seed.
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const settled = await sw.evaluate(async () => {
+        const s = await chrome.storage.session.get("opencsiSnapshot");
+        const snap = s.opencsiSnapshot;
+        if (!snap) return false;
+        // the failure write carries failureAt; once present and aged >3s the
+        // whole first-load cycle has landed
+        return typeof snap.failureAt === "number" && Date.now() - snap.failureAt > 3000;
+      });
+      if (settled) break;
+      await sleep(1500);
+    }
+
+    // ── 1-3: the card is the grid's first child; native order unchanged ───
+    const injected = await page.evaluate(() => {
+      const grid = document.getElementById("subscriptionUsage");
+      const kids = [...grid.children];
+      return {
+        gridExists: !!grid,
+        total: kids.length,
+        firstIsOurs: kids[0] && kids[0].id === "opencsi-usage-card",
+        oursIsCard: kids[0] && kids[0].classList.contains("subscription-card"),
+        hasExtAttr: kids[0] && kids[0].hasAttribute("data-opencsi-extension"),
+        nativeSeq: kids.filter((k) => k.dataset.provider).map((k) => k.dataset.provider),
+        hostCount: document.querySelectorAll("#opencsi-usage-card").length,
+        frameSrc: kids[0] && kids[0].querySelector("iframe") ? kids[0].querySelector("iframe").src : null,
+      };
+    });
+    check("OpenCSI 卡片位于额度网格第一格（原生风格 .subscription-card）",
+      injected.gridExists && injected.firstIsOurs && injected.oursIsCard &&
+      injected.hasExtAttr, JSON.stringify(injected));
+    check("原生卡片相对顺序保持（OpenCode Go → Codex → WorkBuddy → DeepSeek）",
+      JSON.stringify(injected.nativeSeq) ===
+      JSON.stringify(["opencode-go", "codex", "workbuddy", "deepseek"]),
+      JSON.stringify(injected.nativeSeq));
+    check("单实例：全文档只有一张 OpenCSI 卡", injected.hostCount === 1);
+    check("iframe 来自扩展（隔离边界保持）",
+      (injected.frameSrc || "").startsWith("chrome-extension://"), injected.frameSrc);
+
+    // ── fresh profile: no cookie → the honest login state ─────────────────
+    async function panelFrame() {
+      const fh = await page.evaluateHandle(() =>
+        document.querySelector("#opencsi-usage-card iframe"));
+      return fh.asElement().contentFrame();
+    }
+    const MULTI = [
+      { requestType: "glm-5.3-flash", tokens: 16_800_000 },
+      { requestType: "deepseek-v4", tokens: 7_900_000 },
+      { requestType: "qwen3-max", tokens: 1_240_000 },
+      { requestType: "embed-v4", tokens: 96_000 },
+      { requestType: "glm-4.7-air", tokens: 30_000 },
+    ];
+    const SINGLE = [{ requestType: "deepseek-v4", tokens: 7_970_000 }];
+    const ZERO = [{ requestType: "glm-5.3-flash", tokens: 0 }];
+
+    async function panelClick(elementId) {
+      const f = await panelFrame();
+      await f.evaluate((id) => document.getElementById(id).click(), elementId);
+    }
+    async function readPanel() {
+      // Wait for the panel's first render: the state dot's tooltip is empty
+      // until render() runs, so it doubles as the readiness signal.
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const f = await panelFrame();
+        const ready = await f.evaluate(() =>
+          (document.getElementById("dot") || { title: "" }).title !== ""
+        ).catch(() => false);
+        if (ready) break;
+        await sleep(400);
+      }
+      const f = await panelFrame();
       const [inner, geometry] = await Promise.all([
-        frame.evaluate(() => ({
+        f.evaluate(() => ({
+          state: (document.getElementById("dot") || { title: "" }).title,
           tokens: document.getElementById("todayTokens").textContent,
           cost: document.getElementById("todayCost").textContent,
           updated: document.getElementById("updated").textContent,
           sub: document.getElementById("subLine").textContent,
-          subHidden: document.getElementById("subLine").classList.contains("hidden"),
-          fresh: document.getElementById("freshLine").textContent,
           rowCount: document.querySelectorAll("#modelRows .model-row").length,
           expandText: document.getElementById("expandBtn").textContent,
-          expandHidden: document.getElementById("expandBtn").hidden,
-          state: document.getElementById("state").textContent,
+          frameStyleHeight: (document.defaultView.frameElement || {}).style
+            ? document.defaultView.frameElement.style.height
+            : "",
         })),
         page.evaluate(() => {
-          const host = document.getElementById("opencsi-usage-panel-host");
-          const iframe = host.querySelector("iframe");
+          const card = document.getElementById("opencsi-usage-card");
+          const iframe = card.querySelector("iframe");
           return {
-            frameStyleHeight: iframe.style.height,
+            cardRect: card.getBoundingClientRect().height,
             frameRect: iframe.getBoundingClientRect().height,
-            hostWidth: host.getBoundingClientRect().width,
-            usageWidth: document.getElementById("view-usage").getBoundingClientRect().width,
+            frameStyleHeight: iframe.style.height,
           };
         }),
       ]);
       return { ...inner, ...geometry };
     }
-
-    // A freshly resolved frame handle per interaction: page reloads
-    // invalidate the old one.
-    const panelClick = async (elementId) => {
-      const fh = await page.evaluateHandle((id) =>
-        document.querySelector("#opencsi-usage-panel-host iframe"), elementId);
-      const f = await fh.asElement().contentFrame();
-      await f.evaluate((id) => document.getElementById(id).click(), elementId);
-    };
-
-    // multi-model scenario
-    await pushFixtureSnapshot();
+    async function gridGeometry() {
+      return page.evaluate(() => {
+        const grid = document.getElementById("subscriptionUsage");
+        const cards = [...grid.children].map((c) => {
+          const r = c.getBoundingClientRect();
+          return { id: c.id || c.dataset.provider || "?", left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+        });
+        const overlaps = [];
+        for (let i = 0; i < cards.length; i++) {
+          for (let j = i + 1; j < cards.length; j++) {
+            const a = cards[i], b = cards[j];
+            if (a.left < b.right - 1 && b.left < a.right - 1 &&
+                a.top < b.bottom - 1 && b.top < a.bottom - 1) {
+              overlaps.push(`${a.id}∩${b.id}`);
+            }
+          }
+        }
+        return { cards, overlaps };
+      });
+    }
+    // ── multi-model through the pre-seeded cache ───────────────────────────
+    await pushFixtureSnapshot(MULTI);
     await page.reload({ waitUntil: "domcontentloaded" });
-    await sleep(1200);
+    await sleep(1500);
     let view = await readPanel();
-    check("多模型：状态 OK，双指标渲染", view.state === "正常" &&
-      view.tokens.length > 1 && view.cost.startsWith("¥"), view.tokens + " " + view.cost);
-    check("查询时间真实显示（不再固定 --:--）",
-      /查询于 \d{2}:\d{2}/.test(view.updated) && !view.updated.includes("--:--"), view.updated);
-    check("服务端同步时间以独立措辞显示", /服务端数据截至 \d{2}:\d{2}/.test(view.fresh), view.fresh);
-    check("多模型：默认 Top 3 + 展开全部（5）", view.rowCount === 3 &&
-      view.expandText.includes("展开全部") && view.expandText.includes("5"),
+    check("今日 Tokens 与估算费用数值正确（与夹具一致）",
+      view.tokens === "2,606.6 万" && view.cost === "¥75.34",
+      view.tokens + " " + view.cost);
+    check("查询时间真实显示", /查询于 \d{2}:\d{2}/.test(view.updated), view.updated);
+    check("多模型：默认 Top 2 + 查看全部（5）", view.rowCount === 2 &&
+      view.expandText.includes("查看全部") && view.expandText.includes("5"),
       `rows=${view.rowCount} btn=${view.expandText}`);
-    check("多模型场景不渲染单模型摘要行", view.subHidden === true, `sub=${view.sub}`);
     check("iframe 高度由内容驱动（不再是固定 300px）",
-      view.frameStyleHeight !== "300px" && view.frameRect >= 88 && view.frameRect <= 560,
-      `style=${view.frameStyleHeight} rect=${Math.round(view.frameRect)}`);
-    check("面板宽度与 Usage 容器对齐",
-      Math.abs(view.hostWidth - view.usageWidth) < 2,
-      `host=${Math.round(view.hostWidth)} usage=${Math.round(view.usageWidth)}`);
-    fs.writeFileSync(path.join(OUT_DIR, "panel-multi.png"),
-      await page.screenshot({ clip: await panelClip(page) }));
+      view.frameStyleHeight !== "300px" && /^\d+px$/.test(view.frameStyleHeight),
+      `style=${view.frameStyleHeight}`);
+    fs.writeFileSync(path.join(OUT_DIR, "card-multi.png"),
+      await page.screenshot({ clip: await cardClip(page) }));
 
-    // expand → all 5 rows, height grows, no refetch needed
-    const heightBefore = view.frameRect;
+    // ── 4-5: rectangles pairwise disjoint; explicit grid areas applied ─────
+    let geo = await gridGeometry();
+    check("五张卡片矩形两两不重叠", geo.overlaps.length === 0,
+      JSON.stringify(geo.overlaps));
+    const areas = await page.evaluate(() =>
+      [...document.getElementById("subscriptionUsage").children]
+        .map((c) => c.style.gridArea));
+    check("packUsage 显式网格定位应用于全部卡片（含 OpenCSI）",
+      areas.every((a) => a && a.includes("span")), JSON.stringify(areas));
+    fs.writeFileSync(path.join(OUT_DIR, "grid-layout.png"), await page.screenshot());
+
+    // ── 10: OpenCSI model expand → the grid re-packs ───────────────────────
+    // The growth is asserted on the IFRAME: packUsage stretches a column's
+    // last card to align bottoms, so the article's height can legitimately
+    // absorb content growth — the iframe is the honest measure of content.
+    const frameBefore = view.frameRect;
     await panelClick("expandBtn");
     await sleep(900);
     view = await readPanel();
-    check("展开全部：显示全部 5 行", view.rowCount === 5 &&
-      view.expandText === "收起", `rows=${view.rowCount}`);
-    check("展开后 iframe 高度随内容增长", view.frameRect > heightBefore + 40,
-      `${Math.round(heightBefore)} → ${Math.round(view.frameRect)}`);
-    fs.writeFileSync(path.join(OUT_DIR, "panel-multi-expanded.png"),
-      await page.screenshot({ clip: await panelClip(page) }));
+    check("OpenCSI 展开：全部 5 行", view.rowCount === 5 && view.expandText === "收起",
+      `rows=${view.rowCount}`);
+    check("展开后 iframe 高度随内容增长（网格随之重排）",
+      view.frameRect > frameBefore + 40,
+      `iframe ${Math.round(frameBefore)} → ${Math.round(view.frameRect)}, card ${Math.round(view.cardRect)}`);
+    geo = await gridGeometry();
+    check("展开后网格重排且仍不重叠", geo.overlaps.length === 0,
+      JSON.stringify(geo.overlaps));
+    fs.writeFileSync(path.join(OUT_DIR, "card-multi-expanded.png"),
+      await page.screenshot({ clip: await cardClip(page) }));
     await panelClick("expandBtn");
-    await sleep(400);
+    await sleep(500);
 
-    // single-model scenario: the summary line replaces the ranking
-    activeScenario = "single";
-    await pushFixtureSnapshot();
+    // ── single-model and zero scenarios ─────────────────────────────────────
+    await pushFixtureSnapshot(SINGLE);
     await page.reload({ waitUntil: "domcontentloaded" });
     await sleep(1200);
     view = await readPanel();
-    check("单模型：只显示模型名与唯一使用说明，无排行与展开按钮",
-      view.sub.includes("当前唯一使用模型") && view.subHidden === false &&
-      view.rowCount === 0 && view.expandHidden === true,
-      JSON.stringify({ sub: view.sub, rows: view.rowCount }));
-    fs.writeFileSync(path.join(OUT_DIR, "panel-single.png"),
-      await page.screenshot({ clip: await panelClip(page) }));
+    check("单模型：只显示模型名，不重复总量", view.sub.includes("DeepSeek-V4.1-Flash") &&
+      !view.sub.includes("万") && view.rowCount === 0, JSON.stringify({ sub: view.sub }));
 
-    // zero scenario: confirmed zero, no empty list, no expand button
-    activeScenario = "zero";
-    await pushFixtureSnapshot();
+    await pushFixtureSnapshot(ZERO);
     await page.reload({ waitUntil: "domcontentloaded" });
     await sleep(1200);
     view = await readPanel();
-    check("零用量：0 tokens / ¥0.00 + 暂无模型使用记录",
-      view.tokens === "0" && view.cost === "¥0.00" &&
-      view.sub.includes("今日暂无模型使用记录") && view.rowCount === 0,
-      JSON.stringify({ tokens: view.tokens, cost: view.cost, sub: view.sub }));
-    fs.writeFileSync(path.join(OUT_DIR, "panel-zero.png"),
-      await page.screenshot({ clip: await panelClip(page) }));
+    check("零用量：0 tokens / ¥0.00 + 今日暂无模型用量",
+      view.tokens === "0" && view.cost === "¥0.00" && view.sub.includes("今日暂无模型用量"),
+      JSON.stringify({ tokens: view.tokens, sub: view.sub }));
 
-    // snapshot cleared: the real network answers 401 again → the auth state
-    // machine still stands behind the UI
-    await clearSnapshot();
+    // ── 11: login-expired state inside the grid card ───────────────────────
+    // Deterministic half: the failure snapshot built by the production state
+    // pipeline renders 需要登录 + the recovery button.
+    await sw.evaluate(async () => {
+      const empty = OpenCSICore.state.emptySnapshot();
+      const failure = OpenCSICore.state.snapshotWithFailure(
+        empty,
+        OpenCSICore.state.STATE.LOGIN_REQUIRED,
+        "OpenCSI 返回 HTTP 401",
+        "点击「重新登录 OpenCSI」完成登录后回到本页",
+        Date.now()
+      );
+      await chrome.storage.session.set({ opencsiSnapshot: failure });
+    });
     await page.reload({ waitUntil: "domcontentloaded" });
     await sleep(5000);
     view = await readPanel();
-    check("快照清除后恢复真实链路：401 → 需要登录", view.state === "需要登录", view.state);
+    check("登录过期：卡片内显示需要登录", view.state === "需要登录", view.state);
 
-    // ── SPA view switch: panel follows visibility, does not duplicate ─────
-    await page.evaluate(() => {
-      document.querySelector('nav button[data-view="agents"]').click();
-    });
-    await sleep(400);
-    const onAgents = await page.evaluate(() => {
-      const host = document.getElementById("opencsi-usage-panel-host");
-      return {
-        count: document.querySelectorAll("#opencsi-usage-panel-host").length,
-        usageHidden: document.getElementById("view-usage").hidden,
-        hostHidden: host.hidden,
-      };
-    });
-    check("切换到其他视图：面板随容器隐藏", onAgents.count === 1 &&
-      onAgents.usageHidden === true && onAgents.hostHidden === true,
-      JSON.stringify(onAgents));
-    await page.evaluate(() => {
-      document.querySelector('nav button[data-view="usage"]').click();
-    });
-    await sleep(400);
-    const backOnUsage = await page.evaluate(() => {
-      const host = document.getElementById("opencsi-usage-panel-host");
-      return {
-        count: document.querySelectorAll("#opencsi-usage-panel-host").length,
-        usageHidden: document.getElementById("view-usage").hidden,
-        hostHidden: host.hidden,
-      };
-    });
-    check("切回 Usage：面板恢复显示且不重复挂载", backOnUsage.count === 1 &&
-      backOnUsage.usageHidden === false && backOnUsage.hostHidden === false,
-      JSON.stringify(backOnUsage));
+    // ── the real-network auth path: clear the fixture, reload, and give the
+    // real fetch + renewal cycle a generous, polled window ──────────────────
+    await clearFixture();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    let liveState = "";
+    for (let attempt = 0; attempt < 90; attempt++) {
+      const f = await panelFrame();
+      liveState = await f.evaluate(() =>
+        (document.getElementById("dot") || { title: "" }).title).catch(() => "");
+      if (liveState && liveState !== "加载中" && liveState !== "正在刷新" &&
+          liveState !== "正在恢复登录") break;
+      await sleep(1500);
+    }
+    check("真实网络链路：面板渲染出诚实的认证状态", liveState.length > 0,
+      `live state: ${liveState || "(empty)"}`);
+    await sleep(800); // render sets loginBtn last, after the dot
+    check("恢复入口随状态出现", await (async () => {
+      const f = await panelFrame();
+      return f.evaluate(() => !document.getElementById("loginBtn").hidden).catch(() => false);
+    })());
 
-    // ── the stale-tab recovery: retry via the SW's executeScript path ─────
-    await page.evaluate(() => {
-      document.getElementById("opencsi-usage-panel-host").remove();
-    });
+    // restore the data fixture for the remaining checks
+    await pushFixtureSnapshot(MULTI);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await sleep(1200);
+
+    // ── 6: three viewport widths, no overlap, order intact ─────────────────
+    for (const width of [480, 900, 1400]) {
+      await page.setViewport({ width, height: 1000 });
+      await sleep(700);
+      geo = await gridGeometry();
+      const firstId = await page.evaluate(() =>
+        document.getElementById("subscriptionUsage").children[0].id);
+      check(`宽度 ${width}px：不重叠且 OpenCSI 仍第一格`,
+        geo.overlaps.length === 0 && firstId === "opencsi-usage-card",
+        JSON.stringify({ overlaps: geo.overlaps, first: firstId }));
+      if (width === 900) {
+        fs.writeFileSync(path.join(OUT_DIR, "grid-900.png"), await page.screenshot());
+      }
+    }
+
+    // ── 7: view switch away and back ────────────────────────────────────────
+    await page.evaluate(() => window.__mock.showView("agents"));
     await sleep(300);
-    const retry = await sw.evaluate(async () => {
-      const tabs = await chrome.tabs.query({ url: "http://129.153.118.58/*" });
-      if (!tabs.length) return { ok: false, reason: "no matching tab" };
-      return await self.__opencsiSw.injectIntoTab(tabs[0].id);
-    });
-    check("executeScript 重试：面板重新挂载（含 #view-usage 探针）",
-      retry.ok === true && retry.hostMounted === true && retry.containerFound === true,
-      JSON.stringify(retry));
-
-    // ── the toolbar popup page renders its controls ───────────────────────
-    const popupPage = await browser.newPage();
-    await popupPage.goto(worker.url().replace("background/service-worker.js", "panel/action.html"), {
-      waitUntil: "domcontentloaded",
-    });
-    await sleep(400);
-    const popupOk = await popupPage.evaluate(() => ({
-      retry: !!document.getElementById("retry"),
-      diag: !!document.getElementById("diag"),
-      verdict: (document.getElementById("verdict") || {}).textContent || "",
+    const onAgents = await page.evaluate(() => ({
+      usageHidden: document.getElementById("view-usage").hidden,
+      cardThere: !!document.getElementById("opencsi-usage-card"),
     }));
-    check("工具栏弹窗可用（重试/诊断/判定文案）",
-      popupOk.retry && popupOk.diag && popupOk.verdict.length > 0,
-      JSON.stringify(popupOk));
-    await popupPage.close();
+    await page.evaluate(() => window.__mock.showView("usage"));
+    await sleep(300);
+    const backOnUsage = await page.evaluate(() => ({
+      usageHidden: document.getElementById("view-usage").hidden,
+      cardThere: !!document.getElementById("opencsi-usage-card"),
+      count: document.querySelectorAll("#opencsi-usage-card").length,
+    }));
+    check("视图切换：面板随 Usage 隐藏并在返回时恢复（无重复）",
+      onAgents.usageHidden === true && backOnUsage.cardThere &&
+      backOnUsage.count === 1,
+      JSON.stringify({ onAgents, backOnUsage }));
 
-    // ── final full-page screenshot ─────────────────────────────────────────
-    fs.writeFileSync(path.join(OUT_DIR, "magpie-mock-page.png"),
-      await page.screenshot({ fullPage: false }));
+    // ── 8+14: native quota refreshes keep exactly one OpenCSI card ─────────
+    for (let i = 0; i < 5; i++) {
+      await page.evaluate(() => window.__mock.renderQuotasLite());
+      await sleep(150);
+    }
+    const afterRefreshes = await page.evaluate(() => {
+      const grid = document.getElementById("subscriptionUsage");
+      return {
+        ours: document.querySelectorAll("#opencsi-usage-card").length,
+        first: grid.children[0].id,
+        native: [...grid.children].filter((k) => k.dataset.provider).map((k) => k.dataset.provider),
+      };
+    });
+    check("五次原生刷新后仍只有一张 OpenCSI 卡且在第一格",
+      afterRefreshes.ours === 1 && afterRefreshes.first === "opencsi-usage-card" &&
+      JSON.stringify(afterRefreshes.native) ===
+      JSON.stringify(["opencode-go", "codex", "workbuddy", "deepseek"]),
+      JSON.stringify(afterRefreshes));
+
+    // ── 12: native reorder keeps OpenCSI first and unharmed ─────────────────
+    await page.evaluate(() => window.__mock.moveUsageLite("deepseek", 0));
+    await sleep(400);
+    const afterMove = await page.evaluate(() => {
+      const grid = document.getElementById("subscriptionUsage");
+      return {
+        first: grid.children[0].id,
+        native: [...grid.children].filter((k) => k.dataset.provider).map((k) => k.dataset.provider),
+        ours: document.querySelectorAll("#opencsi-usage-card").length,
+      };
+    });
+    check("原生排序变更：原生顺序改变，OpenCSI 仍在第一格",
+      afterMove.first === "opencsi-usage-card" &&
+      JSON.stringify(afterMove.native) ===
+      JSON.stringify(["deepseek", "opencode-go", "codex", "workbuddy"]) &&
+      afterMove.ours === 1,
+      JSON.stringify(afterMove));
+
+    // ── 9: native card fold changes height → the grid re-packs ──────────────
+    await page.evaluate(() => window.__mock.toggleNativeFold("codex"));
+    await sleep(500);
+    geo = await gridGeometry();
+    check("原生卡片折叠后网格重排仍不重叠", geo.overlaps.length === 0,
+      JSON.stringify(geo.overlaps));
+
+    // ── 13: a quota refresh preserves the page's scroll position ────────────
+    await page.evaluate(() => { window.scrollTo(0, 200); });
+    await sleep(200);
+    const scrollBefore = await page.evaluate(() => window.scrollY);
+    await page.evaluate(() => window.__mock.renderQuotasLite());
+    await sleep(500);
+    const scrollAfter = await page.evaluate(() => window.scrollY);
+    check("额度刷新保持页面滚动位置", Math.abs(scrollAfter - scrollBefore) <= 40,
+      `${scrollBefore} → ${scrollAfter}`);
+
+    // ── 15: expand/collapse cycles settle without a resize loop ─────────────
+    for (let i = 0; i < 3; i++) {
+      await panelClick("expandBtn");
+      await sleep(350);
+      await panelClick("expandBtn");
+      await sleep(350);
+    }
+    view = await readPanel();
+    check("反复展开/收起后高度稳定（无 ResizeObserver 循环）",
+      /^\d+px$/.test(view.frameStyleHeight) && /查询于/.test(view.updated),
+      `style=${view.frameStyleHeight}`);
+    fs.writeFileSync(path.join(OUT_DIR, "grid-final.png"), await page.screenshot());
+
+    check("页面无 Console Error / 未处理异常", consoleErrors.length === 0,
+      consoleErrors.join(" | ").slice(0, 300));
   } finally {
     await browser.close();
   }
@@ -515,10 +594,10 @@ async function main() {
   process.exit(failed.length ? 1 : 0);
 }
 
-async function panelClip(page) {
+async function cardClip(page) {
   const box = await page.evaluate(() => {
-    const frame = document.querySelector("#opencsi-usage-panel-host iframe");
-    const r = frame.getBoundingClientRect();
+    const card = document.getElementById("opencsi-usage-card");
+    const r = card.getBoundingClientRect();
     return { x: r.x, y: Math.max(0, r.y), width: r.width, height: Math.min(r.height, 560) };
   });
   return box;

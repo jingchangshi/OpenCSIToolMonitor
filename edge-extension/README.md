@@ -44,9 +44,16 @@ OpenCSI 的会话 Cookie 约 1 小时过期。过期后：
 
 ## 面板形态
 
-面板是 Magpie Usage 页顶部的一张紧凑摘要卡（顶部行 `OpenCSI · 公司用量`、
-`外部数据` 徽标与状态点；主体为今日 Tokens 与估算费用双指标；底部为查询
-时间与操作入口），宽度自动对齐 Magpie 内容区，高度由内容决定：
+OpenCSI 用量现在是 **Magpie 原生额度网格（`#subscriptionUsage`）中的第一张
+卡片**——与 OpenCode Go、Codex、WorkBuddy 等原生额度卡并排，由 Magpie 自己
+的 `packUsage` 瀑布流布局排版（调查依据见 `docs/magpie-quota-grid.md`，
+上游 commit `b97e0aa2`）。卡片参与网格但不进入 UsageOrder 拖拽排序与持久
+化；Magpie 额度数据刷新（`renderQuotas` 清空重建容器）后自动重新插回首格。
+
+卡片内部：标题行 `OpenCSI` + `公司模型服务` + 状态点；今日 Tokens 与估算费
+用双指标垂直排列；模型区按当日模型数呈现（默认 Top 2 + 「查看全部」）；底
+部为查询时间与刷新/诊断小图标。高度由内容决定，变化时通过高度消息通知宿
+主页，由 Magpie 自身的 ResizeObserver 触发网格重排：
 
 - 单模型：仅显示模型名与「当前唯一使用模型」，不重复总量数字；
 - 2–3 个模型：紧凑排行（按 Token 降序）；

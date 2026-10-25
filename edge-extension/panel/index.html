@@ -3,18 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>公司 OpenCSI 用量</title>
+<title>OpenCSI</title>
 <link rel="stylesheet" href="panel.css">
 </head>
 <body>
+<script>
+  // temporary debug trap (removed before delivery)
+  window.onerror = function (m, s, l) {
+    document.title = "ERR:" + String(m).slice(0, 80) + "@" + String(s || "").split("/").pop() + ":" + l;
+  };
+</script>
 <main id="panel" class="panel" aria-live="polite">
   <header class="head">
-    <span class="title">OpenCSI · 公司用量</span>
-    <span class="badge">外部数据</span>
+    <span class="title">OpenCSI</span>
+    <span class="src">公司模型服务</span>
     <span class="spacer"></span>
     <span class="dot" id="dot"></span>
-    <span class="state" id="state">加载中</span>
-    <button id="diagLink" class="subtle" type="button" title="打开诊断报告">诊断</button>
   </header>
   <div class="reason hidden" id="reason"></div>
 
@@ -23,23 +27,23 @@
       <span class="label">今日 Tokens</span>
       <span class="big" id="todayTokens">--</span>
     </div>
-    <div class="metric right">
+    <div class="metric">
       <span class="label">今日估算费用</span>
       <span class="big" id="todayCost">--</span>
     </div>
   </section>
 
   <div class="sub hidden" id="subLine"></div>
-  <div class="sub detail hidden" id="freshLine"></div>
   <div class="model-rows hidden" id="modelRows"></div>
+  <button id="expandBtn" class="viewall hidden" type="button">查看全部</button>
 
   <footer class="foot">
-    <span class="muted" id="updated">最近更新：--:--</span>
+    <span class="muted" id="updated">…</span>
     <span class="spacer"></span>
-    <button id="refreshBtn" class="link" type="button">刷新</button>
-    <button id="expandBtn" class="link" type="button" hidden>详情</button>
-    <button id="loginBtn" class="action" type="button" hidden>重新登录 OpenCSI</button>
+    <button id="refreshBtn" class="iconlink" type="button" title="立即刷新">⟳</button>
+    <button id="diagLink" class="iconlink" type="button" title="诊断报告">ⓘ</button>
   </footer>
+  <button id="loginBtn" class="action" type="button" hidden>重新登录 OpenCSI</button>
 </main>
 <script src="../core/models.js"></script>
 <script src="../core/aggregation.js"></script>
